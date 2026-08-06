@@ -1,0 +1,11 @@
+grant select on sensor_readings to authenticated;
+grant select on work_events to authenticated;
+grant select on harvest_lots to authenticated;
+grant select on blocks to authenticated;
+grant select on vintages to authenticated;
+grant select on metric_registry to authenticated;
+grant select on daily_weather to authenticated;
+grant select on daily_derived to authenticated;
+grant select on labour_summary to authenticated;
+grant select on anomalies to authenticated;
+grant select on anomalies_asof to authenticated;

@@ -1601,11 +1601,30 @@ const RULES = [
        d:`No fruit in the building. ${c.primary} harvest is projected to start around ${dstr(fs.start)}; the cellar is holding ${c.primary-1} lots in barrel.`,
        m:'Note · cellar sensors remain live'};}}
 ];
-function renderAnomalies(box, ctx, tab){
-  const c={...ctx, end:endOf(ctx.primary,ctx.align)};
-  const hits=RULES.filter(r=>r.tab===tab).map(r=>{
-    let out=null; try{out=r.test(c);}catch(e){}
-    return {sev:r.sev, out};}).filter(x=>x.out);
+async function renderAnomalies(box, ctx, tab){
+  let hits;
+  if(tab==='vineyard'){
+    const v=ctx.primary;
+    const { data, error } = await sb.rpc('anomalies_eval', {
+      p_vintage: v,
+      p_as_of: endOfReal(v).toISOString()
+    });
+    if(error) throw error;
+    hits = data.map(row => ({
+      sev: row.severity,
+      out: {
+        t: row.title,
+        d: (row.block_id ? B(row.block_id).label+' · ' : row.tank_id ? row.tank_id+' · ' : '')
+           + row.metric_key + ' ' + fmt(row.observed_value,2),
+        m: row.message
+      }
+    }));
+  } else {
+    const c={...ctx, end:endOf(ctx.primary,ctx.align)};
+    hits=RULES.filter(r=>r.tab===tab).map(r=>{
+      let out=null; try{out=r.test(c);}catch(e){}
+      return {sev:r.sev, out};}).filter(x=>x.out);
+  }
   const wrap=el('div','anom');
   if(!hits.length) wrap.innerHTML=`<div class="anom-clear">✓ &nbsp;All monitored parameters within range</div>`;
   else{

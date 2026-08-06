@@ -463,7 +463,7 @@ function intervalToMs(interval) {
   return map[interval] || 3600000;
 }
 
-async function getSeries({ metric, scope, vintage, range, end }) {
+async function getSeries({ metric, scope, vintage, range, end, agg }) {
   const bucket = RANGE_BUCKETS[range];
   const endDate = end || MOCK_NOW;
   const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
@@ -474,7 +474,8 @@ async function getSeries({ metric, scope, vintage, range, end }) {
     p_vintage: vintage || null,
     p_start: startDate.toISOString(),
     p_end: endDate.toISOString(),
-    p_bucket: bucket.interval
+    p_bucket: bucket.interval,
+    p_agg: agg || 'avg'
   });
 
   if (error) {
@@ -743,7 +744,7 @@ function buildSeries(getter, v, range, opts={}){
    simulating. metric/scope match your METRICS keys and block IDs. */
 async function buildSeriesReal(metric, scope, v, range, opts={}){
   const r = RANGES[range];
-  const result = await getSeries({ metric, scope, vintage: v, range });
+  const result = await getSeries({ metric, scope, vintage: v, range, agg: opts.agg });
   const pts = result.points.map(p => {
     const d = new Date(p.t);
     return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d) };
@@ -758,6 +759,16 @@ async function meanSeriesReal(metric, ids, v, range, opts={}){
   return perBlock[0].map((p,i) => {
     const vals = perBlock.map(s=>s[i].v).filter(x=>x!=null);
     return {t:p.t, v: vals.length ? +(vals.reduce((s,x)=>s+x,0)/vals.length).toFixed(3) : null, lbl:p.lbl};
+  });
+}
+/* Real, async — fetches a per-block metric for each id in `ids` and sums
+   (not averages) the v values at each matching timestamp. Used for totals
+   across selected blocks, e.g. irrigation volume applied. */
+async function sumSeriesReal(metric, ids, v, range, opts={}){
+  const perBlock = await Promise.all(ids.map(id => buildSeriesReal(metric, id, v, range, opts)));
+  return perBlock[0].map((p,i) => {
+    const vals = perBlock.map(s=>s[i].v).filter(x=>x!=null);
+    return {t:p.t, v: vals.length ? +(vals.reduce((s,x)=>s+x,0)).toFixed(3) : null, lbl:p.lbl};
   });
 }
 
@@ -1043,30 +1054,35 @@ const PANELS = [
 
 {id:'precip', tab:'vineyard', sect:'soil', span:'s4', title:'Precipitation', unit:'inches',
  sub:'Tipping-bucket gauge · total per interval', range:'1Y',
- render:(b,c)=>{
+ render: async (b,c) => {
    if(c.compare){
-     const gs=RANGES[c.range]; const a=c.vintages[0], z=c.vintages[1];
-     const sa=buildSeries((d,v)=>rainDay(d,v), a, c.range, {agg:'sum',align:true});
-     const sz=buildSeries((d,v)=>rainDay(d,v), z, c.range, {agg:'sum',align:true});
+     const a=c.vintages[0], z=c.vintages[1];
+     const sa=await buildSeriesReal('precipitation','estate',a,c.range,{agg:'sum'});
+     const sz=await buildSeriesReal('precipitation','estate',z,c.range,{agg:'sum'});
      const groups=sa.map((p,i)=>({lbl:p.lbl, v:[p.v||0, sz[i].v||0]}));
      legendFor(b.parentElement,[{name:String(a),color:VCOLOR[a]},{name:String(z),color:VCOLOR[z]}]);
      groupedBars(b,groups,[String(a),String(z)],[VCOLOR[a],VCOLOR[z]],{unit:'in',dec:2,h:172});
-   } else barChart(b, buildSeries((d,v)=>rainDay(d,v), c.primary, c.range, {agg:'sum',align:c.align}),
-     {unit:'in',dec:2,color:'#7FA3D4',name:'Rain',h:172});}},
+   } else {
+     const sets = await buildSeriesReal('precipitation','estate',c.primary,c.range,{agg:'sum'});
+     barChart(b, sets, {unit:'in',dec:2,color:'#7FA3D4',name:'Rain',h:172});
+   }
+ }},
 
 {id:'irrig', tab:'vineyard', sect:'soil', span:'s8', title:'Irrigation volume applied', unit:'gallons',
  sub:'Flow meters · total across selected blocks', range:'30D',
- render:(b,c)=>{
-   const g=(ids)=>(d,v)=>ids.reduce((s,i)=>s+irrigDay(i,d,v),0);
+ render: async (b,c) => {
    if(c.compare){
      const a=c.vintages[0], z=c.vintages[1];
-     const sa=buildSeries(g(c.blocks), a, c.range, {agg:'sum',align:true});
-     const sz=buildSeries(g(c.blocks), z, c.range, {agg:'sum',align:true});
+     const sa=await sumSeriesReal('irrigation_volume', c.blocks, a, c.range, {agg:'sum'});
+     const sz=await sumSeriesReal('irrigation_volume', c.blocks, z, c.range, {agg:'sum'});
      legendFor(b.parentElement,[{name:String(a),color:VCOLOR[a]},{name:String(z),color:VCOLOR[z]}]);
      groupedBars(b, sa.map((p,i)=>({lbl:p.lbl,v:[p.v||0,sz[i].v||0]})),[String(a),String(z)],
        [VCOLOR[a],VCOLOR[z]],{unit:'gal',dec:0,h:190});
-   } else barChart(b, buildSeries(g(c.blocks), c.primary, c.range, {agg:'sum',align:c.align}),
-     {unit:'gal',dec:0,color:'#7FA3D4',name:'Applied',h:190});}},
+   } else {
+     const sets = await sumSeriesReal('irrigation_volume', c.blocks, c.primary, c.range, {agg:'sum'});
+     barChart(b, sets, {unit:'gal',dec:0,color:'#7FA3D4',name:'Applied',h:190});
+   }
+ }},
 
 {id:'irrigblk', tab:'vineyard', sect:'soil', span:'s4', title:'Irrigation by block', unit:'gallons · gal/acre · inches',
  sub:'Season to date',
@@ -1122,19 +1138,21 @@ const PANELS = [
 /* ══ WINERY · CELLAR ══ */
 {id:'cellart', tab:'winery', sect:'cellar', span:'s6', title:'Cellar temperature', unit:'°F',
  sub:'Barrel room · live sensor · target 55–58 °F', range:'5D',
- render:(b,c)=>{
+ render: async (b,c) => {
    const sets=[{name:'Cellar',color:METRICS.cellar.color,
-     pts:buildSeries((d)=>sample('cellar','cellar',d,CURRENT), CURRENT, c.range, {})}];
+     pts: await buildSeriesReal('cellar_temp','cellar',CURRENT,c.range)}];
    legendFor(b.parentElement,[...sets,{name:'Target 55–58 °F',color:'#6E9B72',band:true}]);
-   lineChart(b,sets,{unit:'°F',dec:1,h:186,band:[55,58],bandColor:'#6E9B72',bandLabel:'Target'});}},
+   lineChart(b,sets,{unit:'°F',dec:1,h:186,band:[55,58],bandColor:'#6E9B72',bandLabel:'Target'});
+ }},
 
 {id:'cellarh', tab:'winery', sect:'cellar', span:'s6', title:'Cellar humidity', unit:'%',
  sub:'Barrel room · live sensor · target 68–78 %', range:'30D',
- render:(b,c)=>{
+ render: async (b,c) => {
    const sets=[{name:'Cellar RH',color:METRICS.cellarRH.color,
-     pts:buildSeries((d)=>sample('cellarRH','cellar',d,CURRENT), CURRENT, c.range, {})}];
+     pts: await buildSeriesReal('cellar_rh','cellar',CURRENT,c.range)}];
    legendFor(b.parentElement,[...sets,{name:'Target 68–78 %',color:'#6E9B72',band:true}]);
-   lineChart(b,sets,{unit:'%',dec:0,h:186,band:[68,78],bandColor:'#6E9B72',bandLabel:'Target'});}},
+   lineChart(b,sets,{unit:'%',dec:0,h:186,band:[68,78],bandColor:'#6E9B72',bandLabel:'Target'});
+ }},
 
 /* ══ WINERY · FERMENTATION ══ */
 {id:'ferm', tab:'winery', sect:'ferm', span:'s8', title:'Fermentation temperature', unit:'°F',

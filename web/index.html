@@ -805,6 +805,17 @@ async function sumSeriesReal(metric, ids, v, range, opts={}){
   });
 }
 
+async function getLatestValue({ metric, scope, vintage }){
+  const result = await getSeries({ metric, scope, vintage, range: '1D' });
+  const pts = result.points.filter(p => p.v != null);
+  return pts.length ? +pts[pts.length - 1].v : null;
+}
+async function getLatestDerivedValue({ field, vintage }){
+  const result = await getDerivedSeries({ field, vintage, range: '5D' });
+  const pts = result.points.filter(p => p.v != null);
+  return pts.length ? +pts[pts.length - 1].v : null;
+}
+
 /* §3 ── STATE ──────────────────────────────────────── */
 const state = {
   tab:'vineyard',
@@ -1684,47 +1695,77 @@ function renderFilters(tab){
 }
 
 /* Overview */
-function overviewStats(tab, c){
-  const v=c.primary, d=endOf(v,c.align), ids=c.blocks;
+async function overviewStats(tab, c){
+  if(tab!=='vineyard') return null;
+  const v=c.primary, ids=c.blocks;
   const other = c.compare ? c.vintages.find(x=>x!==v) : null;
-  const delta = (now, fn) => {
-    if(other==null) return null;
-    const then=fn(endOf(other,true), other);
-    const dd=now-then;
+
+  async function vineyardSnapshot(vv){
+    const [t, soilByBlock, g, vp, dt, rh, et] = await Promise.all([
+      getLatestValue({metric:'air_temp', scope:'estate', vintage:vv}),
+      Promise.all(ids.map(async id => ({id, v: await getLatestValue({metric:'soil_moisture', scope:id, vintage:vv})}))),
+      getLatestDerivedValue({field:'gdd_cumulative', vintage:vv}),
+      getLatestDerivedValue({field:'vpd_kpa', vintage:vv}),
+      getLatestDerivedValue({field:'dtr_f', vintage:vv}),
+      getLatestValue({metric:'humidity', scope:'estate', vintage:vv}),
+      getLatestDerivedValue({field:'et0_in', vintage:vv})
+    ]);
+    const valid = soilByBlock.filter(b=>b.v!=null);
+    const sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
+    const dry = valid.length ? [...valid].sort((a,b)=>a.v-b.v)[0] : null;
+    return {t, sm, dry, g, vp, dt, rh, et};
+  }
+
+  const [cur, prev] = await Promise.all([
+    vineyardSnapshot(v),
+    other!=null ? vineyardSnapshot(other) : Promise.resolve(null)
+  ]);
+
+  const delta = (now, key) => {
+    if(prev==null || now==null || prev[key]==null) return null;
+    const dd=now-prev[key];
     return {txt:`vs ${other}: ${dd>=0?'+':''}${fmt(dd, Math.abs(dd)<10?1:0)}`, up:dd>=0};
   };
-  if(tab==='vineyard'){
-    const t=sample('airTemp','estate',d,v);
-    const sm=ids.reduce((s,i)=>s+sample('soilMoist',i,d,v),0)/ids.length;
-    const dry=ids.map(i=>({i,v:sample('soilMoist',i,d,v)})).sort((a,b)=>a.v-b.v)[0];
-    const g=gddTo(d,v), vp=vpdAt('estate',d,v), dt=dtrAt('estate',d,v);
-    const rh=sample('humidity','estate',d,v), et=et0At('estate',d,v);
-    const dT=delta(t,(dd,vv)=>sample('airTemp','estate',dd,vv));
-    const dG=delta(g,(dd,vv)=>gddTo(dd,vv));
-    const dS=delta(sm,(dd,vv)=>ids.reduce((s,i)=>s+sample('soilMoist',i,dd,vv),0)/ids.length);
-    return [
-      {l:'Air temperature', v:fmt(t,1), u:'°F', d:dT?dT.txt:(t>92?'above seasonal norm':'seasonal norm 87 °F'), c:dT?(dT.up?'wr':'up'):(t>92?'dn':'')},
-      {l:'Soil moisture, avg', v:fmt(sm,1), u:'% VWC', d:dS?dS.txt:'driest '+B(dry.i).label+' · '+fmt(dry.v,1)+'%', c:sm<15?'dn':''},
-      {l:'GDD to date', v:fmt(g,0), u:'', d:dG?dG.txt:'base 50 °F from 1 Apr', c:dG?(dG.up?'wr':'up'):''},
-      {l:'VPD', v:fmt(vp,2), u:'kPa', d:vp>3.1?'high vine stress':'within range', c:vp>3.1?'wr':'up'},
-      {l:'Diurnal range', v:fmt(dt,1), u:'°F', d:dt>=21?'good acid retention':'compressed', c:dt>=21?'up':'wr'},
-      {l:'Relative humidity', v:fmt(rh,0), u:'%', d:rh>85?'mildew pressure':'normal', c:rh>85?'wr':''},
-      {l:'ET₀ today', v:fmt(et,3), u:'in', d:'irrigation demand'}
-    ];
-  }
-  return null;
+
+  const {t, sm, dry, g, vp, dt, rh, et} = cur;
+  const dT=delta(t,'t'), dG=delta(g,'g'), dS=delta(sm,'sm');
+  return [
+    {l:'Air temperature', v:fmt(t,1), u:'°F',
+      d: dT ? dT.txt : (t==null ? '—' : (t>92?'above seasonal norm':'seasonal norm 87 °F')),
+      c: dT ? (dT.up?'wr':'up') : (t==null ? '' : (t>92?'dn':''))},
+    {l:'Soil moisture, avg', v:fmt(sm,1), u:'% VWC',
+      d: dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—'),
+      c: sm==null ? '' : (sm<15?'dn':'')},
+    {l:'GDD to date', v:fmt(g,0), u:'',
+      d: dG ? dG.txt : 'base 50 °F from 1 Apr',
+      c: dG ? (dG.up?'wr':'up') : ''},
+    {l:'VPD', v:fmt(vp,2), u:'kPa',
+      d: vp==null ? '—' : (vp>3.1?'high vine stress':'within range'),
+      c: vp==null ? '' : (vp>3.1?'wr':'up')},
+    {l:'Diurnal range', v:fmt(dt,1), u:'°F',
+      d: dt==null ? '—' : (dt>=21?'good acid retention':'compressed'),
+      c: dt==null ? '' : (dt>=21?'up':'wr')},
+    {l:'Relative humidity', v:fmt(rh,0), u:'%',
+      d: rh==null ? '—' : (rh>85?'mildew pressure':'normal'),
+      c: rh==null ? '' : (rh>85?'wr':'')},
+    {l:'ET₀ today', v:fmt(et,3), u:'in', d:'irrigation demand'}
+  ];
 }
-function paintOverviewV(tab, c, animate){
+async function paintOverviewV(tab, c, animate){
   const g=$('#ovg-'+tab); if(!g) return;
-  g.innerHTML=overviewStats(tab,c).map(s=>`<div class="stat">
+  const stats = await overviewStats(tab,c);
+  if(!stats) return;
+  g.innerHTML=stats.map(s=>`<div class="stat">
       <div class="stat-l">${s.l}</div>
       <div class="stat-v ${animate?'tick':''}">${s.v}${s.u?`<span class="u">${s.u}</span>`:''}</div>
       <div class="stat-d ${s.c||''}">${s.d}</div></div>`).join('');
 }
-function paintOverviewW(animate){
+async function paintOverviewW(animate){
   const g=$('#ovg-winery'); if(!g) return;
-  const d=new Date(NOW);
-  const t=sample('cellar','cellar',d,CURRENT), rh=sample('cellarRH','cellar',d,CURRENT);
+  const [t, rh] = await Promise.all([
+    getLatestValue({metric:'cellar_temp', scope:'cellar', vintage:CURRENT}),
+    getLatestValue({metric:'cellar_rh', scope:'cellar', vintage:CURRENT})
+  ]);
   const meter=(val,lo,hi,dlo,dhi)=>{
     const pct=x=>Math.max(0,Math.min(100,(x-dlo)/(dhi-dlo)*100));
     return `<div class="meter"><div class="meter-bar">
@@ -1732,15 +1773,15 @@ function paintOverviewW(animate){
       <div class="meter-pin" style="left:calc(${pct(val)}% - 1px)"></div></div>
       <div class="meter-lbl"><span>${dlo}</span><span style="color:var(--ok)">target ${lo}–${hi}</span><span>${dhi}</span></div></div>`;
   };
-  const okT=t>=55&&t<=58, okH=rh>=68&&rh<=78;
+  const okT=t!=null&&t>=55&&t<=58, okH=rh!=null&&rh>=68&&rh<=78;
   g.innerHTML=`
     <div class="stat"><div class="stat-l">Cellar temperature</div>
       <div class="stat-v ${animate?'tick':''}">${fmt(t,1)}<span class="u">°F</span></div>
-      <div class="stat-d ${okT?'up':'wr'}">${okT?'within target':'outside target band'}</div>
+      <div class="stat-d ${okT?'up':'wr'}">${t==null?'no data':(okT?'within target':'outside target band')}</div>
       ${meter(t,55,58,52,62)}</div>
     <div class="stat"><div class="stat-l">Cellar humidity</div>
       <div class="stat-v ${animate?'tick':''}">${fmt(rh,0)}<span class="u">%</span></div>
-      <div class="stat-d ${okH?'up':'wr'}">${okH?'within target':'outside target band'}</div>
+      <div class="stat-d ${okH?'up':'wr'}">${rh==null?'no data':(okH?'within target':'outside target band')}</div>
       ${meter(rh,68,78,60,88)}</div>`;
 }
 

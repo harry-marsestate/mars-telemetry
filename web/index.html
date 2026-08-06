@@ -444,6 +444,13 @@ const SUPABASE_URL = 'https://wwdpunaefaiazsjamrkc.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind3ZHB1bmFlZmFpYXpzamFtcmtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4NzE5OTAsImV4cCI6MjEwMTQ0Nzk5MH0.GFmpd3LP_zeV6BVlEV8SdIde3LJYJRFuL-8TwAAPZOg';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// Fixed anchor for the seeded mock data — same July 28 2026 14:20 value as
+// NOW (§1), but NOW ticks forward live for the UI demo clock so it can't be
+// reused here without range queries drifting past the seeded data's end.
+// TODO: remove MOCK_NOW override once real Phase 7 ingestion exists —
+// revert getSeries's default end back to real `new Date()`
+const MOCK_NOW = new Date('2026-07-28T14:20:00-07:00');
+
 const RANGE_BUCKETS = {
   '1D':  { n: 24, interval: '1 hour' },
   '5D':  { n: 40, interval: '3 hours' },
@@ -458,7 +465,7 @@ function intervalToMs(interval) {
 
 async function getSeries({ metric, scope, vintage, range, end }) {
   const bucket = RANGE_BUCKETS[range];
-  const endDate = end || new Date();
+  const endDate = end || MOCK_NOW;
   const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
 
   const { data, error } = await sb.rpc('series_bucketed', {
@@ -743,8 +750,16 @@ async function buildSeriesReal(metric, scope, v, range, opts={}){
   });
   return pts;
 }
-/* estate-level getter for a per-block metric = mean of the selected blocks */
-const meanG = (key, ids) => (d,v) => ids.reduce((s,i)=>s+sample(key,i,d,v),0)/ids.length;
+/* Real, async — fetches a per-block metric for each id in `ids` and averages
+   the v values at each matching timestamp (bucket boundaries line up because
+   every call shares the same metric/vintage/range). */
+async function meanSeriesReal(metric, ids, v, range, opts={}){
+  const perBlock = await Promise.all(ids.map(id => buildSeriesReal(metric, id, v, range, opts)));
+  return perBlock[0].map((p,i) => {
+    const vals = perBlock.map(s=>s[i].v).filter(x=>x!=null);
+    return {t:p.t, v: vals.length ? +(vals.reduce((s,x)=>s+x,0)/vals.length).toFixed(3) : null, lbl:p.lbl};
+  });
+}
 
 /* §3 ── STATE ──────────────────────────────────────── */
 const state = {
@@ -954,26 +969,32 @@ const PANELS = [
 /* ══ VINEYARD · CLIMATE ══ */
 {id:'airtemp', tab:'vineyard', sect:'climate', span:'s6', title:'Air temperature', unit:'°F',
  sub:'Estate weather station', range:'5D',
- render:(b,c)=>lineChart(b, vSets(c,(d,v)=>sample('airTemp','estate',d,v),METRICS.airTemp.color,'Air temp'),
-   {unit:'°F',dec:1,h:186,aria:'Air temperature over time'})},
+ render: async (b,c) => {
+   const sets = await vSets(c, {metric:'air_temp', scope:'estate'}, METRICS.airTemp.color, 'Air temp');
+   lineChart(b, sets, {unit:'°F',dec:1,h:186,aria:'Air temperature over time'});
+ }},
 
 {id:'gdd', tab:'vineyard', sect:'climate', span:'s6', title:'Growing degree days', unit:'GDD · base 50 °F',
  sub:'Cumulative from 1 April · band shows normal picking range', range:'30D',
- render:(b,c)=>{
-   const sets=vSets(c,(d,v)=>gddTo(d,v),'#C6A961','GDD',{agg:'last'});
+ render: async (b,c) => {
+   const sets=await vSets(c,(d,v)=>gddTo(d,v),'#C6A961','GDD',{agg:'last'});
    legendFor(b.parentElement,[...sets,{name:`Harvest window ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD`,color:'#6E9B72',band:true}]);
    lineChart(b,sets,{unit:'GDD',dec:0,h:186,domain:[0,3700],
      band:HARVEST_BAND, bandColor:'#6E9B72', bandLabel:'Harvest window'});}},
 
 {id:'dtr', tab:'vineyard', sect:'climate', span:'s4', title:'Diurnal range', unit:'°F',
  sub:'Daily max − min · derived', range:'30D',
- render:(b,c)=>lineChart(b, vSets(c,(d,v)=>dtrAt('estate',d,v),'#BE9C6A','Range'),
-   {unit:'°F',dec:1,h:172})},
+ render: async (b,c) => {
+   const sets = await vSets(c,(d,v)=>dtrAt('estate',d,v),'#BE9C6A','Range');
+   lineChart(b, sets, {unit:'°F',dec:1,h:172});
+ }},
 
 {id:'rh', tab:'vineyard', sect:'climate', span:'s4', title:'Relative humidity', unit:'%',
  sub:'Estate weather station', range:'1D',
- render:(b,c)=>lineChart(b, vSets(c,(d,v)=>sample('humidity','estate',d,v),METRICS.humidity.color,'RH'),
-   {unit:'%',dec:0,h:172})},
+ render: async (b,c) => {
+   const sets = await vSets(c, {metric:'humidity', scope:'estate'}, METRICS.humidity.color, 'RH');
+   lineChart(b, sets, {unit:'%',dec:0,h:172});
+ }},
 
 {id:'wind', tab:'vineyard', sect:'climate', span:'s4', title:'Wind speed & direction', unit:'mph · degrees',
  sub:'Estate weather station · current reading',
@@ -986,35 +1007,39 @@ const PANELS = [
 /* ══ VINEYARD · SOIL & WATER ══ */
 {id:'soilmoist', tab:'vineyard', sect:'soil', span:'s8', title:'Soil moisture', unit:'% VWC',
  sub:'Probes at 18 in · band shows target range for deficit irrigation', range:'30D', perBlock:'soilMoist',
- render:(b,c)=>{
+ render: async (b,c) => {
    const sets = c.compare
-     ? vSets(c,meanG('soilMoist',c.blocks),null,'mean of selection')
-     : c.blocks.map(id=>({name:B(id).label,color:B(id).color,
-         pts:buildSeries((d,v)=>sample('soilMoist',id,d,v), c.primary, c.range, {align:c.align})}));
+     ? await vSets(c, {metric:'soil_moisture', blocks:c.blocks}, null, 'mean of selection')
+     : await Promise.all(c.blocks.map(async id=>({name:B(id).label,color:B(id).color,
+         pts: await buildSeriesReal('soil_moisture', id, c.primary, c.range)})));
    legendFor(b.parentElement,[...sets,{name:'Target 15–25 % VWC',color:'#6E9B72',band:true}]);
-   lineChart(b,sets,{unit:'% VWC',dec:1,h:196,band:[15,25],bandColor:'#6E9B72',bandLabel:'Target band'});}},
+   lineChart(b,sets,{unit:'% VWC',dec:1,h:196,band:[15,25],bandColor:'#6E9B72',bandLabel:'Target band'});
+ }},
 
 {id:'soiltemp', tab:'vineyard', sect:'soil', span:'s4', title:'Soil temperature', unit:'°F',
  sub:'Probes at 18 in', range:'5D', perBlock:'soilTemp',
- render:(b,c)=>{
+ render: async (b,c) => {
    const sets = c.compare
-     ? vSets(c,meanG('soilTemp',c.blocks),null,'mean of selection')
-     : c.blocks.map(id=>({name:B(id).label,color:B(id).color,
-         pts:buildSeries((d,v)=>sample('soilTemp',id,d,v), c.primary, c.range, {align:c.align})}));
+     ? await vSets(c, {metric:'soil_temp', blocks:c.blocks}, null, 'mean of selection')
+     : await Promise.all(c.blocks.map(async id=>({name:B(id).label,color:B(id).color,
+         pts: await buildSeriesReal('soil_temp', id, c.primary, c.range)})));
    legendFor(b.parentElement,sets);
-   lineChart(b,sets,{unit:'°F',dec:1,h:196});}},
+   lineChart(b,sets,{unit:'°F',dec:1,h:196});
+ }},
 
 {id:'vpd', tab:'vineyard', sect:'soil', span:'s4', title:'Vapour pressure deficit', unit:'kPa',
  sub:'Derived from temp + RH · vine stress proxy', range:'5D',
- render:(b,c)=>{
-   const sets=vSets(c,(d,v)=>vpdAt('estate',d,v),'#C9603F','VPD');
+ render: async (b,c) => {
+   const sets=await vSets(c,(d,v)=>vpdAt('estate',d,v),'#C9603F','VPD');
    legendFor(b.parentElement,[...sets,{name:'Productive band 0.4–3.1 kPa',color:'#6E9B72',band:true}]);
    lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[0.4,3.1],bandColor:'#6E9B72'});}},
 
 {id:'et0', tab:'vineyard', sect:'soil', span:'s4', title:'Reference ET (ET₀)', unit:'in / day',
  sub:'Derived · irrigation demand', range:'30D',
- render:(b,c)=>lineChart(b, vSets(c,(d,v)=>et0At('estate',d,v),'#7FA3D4','ET₀'),
-   {unit:'in/day',dec:3,h:172})},
+ render: async (b,c) => {
+   const sets = await vSets(c,(d,v)=>et0At('estate',d,v),'#7FA3D4','ET₀');
+   lineChart(b, sets, {unit:'in/day',dec:3,h:172});
+ }},
 
 {id:'precip', tab:'vineyard', sect:'soil', span:'s4', title:'Precipitation', unit:'inches',
  sub:'Tipping-bucket gauge · total per interval', range:'1Y',
@@ -1128,8 +1153,11 @@ const PANELS = [
 
 /* Build the series list for an estate-level metric, honouring compare mode */
 async function vSets(c, getterOrMetric, color, name, opts={}){
-  const isReal = typeof getterOrMetric === 'object' && getterOrMetric.metric;
-  const fetchOne = async (v) => isReal
+  const isReal     = typeof getterOrMetric === 'object' && getterOrMetric.metric && getterOrMetric.scope;
+  const isRealMean = typeof getterOrMetric === 'object' && getterOrMetric.metric && getterOrMetric.blocks;
+  const fetchOne = async (v) => isRealMean
+    ? meanSeriesReal(getterOrMetric.metric, getterOrMetric.blocks, v, c.range, opts)
+    : isReal
     ? buildSeriesReal(getterOrMetric.metric, getterOrMetric.scope, v, c.range, opts)
     : buildSeries(getterOrMetric, v, c.range, opts);
 
@@ -1676,6 +1704,7 @@ function makePanel(p, c){
     try{ await p.render(body,{...c, range:state.range[p.id]||'5D'}); }
     catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); }
   }};
+}
 
 function renderTab(tab){
   const c=ctxFor(tab);

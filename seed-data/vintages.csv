@@ -1,0 +1,6 @@
+vintage,is_current,temp_offset_f,water_offset,harvest_shift_days,character
+2022,False,3.1,-0.3,-8,"hot, compressed harvest"
+2023,False,-2.4,0.42,10,"cool, long hang time"
+2024,False,0.3,0.06,0,"textbook, even ripening"
+2025,False,1.6,-0.12,-4,"warm, early veraison"
+2026,True,1.9,-0.22,-5,"warm, dry - in progress"

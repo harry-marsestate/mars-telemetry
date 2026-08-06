@@ -1,0 +1,15 @@
+metric_key,label,unit,decimals,source_system,scope_level,min_role
+air_temp,Air temperature,F,1,weather_station,estate,all
+humidity,Relative humidity,%,0,weather_station,estate,all
+precipitation,Precipitation,in,2,weather_station,estate,all
+wind_speed,Wind speed,mph,1,weather_station,estate,all
+wind_dir,Wind direction,deg,0,weather_station,estate,all
+solar,Solar insolation,W/m2,0,weather_station,estate,all
+uv,UV index,index,1,weather_station,estate,all
+soil_moisture,Soil moisture,% VWC,1,soil_probe,block,all
+soil_temp,Soil temperature,F,1,soil_probe,block,all
+irrigation_volume,Irrigation volume,gal,0,flow_meter,block,operator
+cellar_temp,Cellar temperature,F,1,hvac,cellar,operator
+cellar_rh,Cellar humidity,%,0,hvac,cellar,operator
+ferment_temp,Fermentation temperature,F,1,tank_probe,tank,operator
+ferment_brix,Fermentation Brix,Bx,1,tank_probe,tank,operator

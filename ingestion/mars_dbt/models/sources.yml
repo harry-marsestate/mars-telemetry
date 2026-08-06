@@ -1,0 +1,12 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: public
+    tables:
+      - name: sensor_readings
+      - name: work_events
+      - name: blocks
+      - name: vintages
+      - name: anomaly_thresholds
+      - name: metric_registry

@@ -7,3 +7,4 @@ target/
 dbt_packages/
 logs/
 supabase/.temp/
+.DS_Store

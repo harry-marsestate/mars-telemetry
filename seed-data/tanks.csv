@@ -1,0 +1,7 @@
+tank_id,block_id,variety_key,variety_name,volume_l
+T-01,B1,cs,Cabernet Sauvignon,3200
+T-02,B1,cs,Cabernet Sauvignon,2400
+T-03,B2,cs,Cabernet Sauvignon,3400
+T-04,B3,cs,Cabernet Sauvignon,2100
+T-05,B1,pv,Petit Verdot,620
+T-06,B1,cf,Cabernet Franc,480

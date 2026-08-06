@@ -1,0 +1,4 @@
+block_id,label,designation,acres,row_count,planted,aspect,elev_ft,color
+B1,Block 1,MRS-1A - MRS-1D,3.7,60,2009-2014,SW,1735,#A98BC9
+B2,Block 2,MRS-2,2.2,29,2006,SW,1665,#BE9C6A
+B3,Block 3,MRS-3,1.4,21,2006,W,1620,#7FA3D4

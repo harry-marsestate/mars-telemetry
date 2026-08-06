@@ -1,0 +1,25 @@
+lot_id,vintage,tank_id,block_id,variety_key,variety_name,pick_date,tons,brix,ph,volume_l,source_system
+2022-T-01,2022,T-01,B1,cs,Cabernet Sauvignon,2022-09-24,5.05,25.3,3.71,3200,innovint
+2022-T-02,2022,T-02,B1,cs,Cabernet Sauvignon,2022-09-28,3.78,25.2,3.61,2400,innovint
+2022-T-03,2022,T-03,B2,cs,Cabernet Sauvignon,2022-09-21,5.36,27.1,3.69,3400,innovint
+2022-T-04,2022,T-04,B3,cs,Cabernet Sauvignon,2022-09-12,3.31,25.3,3.77,2100,innovint
+2022-T-05,2022,T-05,B1,pv,Petit Verdot,2022-09-16,0.98,24.9,3.59,620,innovint
+2022-T-06,2022,T-06,B1,cf,Cabernet Franc,2022-09-19,0.76,25.0,3.66,480,innovint
+2023-T-01,2023,T-01,B1,cs,Cabernet Sauvignon,2023-10-12,5.74,25.2,3.69,3200,innovint
+2023-T-02,2023,T-02,B1,cs,Cabernet Sauvignon,2023-10-16,4.3,27.0,3.83,2400,innovint
+2023-T-03,2023,T-03,B2,cs,Cabernet Sauvignon,2023-10-09,6.1,27.0,3.67,3400,innovint
+2023-T-04,2023,T-04,B3,cs,Cabernet Sauvignon,2023-09-30,3.76,26.8,3.61,2100,innovint
+2023-T-05,2023,T-05,B1,pv,Petit Verdot,2023-10-04,1.11,25.7,3.65,620,innovint
+2023-T-06,2023,T-06,B1,cf,Cabernet Franc,2023-10-07,0.86,26.2,3.8,480,innovint
+2024-T-01,2024,T-01,B1,cs,Cabernet Sauvignon,2024-10-01,5.39,25.7,3.6,3200,innovint
+2024-T-02,2024,T-02,B1,cs,Cabernet Sauvignon,2024-10-05,4.04,25.2,3.7,2400,innovint
+2024-T-03,2024,T-03,B2,cs,Cabernet Sauvignon,2024-09-28,5.73,27.1,3.72,3400,innovint
+2024-T-04,2024,T-04,B3,cs,Cabernet Sauvignon,2024-09-19,3.54,27.0,3.59,2100,innovint
+2024-T-05,2024,T-05,B1,pv,Petit Verdot,2024-09-23,1.04,25.2,3.66,620,innovint
+2024-T-06,2024,T-06,B1,cf,Cabernet Franc,2024-09-26,0.81,27.1,3.77,480,innovint
+2025-T-01,2025,T-01,B1,cs,Cabernet Sauvignon,2025-09-28,5.22,25.5,3.66,3200,innovint
+2025-T-02,2025,T-02,B1,cs,Cabernet Sauvignon,2025-10-02,3.91,25.8,3.65,2400,innovint
+2025-T-03,2025,T-03,B2,cs,Cabernet Sauvignon,2025-09-25,5.54,26.8,3.8,3400,innovint
+2025-T-04,2025,T-04,B3,cs,Cabernet Sauvignon,2025-09-16,3.42,26.8,3.72,2100,innovint
+2025-T-05,2025,T-05,B1,pv,Petit Verdot,2025-09-20,1.01,25.1,3.75,620,innovint
+2025-T-06,2025,T-06,B1,cf,Cabernet Franc,2025-09-23,0.78,26.6,3.8,480,innovint

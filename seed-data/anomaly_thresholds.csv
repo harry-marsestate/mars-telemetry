@@ -1,0 +1,13 @@
+rule_key,tab,severity,metric_key,scope_level,operator,threshold,window_hours,title,message
+soil_below_refill,vineyard,alert,soil_moisture,block,lt,15,6,Soil moisture below refill point,Action - schedule an irrigation set
+vpd_high,vineyard,warn,vpd,estate,gt,3.1,3,High vapour pressure deficit,"Watch - vine stress, consider midday irrigation"
+humidity_high,vineyard,warn,humidity,estate,gt,88,6,Sustained high humidity,Watch - review the spray interval
+wind_high,vineyard,warn,wind_speed,estate,gt,22,1,High wind,Action - suspend spraying
+dtr_low,vineyard,note,dtr,estate,lt,21,24,Compressed diurnal range,Note - watch the Brix-pH gap
+ferment_hot,winery,alert,ferment_temp,tank,gt,88,1,Fermentation running hot,Action - engage the tank jacket
+ferment_warm,winery,warn,ferment_temp,tank,gt,85,1,Fermentation approaching ceiling,Watch - recheck in 2 h
+cellar_temp_high,winery,warn,cellar_temp,cellar,gt,58,3,Cellar above target band,Action - check the HVAC set point
+cellar_temp_low,winery,warn,cellar_temp,cellar,lt,55,3,Cellar below target band,Action - check the HVAC set point
+cellar_rh_high,winery,warn,cellar_rh,cellar,gt,78,6,Cellar humidity above band,Watch - review the topping schedule
+cellar_rh_low,winery,warn,cellar_rh,cellar,lt,68,6,Cellar humidity below band,Watch - barrel evaporation loss
+brix_dry,winery,note,ferment_brix,tank,lt,1.5,1,Approaching press-off,Note - schedule press within 2-3 days

@@ -1,0 +1,718 @@
+work_date,block_id,work_type_raw,hours,cost_usd,crew,vintage,source_system
+2022-01-03,B1,pruning,6.6,290.4,Crew A,2022,excel
+2022-01-03,B1,prune,6.4,281.6,Crew B,2022,excel
+2022-01-03,B2,pruning,6.8,299.2,Crew A,2022,excel
+2022-01-03,B3,pruning,7.7,338.8,Crew A,2022,excel
+2022-01-08,B1,prune,7.3,321.2,Crew A,2022,excel
+2022-01-08,B1,pruning,6.6,290.4,Crew B,2022,excel
+2022-01-08,B2,prune,7.5,330.0,Crew A,2022,excel
+2022-01-13,B1,prune,8.6,378.4,Contract - Silverado,2022,excel
+2022-01-13,B1,pruning,7.1,312.4,Crew A,2022,excel
+2022-01-13,B2,prune,7.9,347.6,Contract - Silverado,2022,excel
+2022-01-13,B3,prune,8.5,374.0,Contract - Silverado,2022,excel
+2022-01-18,B1,pruning,8.3,365.2,Contract - Silverado,2022,excel
+2022-01-18,B2,pruning,6.9,303.6,Contract - Silverado,2022,excel
+2022-01-23,B1,pruning,6.8,299.2,Crew B,2022,excel
+2022-01-23,B1,prune,8.2,360.8,Contract - Silverado,2022,excel
+2022-01-23,B2,pruning,7.0,308.0,Crew B,2022,excel
+2022-01-23,B3,pruning,9.7,426.8,Crew B,2022,excel
+2022-02-03,B1,Pruning,6.8,299.2,Contract - Silverado,2022,excel
+2022-02-03,B1,winter pruning,6.6,290.4,Crew A,2022,excel
+2022-02-03,B2,Pruning,8.4,369.6,Contract - Silverado,2022,excel
+2022-02-03,B3,Pruning,9.1,400.4,Contract - Silverado,2022,excel
+2022-02-08,B1,Pruning,8.1,356.4,Crew B,2022,excel
+2022-02-08,B1,winter pruning,6.3,277.2,Contract - Silverado,2022,excel
+2022-02-08,B2,Pruning,7.8,343.2,Crew B,2022,excel
+2022-02-08,B3,Pruning,9.1,400.4,Crew B,2022,excel
+2022-02-13,B1,winter pruning,6.5,286.0,Crew B,2022,excel
+2022-02-13,B1,Pruning,7.1,312.4,Contract - Silverado,2022,excel
+2022-02-13,B2,winter pruning,7.6,334.4,Crew B,2022,excel
+2022-02-18,B1,winter pruning,6.8,299.2,Crew A,2022,excel
+2022-02-18,B1,Pruning,8.4,369.6,Crew B,2022,excel
+2022-02-18,B2,winter pruning,8.1,356.4,Crew A,2022,excel
+2022-02-18,B3,winter pruning,7.2,316.8,Crew A,2022,excel
+2022-02-23,B1,Pruning,8.1,356.4,Crew A,2022,excel
+2022-02-23,B2,Pruning,7.0,308.0,Crew A,2022,excel
+2022-03-03,B1,spray,6.9,358.8,Crew A,2022,excel
+2022-03-03,B2,spray,12.9,670.8,Crew A,2022,excel
+2022-03-03,B3,spray,12.1,629.2,Crew A,2022,excel
+2022-04-03,B1,suckering,9.0,378.0,Crew A,2022,excel
+2022-04-03,B1,shoot thinning,8.6,361.2,Crew B,2022,excel
+2022-04-03,B2,suckering,9.1,382.2,Crew A,2022,excel
+2022-04-03,B3,suckering,8.1,340.2,Crew A,2022,excel
+2022-04-08,B1,suckering,8.5,357.0,Crew A,2022,excel
+2022-04-08,B1,spraying,7.5,390.0,Crew B,2022,excel
+2022-04-08,B2,suckering,6.9,289.8,Crew A,2022,excel
+2022-04-08,B2,spraying,10.2,530.4,Crew B,2022,excel
+2022-04-13,B1,sucker,8.5,357.0,Contract - Silverado,2022,excel
+2022-04-13,B2,sucker,7.5,315.0,Contract - Silverado,2022,excel
+2022-04-13,B3,sucker,8.2,344.4,Contract - Silverado,2022,excel
+2022-04-18,B1,sucker,7.7,323.4,Contract - Silverado,2022,excel
+2022-04-23,B1,shoot thinning,8.9,373.8,Crew B,2022,excel
+2022-04-23,B2,shoot thinning,6.8,285.6,Crew B,2022,excel
+2022-05-03,B1,sucker,8.8,369.6,Contract - Silverado,2022,excel
+2022-05-03,B1,canopy mgmt,8.5,357.0,Crew A,2022,excel
+2022-05-03,B1,wire lift,7.4,310.8,Crew A,2022,excel
+2022-05-03,B1,irrigation,9.1,436.8,Crew A,2022,excel
+2022-05-03,B2,sucker,7.8,327.6,Contract - Silverado,2022,excel
+2022-05-03,B2,canopy mgmt,8.6,361.2,Crew A,2022,excel
+2022-05-03,B2,irrigation,7.6,364.8,Crew A,2022,excel
+2022-05-03,B3,canopy mgmt,9.8,411.6,Crew A,2022,excel
+2022-05-03,B3,irrigation,7.2,345.6,Crew A,2022,excel
+2022-05-08,B1,shoot thinning,7.9,331.8,Crew B,2022,excel
+2022-05-08,B1,hedging,8.0,336.0,Crew A,2022,excel
+2022-05-08,B2,shoot thinning,9.5,399.0,Crew B,2022,excel
+2022-05-08,B2,hedging,8.4,352.8,Crew A,2022,excel
+2022-05-08,B3,shoot thinning,7.6,319.2,Crew B,2022,excel
+2022-05-13,B1,shoot thinning,7.1,298.2,Crew B,2022,excel
+2022-05-13,B1,canopy mgmt,8.8,369.6,Crew A,2022,excel
+2022-05-13,B1,sulfur spray,9.0,468.0,Contract - Silverado,2022,excel
+2022-05-18,B1,suckering,8.1,340.2,Crew A,2022,excel
+2022-05-18,B1,wire lift,9.0,378.0,Crew A,2022,excel
+2022-05-18,B2,suckering,6.3,264.6,Crew A,2022,excel
+2022-05-18,B2,wire lift,8.4,352.8,Crew A,2022,excel
+2022-05-18,B3,suckering,8.4,352.8,Crew A,2022,excel
+2022-05-18,B3,wire lift,7.4,310.8,Crew A,2022,excel
+2022-05-23,B1,suckering,6.2,260.4,Crew A,2022,excel
+2022-05-23,B1,canopy management,6.8,285.6,Crew A,2022,excel
+2022-05-23,B1,irrigation,9.6,460.8,Crew B,2022,excel
+2022-05-23,B2,canopy management,6.6,277.2,Crew A,2022,excel
+2022-06-03,B1,hedging,7.3,306.6,Crew B,2022,excel
+2022-06-03,B1,leafing,8.2,344.4,Crew A,2022,excel
+2022-06-03,B2,hedging,6.3,264.6,Crew B,2022,excel
+2022-06-03,B2,leafing,7.9,331.8,Crew A,2022,excel
+2022-06-03,B3,leafing,10.6,445.2,Crew A,2022,excel
+2022-06-08,B1,canopy management,8.8,369.6,Crew B,2022,excel
+2022-06-08,B1,canopy mgmt,9.0,378.0,Crew B,2022,excel
+2022-06-08,B1,leafing,6.9,289.8,Crew A,2022,excel
+2022-06-08,B1,irrigate,9.0,432.0,Crew B,2022,excel
+2022-06-08,B2,canopy management,6.7,281.4,Crew B,2022,excel
+2022-06-08,B2,irrigate,10.3,494.4,Crew B,2022,excel
+2022-06-08,B3,canopy management,7.5,315.0,Crew B,2022,excel
+2022-06-08,B3,irrigate,7.5,360.0,Crew B,2022,excel
+2022-06-13,B1,wire lift,6.8,285.6,Crew B,2022,excel
+2022-06-13,B1,shoot positioning,7.9,331.8,Contract - Silverado,2022,excel
+2022-06-13,B2,wire lift,8.1,340.2,Crew B,2022,excel
+2022-06-13,B2,shoot positioning,9.6,403.2,Contract - Silverado,2022,excel
+2022-06-13,B3,shoot positioning,9.7,407.4,Contract - Silverado,2022,excel
+2022-06-18,B1,canopy management,8.5,357.0,Crew B,2022,excel
+2022-06-18,B1,shoot positioning,7.6,319.2,Contract - Silverado,2022,excel
+2022-06-18,B1,fungicide app,8.8,457.6,Crew A,2022,excel
+2022-06-23,B1,canopy mgmt,7.5,315.0,Crew B,2022,excel
+2022-06-23,B1,leaf pull,7.3,306.6,Crew B,2022,excel
+2022-06-23,B2,canopy mgmt,6.8,285.6,Crew B,2022,excel
+2022-06-23,B2,leaf pull,8.5,357.0,Crew B,2022,excel
+2022-06-23,B3,canopy mgmt,10.0,420.0,Crew B,2022,excel
+2022-07-03,B1,canopy management,6.1,256.2,Contract - Silverado,2022,excel
+2022-07-03,B1,shoot positioning,8.9,373.8,Contract - Silverado,2022,excel
+2022-07-03,B2,canopy management,8.0,336.0,Contract - Silverado,2022,excel
+2022-07-08,B1,wire lift,6.8,285.6,Contract - Silverado,2022,excel
+2022-07-08,B1,leaf pull,8.9,373.8,Crew B,2022,excel
+2022-07-08,B2,leaf pull,9.6,403.2,Crew B,2022,excel
+2022-07-08,B3,leaf pull,11.0,462.0,Crew B,2022,excel
+2022-07-13,B1,hedging,7.9,331.8,Contract - Silverado,2022,excel
+2022-07-13,B1,canopy management,7.7,323.4,Contract - Silverado,2022,excel
+2022-07-13,B1,leaf pull,6.8,285.6,Crew B,2022,excel
+2022-07-13,B1,drip repair,8.7,417.6,Contract - Silverado,2022,excel
+2022-07-13,B2,hedging,7.3,306.6,Contract - Silverado,2022,excel
+2022-07-13,B2,drip repair,7.7,369.6,Contract - Silverado,2022,excel
+2022-07-13,B3,hedging,10.0,420.0,Contract - Silverado,2022,excel
+2022-07-18,B1,canopy mgmt,8.9,373.8,Contract - Silverado,2022,excel
+2022-07-18,B1,leafing,6.6,277.2,Crew A,2022,excel
+2022-07-18,B2,canopy mgmt,6.4,268.8,Contract - Silverado,2022,excel
+2022-07-18,B2,leafing,8.5,357.0,Crew A,2022,excel
+2022-07-23,B1,hedging,8.1,340.2,Contract - Silverado,2022,excel
+2022-07-23,B1,leafing,6.5,273.0,Crew A,2022,excel
+2022-08-03,B1,harvest,8.1,445.5,Crew A,2022,excel
+2022-08-03,B1,picking,8.3,456.5,Crew B,2022,excel
+2022-08-03,B2,harvest,7.7,423.5,Crew A,2022,excel
+2022-08-03,B3,harvest,9.2,506.0,Crew A,2022,excel
+2022-08-08,B1,picking,8.9,489.5,Crew A,2022,excel
+2022-08-08,B2,picking,7.0,385.0,Crew A,2022,excel
+2022-08-13,B1,picking,6.8,374.0,Contract - Silverado,2022,excel
+2022-08-13,B1,harvest,6.3,346.5,Crew A,2022,excel
+2022-08-13,B2,picking,8.7,478.5,Contract - Silverado,2022,excel
+2022-08-13,B3,picking,9.7,533.5,Contract - Silverado,2022,excel
+2022-08-18,B1,upkeep,8.4,403.2,Crew A,2022,excel
+2022-08-18,B1,harvest,8.1,445.5,Contract - Silverado,2022,excel
+2022-08-18,B2,harvest,6.4,352.0,Contract - Silverado,2022,excel
+2022-08-23,B1,harvest,6.4,352.0,Crew B,2022,excel
+2022-08-23,B2,harvest,8.3,456.5,Crew B,2022,excel
+2022-08-23,B3,harvest,9.6,528.0,Crew B,2022,excel
+2022-09-03,B1,Harvest,9.0,495.0,Contract - Silverado,2022,excel
+2022-09-03,B2,Harvest,7.2,396.0,Contract - Silverado,2022,excel
+2022-09-08,B1,Harvest,6.8,374.0,Crew B,2022,excel
+2022-09-08,B1,hand harvest,8.2,451.0,Contract - Silverado,2022,excel
+2022-09-08,B2,Harvest,8.6,473.0,Crew B,2022,excel
+2022-09-08,B3,Harvest,8.9,489.5,Crew B,2022,excel
+2022-09-13,B1,hand harvest,8.0,440.0,Crew B,2022,excel
+2022-09-13,B2,hand harvest,8.5,467.5,Crew B,2022,excel
+2022-09-18,B1,hand harvest,8.6,473.0,Crew A,2022,excel
+2022-09-18,B1,Harvest,7.2,396.0,Crew B,2022,excel
+2022-09-18,B2,hand harvest,6.5,357.5,Crew A,2022,excel
+2022-09-18,B3,hand harvest,8.7,478.5,Crew A,2022,excel
+2022-09-23,B1,Harvest,6.3,346.5,Crew A,2022,excel
+2022-09-23,B2,Harvest,8.1,445.5,Crew A,2022,excel
+2023-01-03,B1,pruning,7.7,338.8,Crew A,2023,excel
+2023-01-03,B1,prune,7.4,325.6,Crew B,2023,excel
+2023-01-03,B2,pruning,7.5,330.0,Crew A,2023,excel
+2023-01-03,B3,pruning,7.0,308.0,Crew A,2023,excel
+2023-01-08,B1,prune,6.5,286.0,Crew A,2023,excel
+2023-01-08,B1,pruning,8.0,352.0,Crew B,2023,excel
+2023-01-08,B2,prune,9.2,404.8,Crew A,2023,excel
+2023-01-13,B1,prune,8.7,382.8,Contract - Silverado,2023,excel
+2023-01-13,B1,pruning,6.7,294.8,Crew A,2023,excel
+2023-01-13,B2,prune,8.6,378.4,Contract - Silverado,2023,excel
+2023-01-13,B3,prune,9.8,431.2,Contract - Silverado,2023,excel
+2023-01-18,B1,pruning,7.7,338.8,Contract - Silverado,2023,excel
+2023-01-18,B1,prune,8.5,374.0,Crew A,2023,excel
+2023-01-18,B2,pruning,7.2,316.8,Contract - Silverado,2023,excel
+2023-01-23,B1,pruning,6.5,286.0,Crew B,2023,excel
+2023-01-23,B1,prune,6.1,268.4,Contract - Silverado,2023,excel
+2023-01-23,B2,pruning,6.8,299.2,Crew B,2023,excel
+2023-01-23,B3,pruning,9.4,413.6,Crew B,2023,excel
+2023-02-03,B1,Pruning,9.1,400.4,Contract - Silverado,2023,excel
+2023-02-03,B1,winter pruning,7.3,321.2,Crew A,2023,excel
+2023-02-03,B2,Pruning,8.1,356.4,Contract - Silverado,2023,excel
+2023-02-03,B3,Pruning,7.3,321.2,Contract - Silverado,2023,excel
+2023-02-08,B1,Pruning,6.4,281.6,Crew B,2023,excel
+2023-02-08,B1,winter pruning,8.0,352.0,Contract - Silverado,2023,excel
+2023-02-08,B2,Pruning,9.5,418.0,Crew B,2023,excel
+2023-02-08,B3,Pruning,8.1,356.4,Crew B,2023,excel
+2023-02-13,B1,winter pruning,8.1,356.4,Crew B,2023,excel
+2023-02-13,B1,Pruning,7.5,330.0,Contract - Silverado,2023,excel
+2023-02-13,B2,winter pruning,8.0,352.0,Crew B,2023,excel
+2023-02-18,B1,winter pruning,6.2,272.8,Crew A,2023,excel
+2023-02-18,B1,Pruning,8.1,356.4,Crew B,2023,excel
+2023-02-18,B2,winter pruning,9.0,396.0,Crew A,2023,excel
+2023-02-18,B3,winter pruning,8.9,391.6,Crew A,2023,excel
+2023-02-23,B1,Pruning,9.0,396.0,Crew A,2023,excel
+2023-02-23,B2,Pruning,9.2,404.8,Crew A,2023,excel
+2023-03-03,B1,spray,10.7,556.4,Crew A,2023,excel
+2023-03-03,B2,spray,9.1,473.2,Crew A,2023,excel
+2023-03-03,B3,spray,11.4,592.8,Crew A,2023,excel
+2023-04-03,B1,suckering,9.2,386.4,Crew A,2023,excel
+2023-04-03,B1,shoot thinning,8.0,336.0,Crew B,2023,excel
+2023-04-03,B2,suckering,8.8,369.6,Crew A,2023,excel
+2023-04-03,B3,suckering,8.3,348.6,Crew A,2023,excel
+2023-04-08,B1,suckering,7.0,294.0,Crew A,2023,excel
+2023-04-08,B1,spraying,10.6,551.2,Crew B,2023,excel
+2023-04-08,B2,suckering,7.0,294.0,Crew A,2023,excel
+2023-04-08,B2,spraying,12.4,644.8,Crew B,2023,excel
+2023-04-13,B1,sucker,6.8,285.6,Contract - Silverado,2023,excel
+2023-04-13,B2,sucker,7.4,310.8,Contract - Silverado,2023,excel
+2023-04-13,B3,sucker,8.9,373.8,Contract - Silverado,2023,excel
+2023-04-18,B1,sucker,6.6,277.2,Contract - Silverado,2023,excel
+2023-04-23,B1,shoot thinning,7.7,323.4,Crew B,2023,excel
+2023-04-23,B2,shoot thinning,8.8,369.6,Crew B,2023,excel
+2023-04-23,B3,shoot thinning,8.7,365.4,Crew B,2023,excel
+2023-05-03,B1,sucker,9.1,382.2,Contract - Silverado,2023,excel
+2023-05-03,B1,canopy mgmt,7.6,319.2,Crew A,2023,excel
+2023-05-03,B1,irrigation,7.6,364.8,Crew A,2023,excel
+2023-05-03,B2,sucker,7.3,306.6,Contract - Silverado,2023,excel
+2023-05-03,B2,canopy mgmt,6.7,281.4,Crew A,2023,excel
+2023-05-03,B2,irrigation,7.6,364.8,Crew A,2023,excel
+2023-05-03,B3,canopy mgmt,7.6,319.2,Crew A,2023,excel
+2023-05-03,B3,irrigation,10.2,489.6,Crew A,2023,excel
+2023-05-08,B1,shoot thinning,8.1,340.2,Crew B,2023,excel
+2023-05-08,B1,sucker,8.2,344.4,Contract - Silverado,2023,excel
+2023-05-08,B1,hedging,7.5,315.0,Crew A,2023,excel
+2023-05-08,B2,shoot thinning,6.8,285.6,Crew B,2023,excel
+2023-05-08,B2,hedging,7.3,306.6,Crew A,2023,excel
+2023-05-08,B3,shoot thinning,8.7,365.4,Crew B,2023,excel
+2023-05-13,B1,shoot thinning,6.6,277.2,Crew B,2023,excel
+2023-05-13,B1,canopy mgmt,6.3,264.6,Crew A,2023,excel
+2023-05-13,B1,sulfur spray,10.1,525.2,Contract - Silverado,2023,excel
+2023-05-13,B2,shoot thinning,6.4,268.8,Crew B,2023,excel
+2023-05-18,B1,suckering,7.1,298.2,Crew A,2023,excel
+2023-05-18,B1,wire lift,7.6,319.2,Crew A,2023,excel
+2023-05-18,B2,suckering,6.7,281.4,Crew A,2023,excel
+2023-05-18,B2,wire lift,7.1,298.2,Crew A,2023,excel
+2023-05-18,B3,suckering,9.6,403.2,Crew A,2023,excel
+2023-05-18,B3,wire lift,8.7,365.4,Crew A,2023,excel
+2023-05-23,B1,suckering,8.1,340.2,Crew A,2023,excel
+2023-05-23,B1,canopy management,8.9,373.8,Crew A,2023,excel
+2023-05-23,B2,canopy management,9.0,378.0,Crew A,2023,excel
+2023-06-03,B1,hedging,7.2,302.4,Crew B,2023,excel
+2023-06-03,B1,leafing,7.1,298.2,Crew A,2023,excel
+2023-06-03,B1,leaf pull,6.6,277.2,Crew B,2023,excel
+2023-06-03,B2,leafing,9.0,378.0,Crew A,2023,excel
+2023-06-03,B3,leafing,8.3,348.6,Crew A,2023,excel
+2023-06-08,B1,canopy management,9.3,390.6,Crew B,2023,excel
+2023-06-08,B1,leafing,6.5,273.0,Crew A,2023,excel
+2023-06-08,B1,irrigate,8.5,408.0,Crew B,2023,excel
+2023-06-08,B2,canopy management,6.3,264.6,Crew B,2023,excel
+2023-06-08,B2,leafing,9.1,382.2,Crew A,2023,excel
+2023-06-08,B2,irrigate,8.3,398.4,Crew B,2023,excel
+2023-06-08,B3,canopy management,9.3,390.6,Crew B,2023,excel
+2023-06-08,B3,irrigate,8.9,427.2,Crew B,2023,excel
+2023-06-13,B1,wire lift,7.6,319.2,Crew B,2023,excel
+2023-06-13,B1,shoot positioning,7.1,298.2,Contract - Silverado,2023,excel
+2023-06-13,B2,wire lift,8.4,352.8,Crew B,2023,excel
+2023-06-13,B2,shoot positioning,7.4,310.8,Contract - Silverado,2023,excel
+2023-06-13,B3,shoot positioning,8.8,369.6,Contract - Silverado,2023,excel
+2023-06-18,B1,canopy management,7.0,294.0,Crew B,2023,excel
+2023-06-18,B1,shoot positioning,6.8,285.6,Contract - Silverado,2023,excel
+2023-06-23,B1,canopy mgmt,9.2,386.4,Crew B,2023,excel
+2023-06-23,B1,leaf pull,8.9,373.8,Crew B,2023,excel
+2023-06-23,B2,canopy mgmt,9.2,386.4,Crew B,2023,excel
+2023-06-23,B2,leaf pull,8.0,336.0,Crew B,2023,excel
+2023-06-23,B3,canopy mgmt,9.4,394.8,Crew B,2023,excel
+2023-07-03,B1,canopy management,6.7,281.4,Contract - Silverado,2023,excel
+2023-07-03,B1,shoot positioning,9.4,394.8,Contract - Silverado,2023,excel
+2023-07-03,B2,canopy management,6.4,268.8,Contract - Silverado,2023,excel
+2023-07-03,B2,shoot positioning,7.5,315.0,Contract - Silverado,2023,excel
+2023-07-08,B1,wire lift,8.5,357.0,Contract - Silverado,2023,excel
+2023-07-08,B1,leaf pull,7.9,331.8,Crew B,2023,excel
+2023-07-08,B1,shoot positioning,6.3,264.6,Contract - Silverado,2023,excel
+2023-07-08,B2,leaf pull,8.8,369.6,Crew B,2023,excel
+2023-07-08,B3,leaf pull,9.9,415.8,Crew B,2023,excel
+2023-07-13,B1,hedging,7.4,310.8,Contract - Silverado,2023,excel
+2023-07-13,B1,leaf pull,7.9,331.8,Crew B,2023,excel
+2023-07-13,B1,drip repair,8.2,393.6,Contract - Silverado,2023,excel
+2023-07-13,B2,hedging,7.9,331.8,Contract - Silverado,2023,excel
+2023-07-13,B2,drip repair,9.5,456.0,Contract - Silverado,2023,excel
+2023-07-13,B3,hedging,9.6,403.2,Contract - Silverado,2023,excel
+2023-07-18,B1,canopy mgmt,7.9,331.8,Contract - Silverado,2023,excel
+2023-07-18,B1,leafing,7.4,310.8,Crew A,2023,excel
+2023-07-18,B2,canopy mgmt,7.9,331.8,Contract - Silverado,2023,excel
+2023-07-18,B2,leafing,8.2,344.4,Crew A,2023,excel
+2023-07-18,B3,leafing,8.0,336.0,Crew A,2023,excel
+2023-07-23,B1,leafing,6.5,273.0,Crew A,2023,excel
+2023-08-03,B1,harvest,6.2,341.0,Crew A,2023,excel
+2023-08-03,B1,picking,6.6,363.0,Crew B,2023,excel
+2023-08-03,B2,harvest,9.1,500.5,Crew A,2023,excel
+2023-08-03,B3,harvest,6.6,363.0,Crew A,2023,excel
+2023-08-08,B1,picking,9.1,500.5,Crew A,2023,excel
+2023-08-08,B2,picking,9.2,506.0,Crew A,2023,excel
+2023-08-13,B1,picking,8.8,484.0,Contract - Silverado,2023,excel
+2023-08-13,B1,harvest,6.6,363.0,Crew A,2023,excel
+2023-08-13,B2,picking,8.8,484.0,Contract - Silverado,2023,excel
+2023-08-13,B3,picking,8.8,484.0,Contract - Silverado,2023,excel
+2023-08-18,B1,upkeep,7.8,374.4,Crew A,2023,excel
+2023-08-18,B1,harvest,8.9,489.5,Contract - Silverado,2023,excel
+2023-08-18,B2,harvest,9.5,522.5,Contract - Silverado,2023,excel
+2023-08-23,B1,harvest,6.5,357.5,Crew B,2023,excel
+2023-08-23,B2,harvest,7.7,423.5,Crew B,2023,excel
+2023-08-23,B3,harvest,8.2,451.0,Crew B,2023,excel
+2023-09-03,B1,Harvest,8.2,451.0,Contract - Silverado,2023,excel
+2023-09-03,B2,Harvest,6.5,357.5,Contract - Silverado,2023,excel
+2023-09-03,B3,Harvest,8.1,445.5,Contract - Silverado,2023,excel
+2023-09-08,B1,Harvest,7.2,396.0,Crew B,2023,excel
+2023-09-08,B1,hand harvest,7.3,401.5,Contract - Silverado,2023,excel
+2023-09-08,B2,Harvest,8.8,484.0,Crew B,2023,excel
+2023-09-08,B3,Harvest,8.0,440.0,Crew B,2023,excel
+2023-09-13,B1,hand harvest,6.9,379.5,Crew B,2023,excel
+2023-09-13,B2,hand harvest,7.9,434.5,Crew B,2023,excel
+2023-09-18,B1,hand harvest,6.4,352.0,Crew A,2023,excel
+2023-09-18,B1,Harvest,8.9,489.5,Crew B,2023,excel
+2023-09-18,B2,hand harvest,8.6,473.0,Crew A,2023,excel
+2023-09-18,B3,hand harvest,6.9,379.5,Crew A,2023,excel
+2023-09-23,B1,Harvest,8.1,445.5,Crew A,2023,excel
+2024-01-03,B1,pruning,8.4,369.6,Crew A,2024,excel
+2024-01-03,B1,prune,8.7,382.8,Crew B,2024,excel
+2024-01-03,B2,pruning,6.9,303.6,Crew A,2024,excel
+2024-01-03,B3,pruning,8.0,352.0,Crew A,2024,excel
+2024-01-08,B1,prune,8.5,374.0,Crew A,2024,excel
+2024-01-08,B1,pruning,8.5,374.0,Crew B,2024,excel
+2024-01-08,B2,prune,6.7,294.8,Crew A,2024,excel
+2024-01-08,B3,prune,9.5,418.0,Crew A,2024,excel
+2024-01-13,B1,prune,8.6,378.4,Contract - Silverado,2024,excel
+2024-01-13,B1,pruning,7.2,316.8,Crew A,2024,excel
+2024-01-13,B2,prune,9.7,426.8,Contract - Silverado,2024,excel
+2024-01-13,B3,prune,9.8,431.2,Contract - Silverado,2024,excel
+2024-01-18,B1,pruning,8.1,356.4,Contract - Silverado,2024,excel
+2024-01-18,B1,prune,7.0,308.0,Crew A,2024,excel
+2024-01-18,B2,pruning,9.7,426.8,Contract - Silverado,2024,excel
+2024-01-23,B1,pruning,8.7,382.8,Crew B,2024,excel
+2024-01-23,B1,prune,7.8,343.2,Contract - Silverado,2024,excel
+2024-01-23,B2,pruning,7.0,308.0,Crew B,2024,excel
+2024-01-23,B3,pruning,6.9,303.6,Crew B,2024,excel
+2024-02-03,B1,Pruning,6.4,281.6,Contract - Silverado,2024,excel
+2024-02-03,B1,winter pruning,6.2,272.8,Crew A,2024,excel
+2024-02-03,B2,Pruning,6.6,290.4,Contract - Silverado,2024,excel
+2024-02-03,B3,Pruning,9.9,435.6,Contract - Silverado,2024,excel
+2024-02-08,B1,Pruning,6.3,277.2,Crew B,2024,excel
+2024-02-08,B1,winter pruning,8.5,374.0,Contract - Silverado,2024,excel
+2024-02-08,B2,Pruning,9.7,426.8,Crew B,2024,excel
+2024-02-08,B3,Pruning,9.5,418.0,Crew B,2024,excel
+2024-02-13,B1,winter pruning,6.5,286.0,Crew B,2024,excel
+2024-02-13,B1,Pruning,8.6,378.4,Contract - Silverado,2024,excel
+2024-02-13,B2,winter pruning,9.3,409.2,Crew B,2024,excel
+2024-02-18,B1,winter pruning,7.6,334.4,Crew A,2024,excel
+2024-02-18,B1,Pruning,7.4,325.6,Crew B,2024,excel
+2024-02-18,B2,winter pruning,8.7,382.8,Crew A,2024,excel
+2024-02-18,B3,winter pruning,9.2,404.8,Crew A,2024,excel
+2024-02-23,B1,Pruning,7.1,312.4,Crew A,2024,excel
+2024-03-03,B1,spray,7.1,369.2,Crew A,2024,excel
+2024-03-03,B2,spray,9.1,473.2,Crew A,2024,excel
+2024-03-03,B3,spray,15.9,826.8,Crew A,2024,excel
+2024-04-03,B1,suckering,9.2,386.4,Crew A,2024,excel
+2024-04-03,B1,shoot thinning,8.6,361.2,Crew B,2024,excel
+2024-04-03,B2,suckering,8.2,344.4,Crew A,2024,excel
+2024-04-03,B3,suckering,8.6,361.2,Crew A,2024,excel
+2024-04-08,B1,suckering,8.6,361.2,Crew A,2024,excel
+2024-04-08,B1,spraying,7.4,384.8,Crew B,2024,excel
+2024-04-08,B2,suckering,8.5,357.0,Crew A,2024,excel
+2024-04-08,B2,spraying,9.9,514.8,Crew B,2024,excel
+2024-04-13,B1,sucker,7.5,315.0,Contract - Silverado,2024,excel
+2024-04-13,B1,suckering,8.8,369.6,Crew A,2024,excel
+2024-04-13,B2,sucker,8.6,361.2,Contract - Silverado,2024,excel
+2024-04-13,B3,sucker,8.1,340.2,Contract - Silverado,2024,excel
+2024-04-18,B1,sucker,6.3,264.6,Contract - Silverado,2024,excel
+2024-04-23,B1,shoot thinning,8.6,361.2,Crew B,2024,excel
+2024-04-23,B2,shoot thinning,8.6,361.2,Crew B,2024,excel
+2024-05-03,B1,sucker,6.6,277.2,Contract - Silverado,2024,excel
+2024-05-03,B1,canopy mgmt,9.1,382.2,Crew A,2024,excel
+2024-05-03,B1,wire lift,7.5,315.0,Crew A,2024,excel
+2024-05-03,B1,irrigation,9.4,451.2,Crew A,2024,excel
+2024-05-03,B2,sucker,9.1,382.2,Contract - Silverado,2024,excel
+2024-05-03,B2,canopy mgmt,6.7,281.4,Crew A,2024,excel
+2024-05-03,B2,irrigation,9.0,432.0,Crew A,2024,excel
+2024-05-03,B3,canopy mgmt,7.1,298.2,Crew A,2024,excel
+2024-05-03,B3,irrigation,6.9,331.2,Crew A,2024,excel
+2024-05-08,B1,shoot thinning,6.8,285.6,Crew B,2024,excel
+2024-05-08,B1,sucker,7.8,327.6,Contract - Silverado,2024,excel
+2024-05-08,B1,hedging,7.6,319.2,Crew A,2024,excel
+2024-05-08,B2,shoot thinning,6.7,281.4,Crew B,2024,excel
+2024-05-08,B2,hedging,8.0,336.0,Crew A,2024,excel
+2024-05-08,B3,shoot thinning,11.0,462.0,Crew B,2024,excel
+2024-05-13,B1,shoot thinning,9.2,386.4,Crew B,2024,excel
+2024-05-13,B1,canopy mgmt,8.3,348.6,Crew A,2024,excel
+2024-05-13,B1,sulfur spray,6.2,322.4,Contract - Silverado,2024,excel
+2024-05-18,B1,suckering,9.1,382.2,Crew A,2024,excel
+2024-05-18,B1,shoot thinning,6.2,260.4,Crew B,2024,excel
+2024-05-18,B1,wire lift,6.7,281.4,Crew A,2024,excel
+2024-05-18,B2,suckering,8.9,373.8,Crew A,2024,excel
+2024-05-18,B2,wire lift,7.9,331.8,Crew A,2024,excel
+2024-05-18,B3,suckering,9.3,390.6,Crew A,2024,excel
+2024-05-18,B3,wire lift,8.3,348.6,Crew A,2024,excel
+2024-05-23,B1,suckering,8.7,365.4,Crew A,2024,excel
+2024-05-23,B1,canopy management,8.6,361.2,Crew A,2024,excel
+2024-05-23,B1,irrigation,9.2,441.6,Crew B,2024,excel
+2024-06-03,B1,hedging,6.9,289.8,Crew B,2024,excel
+2024-06-03,B1,leafing,8.6,361.2,Crew A,2024,excel
+2024-06-03,B1,leaf pull,7.7,323.4,Crew B,2024,excel
+2024-06-03,B2,leafing,6.1,256.2,Crew A,2024,excel
+2024-06-03,B3,leafing,9.8,411.6,Crew A,2024,excel
+2024-06-08,B1,canopy management,7.0,294.0,Crew B,2024,excel
+2024-06-08,B1,canopy mgmt,9.1,382.2,Crew B,2024,excel
+2024-06-08,B1,leafing,7.7,323.4,Crew A,2024,excel
+2024-06-08,B1,irrigate,8.4,403.2,Crew B,2024,excel
+2024-06-08,B2,canopy management,7.0,294.0,Crew B,2024,excel
+2024-06-08,B2,irrigate,6.7,321.6,Crew B,2024,excel
+2024-06-08,B3,canopy management,7.0,294.0,Crew B,2024,excel
+2024-06-08,B3,irrigate,7.6,364.8,Crew B,2024,excel
+2024-06-13,B1,wire lift,7.9,331.8,Crew B,2024,excel
+2024-06-13,B1,shoot positioning,8.7,365.4,Contract - Silverado,2024,excel
+2024-06-13,B2,wire lift,9.1,382.2,Crew B,2024,excel
+2024-06-13,B2,shoot positioning,7.6,319.2,Contract - Silverado,2024,excel
+2024-06-13,B3,shoot positioning,8.2,344.4,Contract - Silverado,2024,excel
+2024-06-18,B1,canopy management,7.1,298.2,Crew B,2024,excel
+2024-06-18,B1,shoot positioning,7.5,315.0,Contract - Silverado,2024,excel
+2024-06-18,B1,fungicide app,9.2,478.4,Crew A,2024,excel
+2024-06-23,B1,canopy mgmt,8.8,369.6,Crew B,2024,excel
+2024-06-23,B1,leaf pull,8.6,361.2,Crew B,2024,excel
+2024-06-23,B2,canopy mgmt,8.0,336.0,Crew B,2024,excel
+2024-06-23,B2,leaf pull,8.3,348.6,Crew B,2024,excel
+2024-06-23,B3,canopy mgmt,7.5,315.0,Crew B,2024,excel
+2024-07-03,B1,canopy management,9.2,386.4,Contract - Silverado,2024,excel
+2024-07-03,B1,shoot positioning,6.9,289.8,Contract - Silverado,2024,excel
+2024-07-03,B2,canopy management,9.6,403.2,Contract - Silverado,2024,excel
+2024-07-03,B2,shoot positioning,7.0,294.0,Contract - Silverado,2024,excel
+2024-07-03,B3,canopy management,6.8,285.6,Contract - Silverado,2024,excel
+2024-07-08,B1,wire lift,7.1,298.2,Contract - Silverado,2024,excel
+2024-07-08,B1,leaf pull,9.2,386.4,Crew B,2024,excel
+2024-07-08,B1,shoot positioning,9.4,394.8,Contract - Silverado,2024,excel
+2024-07-08,B2,leaf pull,6.1,256.2,Crew B,2024,excel
+2024-07-08,B3,leaf pull,8.0,336.0,Crew B,2024,excel
+2024-07-13,B1,hedging,6.4,268.8,Contract - Silverado,2024,excel
+2024-07-13,B1,leaf pull,8.5,357.0,Crew B,2024,excel
+2024-07-13,B1,drip repair,7.3,350.4,Contract - Silverado,2024,excel
+2024-07-13,B2,hedging,7.2,302.4,Contract - Silverado,2024,excel
+2024-07-13,B2,drip repair,7.2,345.6,Contract - Silverado,2024,excel
+2024-07-13,B3,hedging,8.9,373.8,Contract - Silverado,2024,excel
+2024-07-18,B1,canopy mgmt,8.6,361.2,Contract - Silverado,2024,excel
+2024-07-18,B1,leafing,8.5,357.0,Crew A,2024,excel
+2024-07-18,B2,leafing,7.2,302.4,Crew A,2024,excel
+2024-07-23,B1,hedging,7.4,310.8,Contract - Silverado,2024,excel
+2024-07-23,B1,leafing,7.6,319.2,Crew A,2024,excel
+2024-08-03,B1,harvest,8.7,478.5,Crew A,2024,excel
+2024-08-03,B1,picking,9.3,511.5,Crew B,2024,excel
+2024-08-03,B2,harvest,9.1,500.5,Crew A,2024,excel
+2024-08-03,B3,harvest,7.1,390.5,Crew A,2024,excel
+2024-08-08,B1,picking,8.6,473.0,Crew A,2024,excel
+2024-08-08,B2,picking,8.5,467.5,Crew A,2024,excel
+2024-08-13,B1,picking,8.6,473.0,Contract - Silverado,2024,excel
+2024-08-13,B1,harvest,6.7,368.5,Crew A,2024,excel
+2024-08-13,B2,picking,7.2,396.0,Contract - Silverado,2024,excel
+2024-08-13,B3,picking,9.7,533.5,Contract - Silverado,2024,excel
+2024-08-18,B1,upkeep,8.6,412.8,Crew A,2024,excel
+2024-08-18,B1,harvest,6.5,357.5,Contract - Silverado,2024,excel
+2024-08-18,B2,harvest,7.7,423.5,Contract - Silverado,2024,excel
+2024-08-23,B1,harvest,7.4,407.0,Crew B,2024,excel
+2024-08-23,B1,picking,7.9,434.5,Contract - Silverado,2024,excel
+2024-08-23,B2,harvest,9.0,495.0,Crew B,2024,excel
+2024-08-23,B3,harvest,9.7,533.5,Crew B,2024,excel
+2024-09-03,B1,Harvest,8.8,484.0,Contract - Silverado,2024,excel
+2024-09-03,B2,Harvest,6.7,368.5,Contract - Silverado,2024,excel
+2024-09-08,B1,Harvest,9.1,500.5,Crew B,2024,excel
+2024-09-08,B1,hand harvest,6.4,352.0,Contract - Silverado,2024,excel
+2024-09-08,B2,Harvest,8.0,440.0,Crew B,2024,excel
+2024-09-08,B3,Harvest,9.6,528.0,Crew B,2024,excel
+2024-09-13,B1,hand harvest,8.8,484.0,Crew B,2024,excel
+2024-09-13,B2,hand harvest,8.9,489.5,Crew B,2024,excel
+2024-09-18,B1,hand harvest,9.3,511.5,Crew A,2024,excel
+2024-09-18,B1,Harvest,8.3,456.5,Crew B,2024,excel
+2024-09-18,B2,hand harvest,6.9,379.5,Crew A,2024,excel
+2024-09-18,B3,hand harvest,7.9,434.5,Crew A,2024,excel
+2024-09-23,B1,Harvest,9.3,511.5,Crew A,2024,excel
+2025-01-03,B1,pruning,9.1,400.4,Crew A,2025,excel
+2025-01-03,B1,prune,6.2,272.8,Crew B,2025,excel
+2025-01-03,B2,pruning,9.0,396.0,Crew A,2025,excel
+2025-01-03,B2,prune,7.2,316.8,Crew B,2025,excel
+2025-01-03,B3,pruning,8.1,356.4,Crew A,2025,excel
+2025-01-08,B1,prune,8.0,352.0,Crew A,2025,excel
+2025-01-08,B1,pruning,6.6,290.4,Crew B,2025,excel
+2025-01-08,B2,prune,8.4,369.6,Crew A,2025,excel
+2025-01-13,B1,prune,9.2,404.8,Contract - Silverado,2025,excel
+2025-01-13,B1,pruning,8.2,360.8,Crew A,2025,excel
+2025-01-13,B2,prune,7.0,308.0,Contract - Silverado,2025,excel
+2025-01-13,B3,prune,7.8,343.2,Contract - Silverado,2025,excel
+2025-01-18,B1,pruning,6.5,286.0,Contract - Silverado,2025,excel
+2025-01-18,B2,pruning,8.7,382.8,Contract - Silverado,2025,excel
+2025-01-23,B1,pruning,8.1,356.4,Crew B,2025,excel
+2025-01-23,B1,prune,8.4,369.6,Contract - Silverado,2025,excel
+2025-01-23,B2,pruning,7.4,325.6,Crew B,2025,excel
+2025-01-23,B3,pruning,8.3,365.2,Crew B,2025,excel
+2025-02-03,B1,Pruning,7.9,347.6,Contract - Silverado,2025,excel
+2025-02-03,B1,winter pruning,7.9,347.6,Crew A,2025,excel
+2025-02-03,B2,Pruning,9.1,400.4,Contract - Silverado,2025,excel
+2025-02-03,B3,Pruning,9.3,409.2,Contract - Silverado,2025,excel
+2025-02-08,B1,Pruning,7.7,338.8,Crew B,2025,excel
+2025-02-08,B1,winter pruning,6.4,281.6,Contract - Silverado,2025,excel
+2025-02-08,B2,Pruning,8.9,391.6,Crew B,2025,excel
+2025-02-08,B3,Pruning,6.4,281.6,Crew B,2025,excel
+2025-02-13,B1,winter pruning,8.3,365.2,Crew B,2025,excel
+2025-02-13,B1,Pruning,8.4,369.6,Contract - Silverado,2025,excel
+2025-02-13,B2,winter pruning,8.7,382.8,Crew B,2025,excel
+2025-02-18,B1,winter pruning,7.0,308.0,Crew A,2025,excel
+2025-02-18,B1,Pruning,7.2,316.8,Crew B,2025,excel
+2025-02-18,B2,winter pruning,8.9,391.6,Crew A,2025,excel
+2025-02-18,B3,winter pruning,9.2,404.8,Crew A,2025,excel
+2025-02-23,B1,Pruning,8.1,356.4,Crew A,2025,excel
+2025-02-23,B2,Pruning,8.3,365.2,Crew A,2025,excel
+2025-03-03,B1,spray,9.3,483.6,Crew A,2025,excel
+2025-03-03,B2,spray,7.6,395.2,Crew A,2025,excel
+2025-03-03,B3,spray,15.5,806.0,Crew A,2025,excel
+2025-04-03,B1,suckering,7.0,294.0,Crew A,2025,excel
+2025-04-03,B1,shoot thinning,6.7,281.4,Crew B,2025,excel
+2025-04-03,B2,suckering,8.6,361.2,Crew A,2025,excel
+2025-04-03,B3,suckering,8.3,348.6,Crew A,2025,excel
+2025-04-08,B1,suckering,6.6,277.2,Crew A,2025,excel
+2025-04-08,B1,spraying,8.4,436.8,Crew B,2025,excel
+2025-04-08,B2,suckering,6.9,289.8,Crew A,2025,excel
+2025-04-08,B2,spraying,10.2,530.4,Crew B,2025,excel
+2025-04-13,B1,sucker,6.5,273.0,Contract - Silverado,2025,excel
+2025-04-13,B2,sucker,9.4,394.8,Contract - Silverado,2025,excel
+2025-04-13,B3,sucker,8.5,357.0,Contract - Silverado,2025,excel
+2025-04-18,B1,sucker,6.8,285.6,Contract - Silverado,2025,excel
+2025-04-23,B1,shoot thinning,7.1,298.2,Crew B,2025,excel
+2025-04-23,B2,shoot thinning,8.8,369.6,Crew B,2025,excel
+2025-04-23,B3,shoot thinning,8.2,344.4,Crew B,2025,excel
+2025-05-03,B1,sucker,7.9,331.8,Contract - Silverado,2025,excel
+2025-05-03,B1,canopy mgmt,8.9,373.8,Crew A,2025,excel
+2025-05-03,B1,irrigation,6.3,302.4,Crew A,2025,excel
+2025-05-03,B2,sucker,7.6,319.2,Contract - Silverado,2025,excel
+2025-05-03,B2,canopy mgmt,7.1,298.2,Crew A,2025,excel
+2025-05-03,B2,irrigation,8.9,427.2,Crew A,2025,excel
+2025-05-03,B3,canopy mgmt,7.9,331.8,Crew A,2025,excel
+2025-05-03,B3,irrigation,8.2,393.6,Crew A,2025,excel
+2025-05-08,B1,shoot thinning,7.8,327.6,Crew B,2025,excel
+2025-05-08,B1,sucker,7.1,298.2,Contract - Silverado,2025,excel
+2025-05-08,B1,hedging,6.3,264.6,Crew A,2025,excel
+2025-05-08,B2,shoot thinning,7.4,310.8,Crew B,2025,excel
+2025-05-08,B2,hedging,9.2,386.4,Crew A,2025,excel
+2025-05-08,B3,shoot thinning,8.5,357.0,Crew B,2025,excel
+2025-05-13,B1,shoot thinning,6.5,273.0,Crew B,2025,excel
+2025-05-13,B1,canopy mgmt,8.5,357.0,Crew A,2025,excel
+2025-05-13,B1,sulfur spray,8.7,452.4,Contract - Silverado,2025,excel
+2025-05-18,B1,suckering,6.2,260.4,Crew A,2025,excel
+2025-05-18,B1,wire lift,7.3,306.6,Crew A,2025,excel
+2025-05-18,B2,suckering,6.6,277.2,Crew A,2025,excel
+2025-05-18,B2,wire lift,8.4,352.8,Crew A,2025,excel
+2025-05-18,B3,suckering,7.2,302.4,Crew A,2025,excel
+2025-05-18,B3,wire lift,7.6,319.2,Crew A,2025,excel
+2025-05-23,B1,suckering,8.7,365.4,Crew A,2025,excel
+2025-05-23,B1,canopy management,6.4,268.8,Crew A,2025,excel
+2025-05-23,B1,irrigation,7.7,369.6,Crew B,2025,excel
+2025-06-03,B1,hedging,6.4,268.8,Crew B,2025,excel
+2025-06-03,B1,leafing,6.9,289.8,Crew A,2025,excel
+2025-06-03,B1,leaf pull,7.3,306.6,Crew B,2025,excel
+2025-06-03,B1,irrigate,8.5,408.0,Contract - Silverado,2025,excel
+2025-06-03,B2,leafing,9.1,382.2,Crew A,2025,excel
+2025-06-03,B3,leafing,7.8,327.6,Crew A,2025,excel
+2025-06-08,B1,canopy management,6.8,285.6,Crew B,2025,excel
+2025-06-08,B1,leafing,7.7,323.4,Crew A,2025,excel
+2025-06-08,B1,irrigate,8.8,422.4,Crew B,2025,excel
+2025-06-08,B2,canopy management,8.5,357.0,Crew B,2025,excel
+2025-06-08,B2,irrigate,7.5,360.0,Crew B,2025,excel
+2025-06-08,B3,canopy management,7.8,327.6,Crew B,2025,excel
+2025-06-08,B3,irrigate,7.6,364.8,Crew B,2025,excel
+2025-06-13,B1,wire lift,7.0,294.0,Crew B,2025,excel
+2025-06-13,B1,shoot positioning,6.5,273.0,Contract - Silverado,2025,excel
+2025-06-13,B2,wire lift,6.4,268.8,Crew B,2025,excel
+2025-06-13,B2,shoot positioning,8.9,373.8,Contract - Silverado,2025,excel
+2025-06-13,B3,shoot positioning,10.3,432.6,Contract - Silverado,2025,excel
+2025-06-18,B1,canopy management,7.1,298.2,Crew B,2025,excel
+2025-06-18,B1,shoot positioning,6.7,281.4,Contract - Silverado,2025,excel
+2025-06-18,B1,fungicide app,8.8,457.6,Crew A,2025,excel
+2025-06-23,B1,canopy mgmt,9.1,382.2,Crew B,2025,excel
+2025-06-23,B1,leaf pull,9.2,386.4,Crew B,2025,excel
+2025-06-23,B2,canopy mgmt,7.0,294.0,Crew B,2025,excel
+2025-06-23,B2,leaf pull,8.8,369.6,Crew B,2025,excel
+2025-06-23,B3,canopy mgmt,7.4,310.8,Crew B,2025,excel
+2025-07-03,B1,canopy management,6.9,289.8,Contract - Silverado,2025,excel
+2025-07-03,B1,shoot positioning,8.7,365.4,Contract - Silverado,2025,excel
+2025-07-03,B2,canopy management,6.2,260.4,Contract - Silverado,2025,excel
+2025-07-08,B1,wire lift,8.2,344.4,Contract - Silverado,2025,excel
+2025-07-08,B1,leaf pull,6.3,264.6,Crew B,2025,excel
+2025-07-08,B1,shoot positioning,7.8,327.6,Contract - Silverado,2025,excel
+2025-07-08,B2,leaf pull,9.8,411.6,Crew B,2025,excel
+2025-07-08,B3,leaf pull,10.4,436.8,Crew B,2025,excel
+2025-07-13,B1,hedging,7.9,331.8,Contract - Silverado,2025,excel
+2025-07-13,B1,leaf pull,7.9,331.8,Crew B,2025,excel
+2025-07-13,B1,drip repair,8.1,388.8,Contract - Silverado,2025,excel
+2025-07-13,B2,hedging,8.8,369.6,Contract - Silverado,2025,excel
+2025-07-13,B2,drip repair,8.9,427.2,Contract - Silverado,2025,excel
+2025-07-13,B3,hedging,8.4,352.8,Contract - Silverado,2025,excel
+2025-07-18,B1,canopy mgmt,8.1,340.2,Contract - Silverado,2025,excel
+2025-07-18,B1,leafing,8.3,348.6,Crew A,2025,excel
+2025-07-18,B2,canopy mgmt,8.9,373.8,Contract - Silverado,2025,excel
+2025-07-18,B2,leafing,9.3,390.6,Crew A,2025,excel
+2025-07-18,B3,leafing,10.2,428.4,Crew A,2025,excel
+2025-07-23,B1,hedging,6.7,281.4,Contract - Silverado,2025,excel
+2025-07-23,B1,leafing,9.0,378.0,Crew A,2025,excel
+2025-08-03,B1,harvest,6.3,346.5,Crew A,2025,excel
+2025-08-03,B1,picking,6.4,352.0,Crew B,2025,excel
+2025-08-03,B2,harvest,9.1,500.5,Crew A,2025,excel
+2025-08-03,B3,harvest,8.5,467.5,Crew A,2025,excel
+2025-08-08,B1,picking,8.3,456.5,Crew A,2025,excel
+2025-08-08,B2,picking,7.9,434.5,Crew A,2025,excel
+2025-08-13,B1,picking,6.4,352.0,Contract - Silverado,2025,excel
+2025-08-13,B1,harvest,8.4,462.0,Crew A,2025,excel
+2025-08-13,B2,picking,9.5,522.5,Contract - Silverado,2025,excel
+2025-08-13,B3,picking,8.4,462.0,Contract - Silverado,2025,excel
+2025-08-18,B1,upkeep,6.4,307.2,Crew A,2025,excel
+2025-08-18,B1,harvest,8.0,440.0,Contract - Silverado,2025,excel
+2025-08-23,B1,harvest,8.9,489.5,Crew B,2025,excel
+2025-08-23,B1,picking,8.4,462.0,Contract - Silverado,2025,excel
+2025-08-23,B2,harvest,7.8,429.0,Crew B,2025,excel
+2025-08-23,B3,harvest,8.4,462.0,Crew B,2025,excel
+2025-09-03,B1,Harvest,7.6,418.0,Contract - Silverado,2025,excel
+2025-09-03,B1,hand harvest,8.2,451.0,Crew A,2025,excel
+2025-09-03,B2,Harvest,9.2,506.0,Contract - Silverado,2025,excel
+2025-09-03,B3,Harvest,6.4,352.0,Contract - Silverado,2025,excel
+2025-09-08,B1,Harvest,9.4,517.0,Crew B,2025,excel
+2025-09-08,B1,hand harvest,8.8,484.0,Contract - Silverado,2025,excel
+2025-09-08,B2,Harvest,8.5,467.5,Crew B,2025,excel
+2025-09-08,B3,Harvest,8.4,462.0,Crew B,2025,excel
+2025-09-13,B1,hand harvest,8.1,445.5,Crew B,2025,excel
+2025-09-13,B2,hand harvest,9.8,539.0,Crew B,2025,excel
+2025-09-18,B1,hand harvest,8.8,484.0,Crew A,2025,excel
+2025-09-18,B1,Harvest,8.2,451.0,Crew B,2025,excel
+2025-09-18,B2,hand harvest,8.0,440.0,Crew A,2025,excel
+2025-09-18,B3,hand harvest,8.2,451.0,Crew A,2025,excel
+2025-09-23,B1,Harvest,9.3,511.5,Crew A,2025,excel
+2026-01-03,B1,pruning,7.4,325.6,Crew A,2026,excel
+2026-01-03,B1,prune,6.5,286.0,Crew B,2026,excel
+2026-01-03,B2,pruning,8.1,356.4,Crew A,2026,excel
+2026-01-03,B2,prune,9.0,396.0,Crew B,2026,excel
+2026-01-03,B3,pruning,7.8,343.2,Crew A,2026,excel
+2026-01-08,B1,prune,8.8,387.2,Crew A,2026,excel
+2026-01-08,B1,pruning,6.2,272.8,Crew B,2026,excel
+2026-01-08,B2,prune,7.4,325.6,Crew A,2026,excel
+2026-01-13,B1,prune,7.8,343.2,Contract - Silverado,2026,excel
+2026-01-13,B1,pruning,6.5,286.0,Crew A,2026,excel
+2026-01-13,B2,prune,7.1,312.4,Contract - Silverado,2026,excel
+2026-01-13,B3,prune,9.9,435.6,Contract - Silverado,2026,excel
+2026-01-18,B1,pruning,9.0,396.0,Contract - Silverado,2026,excel
+2026-01-18,B1,prune,8.3,365.2,Crew A,2026,excel
+2026-01-18,B2,pruning,8.4,369.6,Contract - Silverado,2026,excel
+2026-01-23,B1,pruning,7.9,347.6,Crew B,2026,excel
+2026-01-23,B1,prune,8.8,387.2,Contract - Silverado,2026,excel
+2026-01-23,B2,pruning,9.0,396.0,Crew B,2026,excel
+2026-01-23,B3,pruning,9.4,413.6,Crew B,2026,excel
+2026-02-03,B1,Pruning,8.2,360.8,Contract - Silverado,2026,excel
+2026-02-03,B1,winter pruning,6.9,303.6,Crew A,2026,excel
+2026-02-03,B2,Pruning,6.5,286.0,Contract - Silverado,2026,excel
+2026-02-03,B3,Pruning,9.8,431.2,Contract - Silverado,2026,excel
+2026-02-08,B1,Pruning,7.1,312.4,Crew B,2026,excel
+2026-02-08,B1,winter pruning,8.1,356.4,Contract - Silverado,2026,excel
+2026-02-08,B2,Pruning,7.5,330.0,Crew B,2026,excel
+2026-02-08,B3,Pruning,8.4,369.6,Crew B,2026,excel
+2026-02-13,B1,winter pruning,8.6,378.4,Crew B,2026,excel
+2026-02-13,B1,Pruning,7.9,347.6,Contract - Silverado,2026,excel
+2026-02-13,B2,winter pruning,8.0,352.0,Crew B,2026,excel
+2026-02-18,B1,winter pruning,6.8,299.2,Crew A,2026,excel
+2026-02-18,B1,Pruning,7.4,325.6,Crew B,2026,excel
+2026-02-18,B2,winter pruning,8.1,356.4,Crew A,2026,excel
+2026-02-18,B3,winter pruning,8.0,352.0,Crew A,2026,excel
+2026-02-23,B1,Pruning,8.3,365.2,Crew A,2026,excel
+2026-02-23,B2,Pruning,8.2,360.8,Crew A,2026,excel
+2026-03-03,B1,spray,10.0,520.0,Crew A,2026,excel
+2026-03-03,B2,spray,9.0,468.0,Crew A,2026,excel
+2026-03-03,B3,spray,6.2,322.4,Crew A,2026,excel
+2026-04-03,B1,suckering,6.2,260.4,Crew A,2026,excel
+2026-04-03,B1,shoot thinning,8.7,365.4,Crew B,2026,excel
+2026-04-03,B2,suckering,8.2,344.4,Crew A,2026,excel
+2026-04-03,B3,suckering,9.4,394.8,Crew A,2026,excel
+2026-04-08,B1,suckering,7.0,294.0,Crew A,2026,excel
+2026-04-08,B1,spraying,10.6,551.2,Crew B,2026,excel
+2026-04-13,B1,sucker,7.5,315.0,Contract - Silverado,2026,excel
+2026-04-13,B1,suckering,7.7,323.4,Crew A,2026,excel
+2026-04-13,B2,sucker,8.0,336.0,Contract - Silverado,2026,excel
+2026-04-13,B3,sucker,7.7,323.4,Contract - Silverado,2026,excel
+2026-04-18,B1,sucker,8.7,365.4,Contract - Silverado,2026,excel
+2026-04-23,B1,shoot thinning,8.2,344.4,Crew B,2026,excel
+2026-04-23,B2,shoot thinning,8.9,373.8,Crew B,2026,excel
+2026-05-03,B1,sucker,7.9,331.8,Contract - Silverado,2026,excel
+2026-05-03,B1,canopy mgmt,6.3,264.6,Crew A,2026,excel
+2026-05-03,B1,irrigation,9.5,456.0,Crew A,2026,excel
+2026-05-03,B2,sucker,7.7,323.4,Contract - Silverado,2026,excel
+2026-05-03,B2,canopy mgmt,9.4,394.8,Crew A,2026,excel
+2026-05-03,B2,irrigation,10.8,518.4,Crew A,2026,excel
+2026-05-03,B3,canopy mgmt,7.6,319.2,Crew A,2026,excel
+2026-05-03,B3,irrigation,8.0,384.0,Crew A,2026,excel
+2026-05-08,B1,shoot thinning,7.8,327.6,Crew B,2026,excel
+2026-05-08,B1,sucker,6.7,281.4,Contract - Silverado,2026,excel
+2026-05-08,B1,hedging,7.7,323.4,Crew A,2026,excel
+2026-05-08,B2,shoot thinning,8.1,340.2,Crew B,2026,excel
+2026-05-08,B3,shoot thinning,10.1,424.2,Crew B,2026,excel
+2026-05-13,B1,shoot thinning,6.5,273.0,Crew B,2026,excel
+2026-05-18,B1,suckering,7.0,294.0,Crew A,2026,excel
+2026-05-18,B1,wire lift,8.3,348.6,Crew A,2026,excel
+2026-05-18,B2,suckering,7.2,302.4,Crew A,2026,excel
+2026-05-18,B2,wire lift,8.6,361.2,Crew A,2026,excel
+2026-05-18,B3,suckering,9.0,378.0,Crew A,2026,excel
+2026-05-23,B1,suckering,6.3,264.6,Crew A,2026,excel
+2026-06-03,B1,leafing,7.4,310.8,Crew A,2026,excel
+2026-06-03,B2,leafing,7.9,331.8,Crew A,2026,excel
+2026-06-03,B3,leafing,9.5,399.0,Crew A,2026,excel
+2026-06-08,B1,canopy management,7.3,306.6,Crew B,2026,excel
+2026-06-08,B1,irrigate,10.3,494.4,Crew B,2026,excel
+2026-06-08,B2,canopy management,9.9,415.8,Crew B,2026,excel
+2026-06-08,B3,canopy management,6.5,273.0,Crew B,2026,excel
+2026-06-13,B1,wire lift,8.0,336.0,Crew B,2026,excel
+2026-06-13,B1,shoot positioning,8.6,361.2,Contract - Silverado,2026,excel
+2026-06-13,B2,shoot positioning,6.1,256.2,Contract - Silverado,2026,excel
+2026-06-23,B1,canopy mgmt,7.9,331.8,Crew B,2026,excel
+2026-06-23,B1,leaf pull,8.3,348.6,Crew B,2026,excel
+2026-07-03,B1,canopy management,9.2,386.4,Contract - Silverado,2026,excel
+2026-07-08,B1,leaf pull,8.0,336.0,Crew B,2026,excel
+2026-07-08,B2,leaf pull,7.4,310.8,Crew B,2026,excel
+2026-07-08,B3,leaf pull,9.0,378.0,Crew B,2026,excel
+2026-07-13,B1,hedging,7.5,315.0,Contract - Silverado,2026,excel
+2026-07-13,B2,hedging,10.0,420.0,Contract - Silverado,2026,excel
+2026-07-13,B3,hedging,6.5,273.0,Contract - Silverado,2026,excel
+2026-07-18,B1,leafing,6.5,273.0,Crew A,2026,excel

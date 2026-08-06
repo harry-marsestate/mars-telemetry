@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "ingestion"
+version = "0.1.0"
+description = ""
+authors = ["Harry <harry@marsestates.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.14"
+dbt-postgres = "^1.11.0"
+dagster = "^1.13.16"
+dagster-webserver = "^1.13.16"
+dagster-dbt = "^0.29.16"
+pandas = "^3.0.5"
+pydantic = "^2.13.4"
+httpx = "^0.28.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

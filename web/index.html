@@ -465,7 +465,7 @@ function intervalToMs(interval) {
 
 async function getSeries({ metric, scope, vintage, range, end, agg }) {
   const bucket = RANGE_BUCKETS[range];
-  const endDate = end || MOCK_NOW;
+  const endDate = end || endOfReal(vintage);
   const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
 
   const { data, error } = await sb.rpc('series_bucketed', {
@@ -489,6 +489,20 @@ async function getSeries({ metric, scope, vintage, range, end, agg }) {
     stale: false,
     lastReading: data.length ? data[data.length - 1].t : null
   };
+}
+
+async function getDerivedSeries({ field, vintage, range, end }) {
+  const endDate = end || endOfReal(vintage);
+  const bucket = RANGE_BUCKETS[range];
+  const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
+  const { data, error } = await sb.from('daily_derived')
+    .select(`day, ${field}`)
+    .eq('vintage', vintage)
+    .gte('day', startDate.toISOString())
+    .lte('day', endDate.toISOString())
+    .order('day');
+  if (error) { console.error('getDerivedSeries error:', error); return { points: [], stale: true }; }
+  return { points: data.map(r => ({ t: r.day, v: r[field] })), stale: false };
 }
 </script>
 
@@ -715,6 +729,15 @@ function endOf(v, align){
   const fs=fermSeason(v);                    // archive snapshot = peak of harvest
   const d=doyDate(v, Math.round((fs.sd+fs.ed)/2)); d.setHours(14,0,0,0); return d;
 }
+/* Real-data mirror of endOf(v) — same archived-vintage snapshot logic (peak
+   of harvest within that vintage's own season), but anchors the current
+   vintage to MOCK_NOW instead of the live-ticking NOW, since real queries
+   must land inside the seeded data's actual date range. */
+function endOfReal(v){
+  if(v===CURRENT) return MOCK_NOW;
+  const fs=fermSeason(v);
+  const d=doyDate(v, Math.round((fs.sd+fs.ed)/2)); d.setHours(14,0,0,0); return d;
+}
 /* getter(date, vintage) -> number | null ; agg: 'mean' | 'sum' | 'last' */
 function buildSeries(getter, v, range, opts={}){
   const r=RANGES[range], end=opts.end||endOf(v,opts.align), pts=[], agg=opts.agg||'mean';
@@ -750,6 +773,16 @@ async function buildSeriesReal(metric, scope, v, range, opts={}){
     return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d) };
   });
   return pts;
+}
+/* Real, async — same shape as buildSeriesReal but reads the daily_derived
+   dbt view directly (gdd/dtr/vpd/et0 aren't in sensor_readings). */
+async function buildDerivedSeriesReal(field, v, range, opts={}){
+  const r = RANGES[range];
+  const result = await getDerivedSeries({ field, vintage: v, range, end: opts.end });
+  return result.points.map(p => {
+    const d = new Date(p.t);
+    return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d) };
+  });
 }
 /* Real, async — fetches a per-block metric for each id in `ids` and averages
    the v values at each matching timestamp (bucket boundaries line up because
@@ -988,7 +1021,10 @@ const PANELS = [
 {id:'gdd', tab:'vineyard', sect:'climate', span:'s6', title:'Growing degree days', unit:'GDD · base 50 °F',
  sub:'Cumulative from 1 April · band shows normal picking range', range:'30D',
  render: async (b,c) => {
-   const sets=await vSets(c,(d,v)=>gddTo(d,v),'#C6A961','GDD',{agg:'last'});
+   const sets = c.compare
+     ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
+         pts: await buildDerivedSeriesReal('gdd_cumulative', v, c.range)})))
+     : [{name:'GDD', color:'#C6A961', pts: await buildDerivedSeriesReal('gdd_cumulative', c.primary, c.range)}];
    legendFor(b.parentElement,[...sets,{name:`Harvest window ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD`,color:'#6E9B72',band:true}]);
    lineChart(b,sets,{unit:'GDD',dec:0,h:186,domain:[0,3700],
      band:HARVEST_BAND, bandColor:'#6E9B72', bandLabel:'Harvest window'});}},
@@ -996,7 +1032,10 @@ const PANELS = [
 {id:'dtr', tab:'vineyard', sect:'climate', span:'s4', title:'Diurnal range', unit:'°F',
  sub:'Daily max − min · derived', range:'30D',
  render: async (b,c) => {
-   const sets = await vSets(c,(d,v)=>dtrAt('estate',d,v),'#BE9C6A','Range');
+   const sets = c.compare
+     ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
+         pts: await buildDerivedSeriesReal('dtr_f', v, c.range)})))
+     : [{name:'Range', color:'#BE9C6A', pts: await buildDerivedSeriesReal('dtr_f', c.primary, c.range)}];
    lineChart(b, sets, {unit:'°F',dec:1,h:172});
  }},
 
@@ -1041,14 +1080,20 @@ const PANELS = [
 {id:'vpd', tab:'vineyard', sect:'soil', span:'s4', title:'Vapour pressure deficit', unit:'kPa',
  sub:'Derived from temp + RH · vine stress proxy', range:'5D',
  render: async (b,c) => {
-   const sets=await vSets(c,(d,v)=>vpdAt('estate',d,v),'#C9603F','VPD');
+   const sets = c.compare
+     ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
+         pts: await buildDerivedSeriesReal('vpd_kpa', v, c.range)})))
+     : [{name:'VPD', color:'#C9603F', pts: await buildDerivedSeriesReal('vpd_kpa', c.primary, c.range)}];
    legendFor(b.parentElement,[...sets,{name:'Productive band 0.4–3.1 kPa',color:'#6E9B72',band:true}]);
    lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[0.4,3.1],bandColor:'#6E9B72'});}},
 
 {id:'et0', tab:'vineyard', sect:'soil', span:'s4', title:'Reference ET (ET₀)', unit:'in / day',
  sub:'Derived · irrigation demand', range:'30D',
  render: async (b,c) => {
-   const sets = await vSets(c,(d,v)=>et0At('estate',d,v),'#7FA3D4','ET₀');
+   const sets = c.compare
+     ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
+         pts: await buildDerivedSeriesReal('et0_in', v, c.range)})))
+     : [{name:'ET₀', color:'#7FA3D4', pts: await buildDerivedSeriesReal('et0_in', c.primary, c.range)}];
    lineChart(b, sets, {unit:'in/day',dec:3,h:172});
  }},
 

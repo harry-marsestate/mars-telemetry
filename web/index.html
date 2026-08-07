@@ -504,6 +504,22 @@ async function getDerivedSeries({ field, vintage, range, end }) {
   if (error) { console.error('getDerivedSeries error:', error); return { points: [], stale: true }; }
   return { points: data.map(r => ({ t: r.day, v: r[field] })), stale: false };
 }
+
+/* Role for panel-visibility gating. Deliberately calls the existing
+   current_role_name() RPC (SECURITY DEFINER) rather than querying
+   user_profiles directly -- that table has RLS enabled with zero policies
+   (see docs/SECURITY.md), so a direct query would silently return nothing.
+   Caches the in-flight promise so concurrent callers share one request. */
+let _userRolePromise = null;
+function getCurrentUserRole(){
+  if(!_userRolePromise){
+    _userRolePromise = sb.rpc('current_role_name').then(({data,error})=>{
+      if(error){ console.error('getCurrentUserRole error:', error); return null; }
+      return data;
+    });
+  }
+  return _userRolePromise;
+}
 </script>
 
 <script>
@@ -1022,14 +1038,14 @@ const SECTIONS = [
 
 const PANELS = [
 /* ══ VINEYARD · CLIMATE ══ */
-{id:'airtemp', tab:'vineyard', sect:'climate', span:'s6', title:'Air temperature', unit:'°F',
+{id:'airtemp', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Air temperature', unit:'°F',
  sub:'Estate weather station', range:'5D',
  render: async (b,c) => {
    const sets = await vSets(c, {metric:'air_temp', scope:'estate'}, METRICS.airTemp.color, 'Air temp');
    lineChart(b, sets, {unit:'°F',dec:1,h:186,aria:'Air temperature over time'});
  }},
 
-{id:'gdd', tab:'vineyard', sect:'climate', span:'s6', title:'Growing degree days', unit:'GDD · base 50 °F',
+{id:'gdd', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Growing degree days', unit:'GDD · base 50 °F',
  sub:'Cumulative from 1 April · band shows normal picking range', range:'30D',
  render: async (b,c) => {
    const sets = c.compare
@@ -1040,7 +1056,7 @@ const PANELS = [
    lineChart(b,sets,{unit:'GDD',dec:0,h:186,domain:[0,3700],
      band:HARVEST_BAND, bandColor:'#6E9B72', bandLabel:'Harvest window'});}},
 
-{id:'dtr', tab:'vineyard', sect:'climate', span:'s4', title:'Diurnal range', unit:'°F',
+{id:'dtr', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Diurnal range', unit:'°F',
  sub:'Daily max − min · derived', range:'30D',
  render: async (b,c) => {
    const sets = c.compare
@@ -1050,23 +1066,23 @@ const PANELS = [
    lineChart(b, sets, {unit:'°F',dec:1,h:172});
  }},
 
-{id:'rh', tab:'vineyard', sect:'climate', span:'s4', title:'Relative humidity', unit:'%',
+{id:'rh', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Relative humidity', unit:'%',
  sub:'Estate weather station', range:'1D',
  render: async (b,c) => {
    const sets = await vSets(c, {metric:'humidity', scope:'estate'}, METRICS.humidity.color, 'RH');
    lineChart(b, sets, {unit:'%',dec:0,h:172});
  }},
 
-{id:'wind', tab:'vineyard', sect:'climate', span:'s4', title:'Wind speed & direction', unit:'mph · degrees',
+{id:'wind', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Wind speed & direction', unit:'mph · degrees',
  sub:'Estate weather station · current reading',
  render:(b,c)=>renderWind(b,c)},
 
-{id:'solar', tab:'vineyard', sect:'climate', span:'s12', title:'Solar insolation & UV', unit:'W/m² · UV index',
+{id:'solar', tab:'vineyard', sect:'climate', span:'s12', minRole:'all', title:'Solar insolation & UV', unit:'W/m² · UV index',
  sub:'Pyranometer + UV sensor · measured against clear-sky expectation', range:'1D',
  render:(b,c)=>renderSolar(b,c)},
 
 /* ══ VINEYARD · SOIL & WATER ══ */
-{id:'soilmoist', tab:'vineyard', sect:'soil', span:'s8', title:'Soil moisture', unit:'% VWC',
+{id:'soilmoist', tab:'vineyard', sect:'soil', span:'s8', minRole:'all', title:'Soil moisture', unit:'% VWC',
  sub:'Probes at 18 in · band shows target range for deficit irrigation', range:'30D', perBlock:'soilMoist',
  render: async (b,c) => {
    const sets = c.compare
@@ -1077,7 +1093,7 @@ const PANELS = [
    lineChart(b,sets,{unit:'% VWC',dec:1,h:196,band:[15,25],bandColor:'#6E9B72',bandLabel:'Target band'});
  }},
 
-{id:'soiltemp', tab:'vineyard', sect:'soil', span:'s4', title:'Soil temperature', unit:'°F',
+{id:'soiltemp', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Soil temperature', unit:'°F',
  sub:'Probes at 18 in', range:'5D', perBlock:'soilTemp',
  render: async (b,c) => {
    const sets = c.compare
@@ -1088,7 +1104,7 @@ const PANELS = [
    lineChart(b,sets,{unit:'°F',dec:1,h:196});
  }},
 
-{id:'vpd', tab:'vineyard', sect:'soil', span:'s4', title:'Vapour pressure deficit', unit:'kPa',
+{id:'vpd', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Vapour pressure deficit', unit:'kPa',
  sub:'Derived from temp + RH · vine stress proxy', range:'5D',
  render: async (b,c) => {
    const sets = c.compare
@@ -1098,7 +1114,7 @@ const PANELS = [
    legendFor(b.parentElement,[...sets,{name:'Productive band 0.4–3.1 kPa',color:'#6E9B72',band:true}]);
    lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[0.4,3.1],bandColor:'#6E9B72'});}},
 
-{id:'et0', tab:'vineyard', sect:'soil', span:'s4', title:'Reference ET (ET₀)', unit:'in / day',
+{id:'et0', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Reference ET (ET₀)', unit:'in / day',
  sub:'Derived · irrigation demand', range:'30D',
  render: async (b,c) => {
    const sets = c.compare
@@ -1108,7 +1124,7 @@ const PANELS = [
    lineChart(b, sets, {unit:'in/day',dec:3,h:172});
  }},
 
-{id:'precip', tab:'vineyard', sect:'soil', span:'s4', title:'Precipitation', unit:'inches',
+{id:'precip', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Precipitation', unit:'inches',
  sub:'Tipping-bucket gauge · total per interval', range:'1Y',
  render: async (b,c) => {
    if(c.compare){
@@ -1124,7 +1140,7 @@ const PANELS = [
    }
  }},
 
-{id:'irrig', tab:'vineyard', sect:'soil', span:'s8', title:'Irrigation volume applied', unit:'gallons',
+{id:'irrig', tab:'vineyard', sect:'soil', span:'s8', minRole:'operator', title:'Irrigation volume applied', unit:'gallons',
  sub:'Flow meters · total across selected blocks', range:'30D',
  render: async (b,c) => {
    if(c.compare){
@@ -1140,7 +1156,7 @@ const PANELS = [
    }
  }},
 
-{id:'irrigblk', tab:'vineyard', sect:'soil', span:'s4', title:'Irrigation by block', unit:'gallons · gal/acre · inches',
+{id:'irrigblk', tab:'vineyard', sect:'soil', span:'s4', minRole:'operator', title:'Irrigation by block', unit:'gallons · gal/acre · inches',
  sub:'Season to date',
  render:(b,c)=>{
    const v=c.primary, end=endOf(v,c.align);
@@ -1159,7 +1175,7 @@ const PANELS = [
      ['Total',fmt(tot,0),fmt(tot/ac,0),fmt(tot/ac/27154,2)]);}},
 
 /* ══ VINEYARD · LABOUR ══ */
-{id:'labhours', tab:'vineyard', sect:'labour', span:'s6', title:'Labour hours by operation', unit:'hours',
+{id:'labhours', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour hours by operation', unit:'hours',
  sub:'Selected blocks · season to date',
  render:(b,c)=>{
    if(c.compare){
@@ -1174,7 +1190,7 @@ const PANELS = [
      barChart(b, Object.entries(agg).map(([k,v])=>({lbl:k.split(' ')[0],v:+v.toFixed(1),color:'#C6A961'})),
        {unit:'hrs',dec:0,name:'Hours',h:206});}}},
 
-{id:'labcost', tab:'vineyard', sect:'labour', span:'s6', title:'Labour cost by block', unit:'USD · USD/acre',
+{id:'labcost', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour cost by block', unit:'USD · USD/acre',
  sub:'Selected blocks · season to date',
  render:(b,c)=>{
    const v=c.primary; let tc=0, th=0;
@@ -1192,7 +1208,7 @@ const PANELS = [
      ['Total',fmt(ac,1),fmt(th,0),money(tc),money(tc/ac)]);}},
 
 /* ══ WINERY · CELLAR ══ */
-{id:'cellart', tab:'winery', sect:'cellar', span:'s6', title:'Cellar temperature', unit:'°F',
+{id:'cellart', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar temperature', unit:'°F',
  sub:'Barrel room · live sensor · target 55–58 °F', range:'5D',
  render: async (b,c) => {
    const sets=[{name:'Cellar',color:METRICS.cellar.color,
@@ -1201,7 +1217,7 @@ const PANELS = [
    lineChart(b,sets,{unit:'°F',dec:1,h:186,band:[55,58],bandColor:'#6E9B72',bandLabel:'Target'});
  }},
 
-{id:'cellarh', tab:'winery', sect:'cellar', span:'s6', title:'Cellar humidity', unit:'%',
+{id:'cellarh', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar humidity', unit:'%',
  sub:'Barrel room · live sensor · target 68–78 %', range:'30D',
  render: async (b,c) => {
    const sets=[{name:'Cellar RH',color:METRICS.cellarRH.color,
@@ -1211,16 +1227,16 @@ const PANELS = [
  }},
 
 /* ══ WINERY · FERMENTATION ══ */
-{id:'ferm', tab:'winery', sect:'ferm', span:'s8', title:'Fermentation temperature', unit:'°F',
+{id:'ferm', tab:'winery', sect:'ferm', span:'s8', minRole:'operator', title:'Fermentation temperature', unit:'°F',
  sub:'Tank probes · plotted only while tanks are fermenting', range:'30D',
  render:(b,c)=>renderFerm(b,c)},
 
-{id:'tanks', tab:'winery', sect:'ferm', span:'s4', title:'Tank log', unit:'litres · °F · °Bx',
+{id:'tanks', tab:'winery', sect:'ferm', span:'s4', minRole:'operator', title:'Tank log', unit:'litres · °F · °Bx',
  sub:'Lots from the selected blocks',
  render:(b,c)=>renderTanks(b,c)},
 
 /* ══ WINERY · HARVEST ══ */
-{id:'fruit', tab:'winery', sect:'harvest', span:'s12', title:'Fruit received by lot', unit:'tons · °Bx · pH',
+{id:'fruit', tab:'winery', sect:'harvest', span:'s12', minRole:'operator', title:'Fruit received by lot', unit:'tons · °Bx · pH',
  sub:'Weigh-tag totals and pick-day lab numbers',
  render:(b,c)=>renderFruit(b,c)}
 ];
@@ -1829,8 +1845,10 @@ function makePanel(p, c){
   }};
 }
 
-function renderTab(tab){
+async function renderTab(tab){
   const c=ctxFor(tab);
+  const role = await getCurrentUserRole();
+  const isOperator = role==='operator';
   renderFilters(tab);
   const host=$('#body-'+tab);
   host.innerHTML='';
@@ -1857,10 +1875,12 @@ function renderTab(tab){
     right.appendChild(ov);
     pending.push(()=>paintOverviewV('vineyard',c));
 
-    const an=makePanel({id:'anom-v', title:'Anomalies & risks', unit:'rule-based',
-      sub:'Evaluated against the current readings',
-      render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c);
-    right.appendChild(an.panel); pending.push(an.run);
+    if(isOperator){
+      const an=makePanel({id:'anom-v', title:'Anomalies & risks', unit:'rule-based',
+        sub:'Evaluated against the current readings',
+        render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c);
+      right.appendChild(an.panel); pending.push(an.run);
+    }
   } else {
     const ov=el('div','panel');
     ov.innerHTML=`<div class="ov-hd"><div class="ov-ttl">Cellar at a glance</div>
@@ -1869,15 +1889,17 @@ function renderTab(tab){
     left.appendChild(ov);
     pending.push(()=>paintOverviewW());
 
-    const an=makePanel({id:'anom-w', title:'Anomalies & risks', unit:'rule-based',
-      sub:'Cellar limits and tank ceilings',
-      render:(b,cc)=>renderAnomalies(b,cc,'winery')}, c);
-    right.appendChild(an.panel); pending.push(an.run);
+    if(isOperator){
+      const an=makePanel({id:'anom-w', title:'Anomalies & risks', unit:'rule-based',
+        sub:'Cellar limits and tank ceilings',
+        render:(b,cc)=>renderAnomalies(b,cc,'winery')}, c);
+      right.appendChild(an.panel); pending.push(an.run);
+    }
   }
 
   /* sections */
   SECTIONS.filter(s=>s.tab===tab).forEach(s=>{
-    const ps=PANELS.filter(p=>p.tab===tab && p.sect===s.id);
+    const ps=PANELS.filter(p=>p.tab===tab && p.sect===s.id && (p.minRole!=='operator' || isOperator));
     if(!ps.length) return;
     const head=el('div','sect');
     head.innerHTML=`<span class="sect-l">${s.label}</span><span class="sect-r"></span><span class="sect-n">${s.note}</span>`;

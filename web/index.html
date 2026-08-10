@@ -83,11 +83,12 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   margin-top:6px; padding-bottom:12px; border-bottom:1px solid var(--line);
 }
 .menu-meta{font-family:var(--mono); font-size:10.5px; color:var(--muted-2); padding:11px 0; line-height:1.7}
-.signout{
+.signout, .menu-link{
   width:100%; text-align:left; font-size:11.5px; letter-spacing:.09em; text-transform:uppercase;
   color:var(--muted); padding:9px 0 2px; border-top:1px solid var(--line); transition:color .16s;
 }
 .signout:hover{color:var(--alert)}
+.menu-link:hover{color:var(--gold)}
 
 /* ── Layout ────────────────────────────────────── */
 .wrap{max-width:1560px; margin:0 auto; padding:24px 26px 90px}
@@ -328,9 +329,10 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .chat-note{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); text-align:center; padding-top:12px; letter-spacing:.03em}
 
 /* ── Signed out ────────────────────────────────── */
-.out{position:fixed; inset:0; z-index:400; background:var(--ink); display:none; place-items:center; text-align:center;
+.out{position:fixed; inset:0; z-index:400; background:var(--ink); display:none; overflow-y:auto; text-align:center;
   background-image:radial-gradient(ellipse 900px 500px at 50% 42%, rgba(198,169,97,.07), transparent 70%)}
-.out.on{display:grid; animation:fade .4s ease}
+.out.on{display:flex; animation:fade .4s ease}
+.out.on > *{margin:auto; padding:40px 20px; box-sizing:border-box}
 .out-mono{height:104px; margin-bottom:26px; opacity:.92}
 .out-ttl{font-family:var(--display); font-size:34px; font-weight:400; letter-spacing:.02em}
 .out-sub{font-size:8.5px; letter-spacing:.3em; text-transform:uppercase; color:var(--gold-dim); margin-top:9px}
@@ -372,6 +374,30 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 }
 .auth-forgot:hover{color:var(--gold)}
 .auth-success{font-family:var(--mono); font-size:12px; color:var(--ok); line-height:1.8; max-width:300px; margin:26px auto 0}
+
+/* ── Approval queue (Phase 6.8) ──────────────────── */
+.queue-card{width:600px; max-width:92vw}
+.queue-list{text-align:left; margin-top:26px; max-height:60vh; overflow-y:auto; display:flex; flex-direction:column; gap:14px}
+.queue-row{background:var(--ink-2); border:1px solid var(--line); border-radius:4px; padding:14px 16px}
+.queue-row-hd{display:flex; justify-content:space-between; align-items:flex-start; gap:14px; flex-wrap:wrap}
+.queue-row-email{font-size:13px; color:var(--cream)}
+.queue-row-name{font-family:var(--mono); font-size:10.5px; color:var(--muted); margin-top:3px}
+.queue-row-time{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); margin-top:5px}
+.queue-row-actions{display:flex; gap:8px; flex:none}
+.queue-approve-form{margin-top:14px; padding-top:14px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:14px}
+.queue-approve-form select, .queue-approve-form input[type=text]{
+  background:var(--ink-3); border:1px solid var(--line); border-radius:3px;
+  color:var(--cream); font-family:var(--ui); font-size:13px; padding:9px 12px; width:100%;
+}
+.queue-approve-form select:focus, .queue-approve-form input[type=text]:focus{outline:none; border-color:var(--gold-dim)}
+.queue-collision-warn{font-family:var(--mono); font-size:10.5px; color:var(--warn); margin-top:6px; display:none; line-height:1.6}
+.queue-form-actions{display:flex; gap:10px}
+.queue-form-actions .out-b{width:auto; margin-top:0; padding:10px 20px}
+.queue-btn-secondary{
+  padding:10px 20px; border:1px solid var(--line-2); border-radius:3px; color:var(--muted);
+  font-size:11px; letter-spacing:.1em; text-transform:uppercase; transition:all .16s;
+}
+.queue-btn-secondary:hover{color:var(--alert); border-color:var(--alert)}
 
 .foot{display:flex; flex-wrap:wrap; gap:8px 26px; justify-content:space-between; padding:26px 2px 0; margin-top:30px;
   border-top:1px solid var(--line); font-family:var(--mono); font-size:9.5px; color:var(--muted-2); letter-spacing:.04em}
@@ -423,6 +449,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
           Access: Vineyard + Winery<br>
           Session opened 06:12 PDT
         </div>
+        <button class="menu-link" id="menu-queue" role="menuitem" type="button" style="display:none">Approval queue</button>
         <button class="signout" id="signout" role="menuitem">Sign out</button>
       </div>
     </div>
@@ -516,6 +543,16 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
     <div class="out-sub">Mars Estate &middot; Howell Mountain</div>
     <div class="auth-success" style="display:block">Your account has been created and is awaiting approval from an estate operator. You&rsquo;ll gain access once approved.</div>
     <button class="out-b auth-oauth" id="pending-signout" type="button">Sign out</button>
+  </div>
+</div>
+
+<div class="out" id="queue-view">
+  <div class="queue-card">
+    <img class="out-mono logo-img" alt="Mars Estate monogram">
+    <div class="out-ttl">Approval queue</div>
+    <div class="out-sub">Mars Estate &middot; Howell Mountain</div>
+    <button class="auth-forgot" id="queue-close" type="button">Back to dashboard</button>
+    <div class="queue-list" id="queue-list"></div>
   </div>
 </div>
 
@@ -2013,16 +2050,44 @@ setInterval(()=>{
   }
   if($('#ovg-winery')) paintOverviewW(true);
 },5000);
-setInterval(()=>{
-  $('#clock').textContent=NOW.toLocaleString('en-US',
-    {weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})+' PDT';
-},1000);
+
+/* Real wall-clock header display -- deliberately separate from the mock
+   NOW clock above. Panel date ranges, overview tiles, anomaly evaluation,
+   and everything else stay anchored to NOW/MOCK_NOW/endOfReal; only the
+   header's own displayed time reflects the browser's real local time. */
+function tzAbbr(date){
+  return new Intl.DateTimeFormat('en-US', {timeZoneName:'short'})
+    .formatToParts(date).find(p=>p.type==='timeZoneName')?.value || '';
+}
+function updateClock(){
+  const now=new Date();
+  const formatted=now.toLocaleString('en-US',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+  $('#clock').textContent=`${formatted} ${tzAbbr(now)}`;
+}
+function scheduleClockTick(){
+  updateClock();
+  const now=new Date();
+  const msToNextMinute=60000-(now.getSeconds()*1000+now.getMilliseconds());
+  setTimeout(()=>{
+    updateClock();
+    setInterval(updateClock,60000);
+  }, msToNextMinute);
+}
 
 /* Profile + sign out */
 $('#avatar').onclick=e=>{e.stopPropagation(); const m=$('#menu'); m.classList.toggle('open');
   $('#avatar').setAttribute('aria-expanded',m.classList.contains('open'));};
 document.addEventListener('click',e=>{if(!$('#pwrap').contains(e.target)) $('#menu').classList.remove('open');});
 $('#signout').onclick=()=>{$('#menu').classList.remove('open'); hideTip(); sb.auth.signOut();};
+$('#menu-queue').onclick=()=>{
+  $('#menu').classList.remove('open');
+  showQueueOnly();
+  loadApprovalQueue();
+};
+$('#queue-close').onclick=()=>{
+  $('#queue-view').classList.remove('on');
+  showDashboard();
+};
 
 /* Resize */
 let rz; addEventListener('resize',()=>{clearTimeout(rz); rz=setTimeout(()=>{
@@ -2328,13 +2393,14 @@ function computeInitials(name){
   return name.slice(0,2).toUpperCase();
 }
 async function updateHeaderForSession(session, role){
-  const { data: profile } = await sb.from('user_profiles').select('full_name').eq('id', session.user.id).single();
+  const { data: profile } = await sb.from('user_profiles').select('full_name, is_admin').eq('id', session.user.id).single();
   const displayName = profile?.full_name
     || session.user.user_metadata?.full_name || session.user.user_metadata?.name
     || session.user.email;
   $('#avatar').textContent = computeInitials(displayName);
   $('.menu-name').textContent = displayName;
   $('.menu-role').textContent = role==='operator' ? 'Operator' : 'Customer';
+  $('#menu-queue').style.display = profile?.is_admin ? '' : 'none';
 }
 
 function showAuthOnly(){
@@ -2364,6 +2430,13 @@ function showDashboard(){
     renderTab('winery');
   }
 }
+function showQueueOnly(){
+  $('#auth-view').classList.remove('on');
+  $('#pending-view').classList.remove('on');
+  $('.hdr').style.display='none';
+  $('.wrap').style.display='none';
+  $('#queue-view').classList.add('on');
+}
 
 async function runSessionGate(){
   const { data: { session } } = await sb.auth.getSession();
@@ -2377,8 +2450,225 @@ async function runSessionGate(){
 
 $('#pending-signout').onclick=()=>sb.auth.signOut();
 
+/* §11 ── APPROVAL QUEUE (Phase 6.8) ────────────────────── */
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+/* Real wall-clock time, deliberately not the mock NOW clock -- confirmed_at
+   is a genuine timestamp from a real trigger, and NOW is anchored near a
+   fictional 2026-07-28 demo date for the rest of the app's simulated data. */
+function timeAgo(iso){
+  const mins=Math.floor((new Date()-new Date(iso))/60000);
+  if(mins<1) return 'just now';
+  if(mins<60) return `${mins} min${mins===1?'':'s'} ago`;
+  const hrs=Math.floor(mins/60);
+  if(hrs<24) return `${hrs} hour${hrs===1?'':'s'} ago`;
+  const days=Math.floor(hrs/24);
+  return `${days} day${days===1?'':'s'} ago`;
+}
+
+async function loadApprovalQueue(){
+  const list=$('#queue-list');
+  list.innerHTML=`<div class="empty">Loading&hellip;</div>`;
+
+  const { data: rows, error: profileErr } = await sb.from('user_profiles')
+    .select('id, full_name, role, customer_account_id, confirmed_at')
+    .eq('status','pending')
+    .not('confirmed_at','is',null)
+    .order('confirmed_at',{ascending:true});
+
+  if(profileErr){
+    console.error('loadApprovalQueue: profile query failed', profileErr);
+    list.innerHTML=`<div class="empty">Couldn&rsquo;t load the approval queue.<br><b>${escapeHtml(profileErr.message||'Unknown error')}</b></div>`;
+    return;
+  }
+  if(!rows.length){
+    list.innerHTML=`<div class="empty">No accounts awaiting approval.</div>`;
+    return;
+  }
+
+  const ids=rows.map(r=>r.id);
+  const { data: emailData, error: emailErr } = await sb.functions.invoke('admin-pending-emails', { body:{ids} });
+
+  if(emailErr){
+    let message=emailErr.message;
+    if(emailErr.context && typeof emailErr.context.json==='function'){
+      try{ const body=await emailErr.context.json(); if(body?.error) message=body.error; }catch{}
+    }
+    console.error('loadApprovalQueue: email lookup failed', emailErr);
+    list.innerHTML=`<div class="empty">Couldn&rsquo;t resolve pending users&rsquo; emails.<br><b>${escapeHtml(message)}</b></div>`;
+    return;
+  }
+
+  const emails=emailData?.emails || {};
+  list.innerHTML='';
+  rows.forEach(row=>renderQueueRow(list, row, emails[row.id]));
+}
+
+function renderQueueRow(list, row, email){
+  const safeEmail = email ? escapeHtml(email) : '<span class="dim">email unavailable</span>';
+  const safeName = row.full_name ? escapeHtml(row.full_name) : '';
+  const wrap=el('div','queue-row');
+  wrap.innerHTML=`
+    <div class="queue-row-hd">
+      <div class="queue-row-id">
+        <div class="queue-row-email">${safeEmail}</div>
+        ${safeName ? `<div class="queue-row-name">${safeName}</div>` : ''}
+        <div class="queue-row-time">confirmed ${timeAgo(row.confirmed_at)}</div>
+      </div>
+      <div class="queue-row-actions">
+        <button class="out-b queue-approve-btn" type="button">Approve</button>
+        <button class="queue-btn-secondary queue-reject-btn" type="button">Reject</button>
+      </div>
+    </div>
+    <div class="queue-approve-form" style="display:none"></div>
+  `;
+  list.appendChild(wrap);
+
+  const approveBtn=wrap.querySelector('.queue-approve-btn');
+  const rejectBtn=wrap.querySelector('.queue-reject-btn');
+  const formHost=wrap.querySelector('.queue-approve-form');
+
+  approveBtn.onclick=()=>{
+    if(formHost.style.display==='none'){
+      formHost.style.display='block';
+      formHost.innerHTML='';
+      renderApproveForm(formHost, row, wrap);
+    } else {
+      formHost.style.display='none';
+    }
+  };
+
+  rejectBtn.onclick=async ()=>{
+    if(!confirm(`Reject ${email||row.id}? This cannot be undone from here.`)) return;
+    rejectBtn.disabled=true; approveBtn.disabled=true;
+    const {error}=await sb.from('user_profiles').update({status:'rejected'}).eq('id',row.id);
+    if(error){
+      console.error('reject failed', error);
+      alert(`Couldn't reject: ${error.message}`);
+      rejectBtn.disabled=false; approveBtn.disabled=false;
+      return;
+    }
+    wrap.remove();
+    if(!list.children.length) list.innerHTML=`<div class="empty">No accounts awaiting approval.</div>`;
+  };
+}
+
+async function renderApproveForm(formHost, row, wrap){
+  const { data: blocks } = await sb.from('blocks').select('block_id, label').order('block_id');
+
+  formHost.innerHTML=`
+    <div class="fgroup">
+      <div class="flabel">Role</div>
+      <select class="queue-role-select">
+        <option value="operator">Operator</option>
+        <option value="customer">Customer</option>
+      </select>
+    </div>
+    <div class="queue-customer-fields" style="display:none">
+      <div class="fgroup">
+        <div class="flabel">Customer account ID</div>
+        <input type="text" class="queue-account-input" placeholder="e.g. ACCT-03">
+        <div class="queue-collision-warn"></div>
+      </div>
+      <div class="fgroup">
+        <div class="flabel">Block access</div>
+        <div class="chips queue-block-chips">
+          ${(blocks||[]).map(b=>`<button type="button" class="chip" data-block="${b.block_id}">${b.label}</button>`).join('')}
+        </div>
+      </div>
+    </div>
+    <div class="auth-err queue-form-err"></div>
+    <div class="queue-form-actions">
+      <button type="button" class="out-b queue-confirm-btn">Confirm approval</button>
+      <button type="button" class="queue-btn-secondary queue-cancel-btn">Cancel</button>
+    </div>
+  `;
+
+  const roleSelect=formHost.querySelector('.queue-role-select');
+  const customerFields=formHost.querySelector('.queue-customer-fields');
+  const accountInput=formHost.querySelector('.queue-account-input');
+  const collisionWarn=formHost.querySelector('.queue-collision-warn');
+  const blockChips=[...formHost.querySelectorAll('.queue-block-chips .chip')];
+  const formErr=formHost.querySelector('.queue-form-err');
+  const confirmBtn=formHost.querySelector('.queue-confirm-btn');
+  const cancelBtn=formHost.querySelector('.queue-cancel-btn');
+
+  roleSelect.onchange=()=>{ customerFields.style.display = roleSelect.value==='customer' ? '' : 'none'; };
+  blockChips.forEach(chip=>{ chip.onclick=()=>chip.classList.toggle('on'); });
+
+  let collisionTimer=null;
+  accountInput.addEventListener('input', ()=>{
+    clearTimeout(collisionTimer);
+    const val=accountInput.value.trim();
+    if(!val){ collisionWarn.style.display='none'; return; }
+    collisionTimer=setTimeout(async ()=>{
+      const [profileHit, blockAccessHit] = await Promise.all([
+        sb.from('user_profiles').select('id',{count:'exact',head:true}).eq('customer_account_id', val),
+        sb.from('customer_block_access').select('customer_account_id',{count:'exact',head:true}).eq('customer_account_id', val)
+      ]);
+      const exists = (profileHit.count||0) > 0 || (blockAccessHit.count||0) > 0;
+      if(exists){
+        collisionWarn.textContent = `"${val}" is already in use by another account — confirm this is intentional (e.g. a second contact at the same company) before approving.`;
+        collisionWarn.style.display='block';
+      } else {
+        collisionWarn.style.display='none';
+      }
+    }, 400);
+  });
+
+  cancelBtn.onclick=()=>{ formHost.style.display='none'; };
+
+  confirmBtn.onclick=async ()=>{
+    formErr.textContent=''; formErr.classList.remove('on');
+    const role=roleSelect.value;
+    let accountId=null, selectedBlocks=[];
+    if(role==='customer'){
+      accountId=accountInput.value.trim();
+      if(!accountId){
+        formErr.textContent='Enter a customer account ID.';
+        formErr.classList.add('on');
+        return;
+      }
+      selectedBlocks=blockChips.filter(c=>c.classList.contains('on')).map(c=>c.dataset.block);
+    }
+
+    confirmBtn.disabled=true; cancelBtn.disabled=true;
+
+    const { error: updateErr } = await sb.from('user_profiles').update({
+      status:'approved', role,
+      customer_account_id: role==='customer' ? accountId : null
+    }).eq('id', row.id);
+
+    if(updateErr){
+      console.error('approve failed', updateErr);
+      formErr.textContent=`Couldn't approve: ${updateErr.message}`;
+      formErr.classList.add('on');
+      confirmBtn.disabled=false; cancelBtn.disabled=false;
+      return;
+    }
+
+    if(role==='customer' && selectedBlocks.length){
+      const { error: blockErr } = await sb.from('customer_block_access').insert(
+        selectedBlocks.map(block_id=>({customer_account_id:accountId, block_id}))
+      );
+      if(blockErr){
+        console.error('block access insert failed', blockErr);
+        formErr.textContent=`Approved, but couldn't assign block access: ${blockErr.message}. Assign manually.`;
+        formErr.classList.add('on');
+        confirmBtn.disabled=false; cancelBtn.disabled=false;
+        return;
+      }
+    }
+
+    wrap.remove();
+    const list=$('#queue-list');
+    if(!list.children.length) list.innerHTML=`<div class="empty">No accounts awaiting approval.</div>`;
+  };
+}
+
 /* Boot */
-$('#clock').textContent=NOW.toLocaleString('en-US',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})+' PDT';
+scheduleClockTick();
 sb.auth.onAuthStateChange(async ()=>{ await runSessionGate(); });
 </script>
 </body>

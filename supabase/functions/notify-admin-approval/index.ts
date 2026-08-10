@@ -36,6 +36,10 @@ export default {
       const resendApiKey = Deno.env.get("RESEND_API_KEY");
       const adminEmail = Deno.env.get("ADMIN_NOTIFY_EMAIL");
       const fromEmail = Deno.env.get("RESEND_FROM_EMAIL");
+      // TODO: currently set to http://localhost:3000/index.html for local
+      // testing -- no real deployed URL yet. Update this secret
+      // (supabase secrets set APPROVAL_QUEUE_URL=...) once one exists, or
+      // approval emails will link to a dead local address.
       const approvalQueueUrl = Deno.env.get("APPROVAL_QUEUE_URL");
 
       if (!resendApiKey || !adminEmail || !fromEmail) {

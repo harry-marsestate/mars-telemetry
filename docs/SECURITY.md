@@ -8,11 +8,23 @@ default with RLS on + zero policies is deny-all to everyone except the table
 owner. This bit us once already: anomaly_thresholds was invisible to real
 users for a while before we caught it via end-to-end testing.
 
+customer_block_access sat in this exact dormant state until the Phase 6.8
+approval-queue work needed to query it directly for a customer_account_id
+collision check - now fixed, both grant and policy in place
+(customer_block_access_admin_read, customer_block_access_grant), verified via
+a simulated non-admin session (0 rows) and a simulated admin session (real
+rows). Worth keeping this pairing on record together with the original
+anomaly_thresholds incident, since they're the two failure modes of the same
+two-gates principle and they fail with *different symptoms* - anomaly_thresholds
+had a GRANT but no POLICY (RLS silently filters to zero rows, no error,
+looks like "no data" rather than "no access"); customer_block_access had a
+POLICY but no GRANT (a hard `permission denied for table X` error, thrown
+even for an admin who should see everything). If you hit either shape again,
+check the other gate first.
+
 Known dormant instances (RLS on, no policy, not yet reachable by any
 non-SECURITY-DEFINER path, so not currently broken - but WILL silently break
 the moment something queries them directly):
-- customer_block_access, user_profiles (only reachable via SECURITY DEFINER
-  helper functions today)
 - tanks, block_lots (tied to deferred ferm/tanks/fruit real-data work)
 - work_type_lookup (tied to deferred labour panel real-data work)
 - stg_sensor_readings (dbt staging table, should probably stay deny-all

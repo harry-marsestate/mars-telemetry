@@ -77,3 +77,31 @@ RULE: any Database Webhook (or other caller) hitting a function that uses
 Project Settings -> API Keys -> Secret keys (not the API Keys page's legacy
 JWT section). The legacy `service_role`/`anon` keys will never satisfy
 these auth modes, no matter how valid they are as JWTs.
+
+## current_role_name() checks role, not approval - 'pending' is a real value
+
+`current_role_name()` can return three things: `'operator'`, `'customer'`,
+or `'pending'` (unapproved/rejected users resolve to `'pending'` regardless
+of their stored `role` column - see `user_profiles.status`). Any policy or
+SECURITY DEFINER function that checks `current_role_name() = 'operator'` or
+similar is implicitly approval-safe, since `current_role_name()` can only
+ever return `'operator'`/`'customer'` when `status = 'approved'`. But a
+check like `current_role_name() != 'operator'` or anything that treats
+`'pending'` as just "some other role" rather than "not yet a real user" can
+silently grant real access to unapproved accounts.
+
+This happened three times before it was caught: `sensor_read`'s
+`min_role='all'` branch, `daily_weather_read`, and the `customer_block_access`
+branch of `accessible_blocks()` were all written before the Phase 6 approval
+system existed, and none of them were reconciled with it when `status` was
+added. A genuinely pending Google-OAuth signup was rendering live vineyard
+charts in the browser before this was fixed (see the
+`approval_status_rls_gaps` migration).
+
+RULE: when writing or reviewing any policy or SECURITY DEFINER function
+that calls `current_role_name()`, treat `'pending'` as a real, distinct
+value that must be explicitly excluded - not just "not operator" or "not
+customer." Prefer an explicit allowlist (`current_role_name() in
+('operator','customer')`) over a denylist (`current_role_name() !=
+'pending'`), so a future fourth status value (e.g. `'suspended'`) fails
+closed by default instead of silently falling through as granted.

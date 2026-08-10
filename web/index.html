@@ -2263,13 +2263,9 @@ $('#auth-form').addEventListener('submit', async e=>{
     if(authMode==='signin'){
       const {error}=await sb.auth.signInWithPassword({email,password});
       if(error) throw error;
-      /* Phase 6.4 will react to the resulting auth state change and hide
-         this view. Until then, just confirm success for manual testing. */
-      $('#auth-form').style.display='none';
-      $('#auth-forgot').style.display='none';
-      const success=$('#auth-success');
-      success.textContent=`Signed in as ${email}. (No session gate yet — call hideAuthView() in the console, or check devtools for the session.)`;
-      success.style.display='block';
+      /* The session gate (onAuthStateChange -> runSessionGate) takes over
+         immediately on success and replaces this whole view — nothing
+         further to show here. */
     } else {
       const password2=$('#auth-password2').value;
       if(!passwordMeetsAllRules({password,password2})){
@@ -2346,6 +2342,8 @@ function showAuthOnly(){
   $('#pending-view').classList.remove('on');
   $('.hdr').style.display='none';
   $('.wrap').style.display='none';
+  setAuthMode('signin');
+  $('#auth-password').value='';
   $('#auth-view').classList.add('on');
 }
 function showPendingOnly(){

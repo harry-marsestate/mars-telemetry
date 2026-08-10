@@ -338,6 +338,29 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .out-b{padding:13px 32px; border:1px solid var(--gold-dim); border-radius:3px; color:var(--gold); font-size:11px; letter-spacing:.16em; text-transform:uppercase; background:var(--gold-glow); transition:all .16s}
 .out-b:hover{background:rgba(198,169,97,.24)}
 
+/* ── Auth (Phase 6.1 — view only; session gating wired in 6.4) ──── */
+.auth-card{width:340px; max-width:90vw}
+.auth-tabs{display:inline-flex; margin-top:28px}
+.auth-form{display:flex; flex-direction:column; gap:12px; margin-top:26px}
+.auth-form input{
+  background:var(--ink-2); border:1px solid var(--line); border-radius:3px;
+  color:var(--cream); font-family:var(--ui); font-size:13.5px; padding:13px 15px; line-height:1.55;
+}
+.auth-form input:focus{outline:none; border-color:var(--gold-dim)}
+.auth-form input::placeholder{color:var(--muted-2)}
+.auth-form .out-b{width:100%; margin-top:6px}
+.auth-err{
+  font-family:var(--mono); font-size:10.5px; color:var(--alert); text-align:left;
+  line-height:1.6; display:none;
+}
+.auth-err.on{display:block}
+.auth-forgot{
+  display:block; margin:18px auto 0; font-family:var(--mono); font-size:10.5px; color:var(--muted-2);
+  text-decoration:underline; text-underline-offset:3px; transition:color .16s;
+}
+.auth-forgot:hover{color:var(--gold)}
+.auth-success{font-family:var(--mono); font-size:12px; color:var(--ok); line-height:1.8; max-width:300px; margin:26px auto 0}
+
 .foot{display:flex; flex-wrap:wrap; gap:8px 26px; justify-content:space-between; padding:26px 2px 0; margin-top:30px;
   border-top:1px solid var(--line); font-family:var(--mono); font-size:9.5px; color:var(--muted-2); letter-spacing:.04em}
 
@@ -434,6 +457,29 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
     <div class="out-sub">Mars Estate &middot; Howell Mountain</div>
     <div class="out-q">&ldquo;There are more things in heaven and earth, Horatio,<br>than are dreamt of in your philosophy.&rdquo;</div>
     <button class="out-b" id="backin">Sign back in</button>
+  </div>
+</div>
+
+<div class="out" id="auth-view">
+  <div class="auth-card">
+    <div class="out-ttl">Mars Telemetry</div>
+    <div class="out-sub">Mars Estate &middot; Howell Mountain</div>
+
+    <div class="tabs auth-tabs" role="tablist">
+      <button class="tab on" id="auth-tab-signin" role="tab" type="button">Sign in</button>
+      <button class="tab" id="auth-tab-signup" role="tab" type="button">Sign up</button>
+    </div>
+
+    <form id="auth-form" class="auth-form">
+      <input type="email" id="auth-email" placeholder="Email" autocomplete="email" required>
+      <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" required>
+      <div class="auth-err" id="auth-err"></div>
+      <button type="submit" class="out-b" id="auth-submit">Sign in</button>
+    </form>
+
+    <button class="auth-forgot" id="auth-forgot" type="button">Forgot password?</button>
+
+    <div class="auth-success" id="auth-success" style="display:none"></div>
   </div>
 </div>
 
@@ -2094,6 +2140,100 @@ $('#chatin').addEventListener('input',e=>{e.target.style.height='auto'; e.target
 SUGGESTIONS.forEach(s=>{const b=el('button',null,s); b.onclick=()=>ask(s); $('#sugg').appendChild(b);});
 addMsg('a',`<p>Good afternoon, Colin. I can read across every series on this dashboard — climate, soil and water, labour, and the cellar — for any block and any vintage from 2022.</p>
 <p>Ask in plain language, or start with one of the prompts below.</p>`,'Mock-up · scripted demo responses');
+
+/* §9 ── AUTH VIEW (Phase 6.1 — view + logic only; no session gate yet) ── */
+let authMode='signin';
+
+function setAuthMode(mode){
+  authMode=mode;
+  $('#auth-tab-signin').classList.toggle('on', mode==='signin');
+  $('#auth-tab-signup').classList.toggle('on', mode==='signup');
+  $('#auth-submit').textContent = mode==='signin' ? 'Sign in' : 'Sign up';
+  $('#auth-password').autocomplete = mode==='signin' ? 'current-password' : 'new-password';
+  clearAuthError();
+  $('#auth-form').style.display='';
+  $('#auth-forgot').style.display='';
+  $('#auth-success').style.display='none';
+}
+function showAuthError(message){
+  const box=$('#auth-err'); box.textContent=message; box.classList.add('on');
+}
+function clearAuthError(){
+  const box=$('#auth-err'); box.textContent=''; box.classList.remove('on');
+}
+/* Supabase auth errors are technical (status text, internal phrasing) --
+   translate the common ones into plain language. Falls back to the raw
+   message for anything unrecognized rather than hiding it. */
+function friendlyAuthError(err){
+  const msg=err?.message || String(err), m=msg.toLowerCase();
+  if(m.includes('invalid login credentials')) return 'Incorrect email or password.';
+  if(m.includes('email not confirmed')) return 'Please confirm your email before signing in — check your inbox for the confirmation link.';
+  if(m.includes('already registered')) return 'An account with this email already exists — try signing in instead.';
+  if(m.includes('unable to validate email address') || m.includes('invalid email')) return 'That doesn’t look like a valid email address.';
+  return msg;
+}
+
+$('#auth-tab-signin').onclick=()=>setAuthMode('signin');
+$('#auth-tab-signup').onclick=()=>setAuthMode('signup');
+
+$('#auth-form').addEventListener('submit', async e=>{
+  e.preventDefault();
+  clearAuthError();
+  const email=$('#auth-email').value.trim(), password=$('#auth-password').value;
+  const btn=$('#auth-submit');
+  btn.disabled=true;
+  try{
+    if(authMode==='signin'){
+      const {error}=await sb.auth.signInWithPassword({email,password});
+      if(error) throw error;
+      /* Phase 6.4 will react to the resulting auth state change and hide
+         this view. Until then, just confirm success for manual testing. */
+      $('#auth-form').style.display='none';
+      $('#auth-forgot').style.display='none';
+      const success=$('#auth-success');
+      success.textContent=`Signed in as ${email}. (No session gate yet — call hideAuthView() in the console, or check devtools for the session.)`;
+      success.style.display='block';
+    } else {
+      const {data,error}=await sb.auth.signUp({email,password});
+      if(error) throw error;
+      /* signUp() on an already-registered email returns 200 with no error
+         (anti-enumeration) — a pseudo user with an empty identities array,
+         not a real new account. Confirmed against a live duplicate-signup
+         test: no second auth.users row was created. */
+      if(data.user?.identities?.length===0){
+        showAuthError('An account with this email already exists — try signing in instead.');
+      } else {
+        $('#auth-form').style.display='none';
+        $('#auth-forgot').style.display='none';
+        const success=$('#auth-success');
+        success.textContent=`Check your email at ${email} to confirm your account before signing in.`;
+        success.style.display='block';
+      }
+    }
+  } catch(err){
+    showAuthError(friendlyAuthError(err));
+  } finally {
+    btn.disabled=false;
+  }
+});
+
+$('#auth-forgot').onclick=async ()=>{
+  const email=prompt('Enter your email to receive a password reset link:');
+  if(!email) return;
+  clearAuthError();
+  try{
+    const {error}=await sb.auth.resetPasswordForEmail(email);
+    if(error) throw error;
+    alert(`Password reset link sent to ${email}.`);
+  } catch(err){
+    showAuthError(friendlyAuthError(err));
+  }
+};
+
+/* TEMP -- manual test hooks until Phase 6.4 wires the real session gate.
+   Console: showAuthView() / hideAuthView(). Remove once gating lands. */
+window.showAuthView=()=>{ setAuthMode('signin'); $('#auth-view').classList.add('on'); };
+window.hideAuthView=()=>{ $('#auth-view').classList.remove('on'); };
 
 /* Boot */
 renderTab('vineyard');

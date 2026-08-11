@@ -117,3 +117,28 @@ customer." Prefer an explicit allowlist (`current_role_name() in
 ('operator','customer')`) over a denylist (`current_role_name() !=
 'pending'`), so a future fourth status value (e.g. `'suspended'`) fails
 closed by default instead of silently falling through as granted.
+
+## blocks.innovint_block_id - partial mapping, deliberately left incomplete
+
+`blocks.innovint_block_id` (nullable, no default) cross-references local
+`block_id`s against InnoVint's own block records, for future use pulling
+real lot/vessel/component data from the InnoVint API. It is NOT a complete
+mapping and should not be assumed to be:
+
+- `B2` -> `block_LZ4E0PWYDM82N6OMX6R92JK5` (InnoVint "V2") and
+  `B3` -> `block_W48YXVQJ1MK0PDLM30PRENL2` (InnoVint "V3") were set after
+  checking acreage and other attributes lined up plausibly.
+- `B1` was deliberately left `null`. Neither InnoVint candidate held up:
+  `xxV1` (4.0 acres) is a closer acreage match than `Lower Block` (1.5
+  acres), but its rootstock/trellising/clone data reads as an older
+  heritage block with no recorded planting year, not a match for B1's
+  2009-2014 planting. A third candidate (`06`) couldn't even be evaluated -
+  no acreage or planted-year recorded on the InnoVint side at all.
+
+RULE: do not backfill `B1`'s `innovint_block_id` on a coincidental
+acreage/name match alone. A wrong mapping here is worse than no mapping -
+it would silently pull another block's real InnoVint history (lot
+records, vessel assignments, component makeup) onto B1's dashboard data
+with no error or indication anything was mismatched. Only set it from a
+confirmed source (e.g. someone at the winery confirming the InnoVint block
+id directly).

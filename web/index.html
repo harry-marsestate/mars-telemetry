@@ -1849,6 +1849,42 @@ function renderFilters(tab){
 }
 
 /* Overview */
+/* Cache of the last-computed raw overview snapshot, so a realtime insert
+   can update ONE field and re-derive just that tile's formatted display,
+   instead of re-running the full multi-metric overviewStats() fetch. */
+let vineyardOverviewCache = null; // {ids, cur, prev, other}
+
+function formatVineyardTiles(cur, prev, other){
+  const delta = (now, key) => {
+    if(prev==null || now==null || prev[key]==null) return null;
+    const dd=now-prev[key];
+    return {txt:`vs ${other}: ${dd>=0?'+':''}${fmt(dd, Math.abs(dd)<10?1:0)}`, up:dd>=0};
+  };
+  const {t, sm, dry, g, vp, dt, rh, et} = cur;
+  const dT=delta(t,'t'), dG=delta(g,'g'), dS=delta(sm,'sm');
+  return [
+    {key:'t', l:'Air temperature', v:fmt(t,1), u:'°F',
+      d: dT ? dT.txt : (t==null ? '—' : (t>92?'above seasonal norm':'seasonal norm 87 °F')),
+      c: dT ? (dT.up?'wr':'up') : (t==null ? '' : (t>92?'dn':''))},
+    {key:'sm', l:'Soil moisture, avg', v:fmt(sm,1), u:'% VWC',
+      d: dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—'),
+      c: sm==null ? '' : (sm<15?'dn':'')},
+    {key:'g', l:'GDD to date', v:fmt(g,0), u:'',
+      d: dG ? dG.txt : 'base 50 °F from 1 Apr',
+      c: dG ? (dG.up?'wr':'up') : ''},
+    {key:'vp', l:'VPD', v:fmt(vp,2), u:'kPa',
+      d: vp==null ? '—' : (vp>3.1?'high vine stress':'within range'),
+      c: vp==null ? '' : (vp>3.1?'wr':'up')},
+    {key:'dt', l:'Diurnal range', v:fmt(dt,1), u:'°F',
+      d: dt==null ? '—' : (dt>=21?'good acid retention':'compressed'),
+      c: dt==null ? '' : (dt>=21?'up':'wr')},
+    {key:'rh', l:'Relative humidity', v:fmt(rh,0), u:'%',
+      d: rh==null ? '—' : (rh>85?'mildew pressure':'normal'),
+      c: rh==null ? '' : (rh>85?'wr':'')},
+    {key:'et', l:'ET₀ today', v:fmt(et,3), u:'in', d:'irrigation demand'}
+  ];
+}
+
 async function overviewStats(tab, c){
   if(tab!=='vineyard') return null;
   const v=c.primary, ids=c.blocks;
@@ -1867,7 +1903,7 @@ async function overviewStats(tab, c){
     const valid = soilByBlock.filter(b=>b.v!=null);
     const sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
     const dry = valid.length ? [...valid].sort((a,b)=>a.v-b.v)[0] : null;
-    return {t, sm, dry, g, vp, dt, rh, et};
+    return {t, soilByBlock, sm, dry, g, vp, dt, rh, et};
   }
 
   const [cur, prev] = await Promise.all([
@@ -1875,68 +1911,122 @@ async function overviewStats(tab, c){
     other!=null ? vineyardSnapshot(other) : Promise.resolve(null)
   ]);
 
-  const delta = (now, key) => {
-    if(prev==null || now==null || prev[key]==null) return null;
-    const dd=now-prev[key];
-    return {txt:`vs ${other}: ${dd>=0?'+':''}${fmt(dd, Math.abs(dd)<10?1:0)}`, up:dd>=0};
-  };
+  /* Only cache/live-update against the CURRENT vintage -- archived vintage
+     snapshots are static and never receive new sensor readings. Works for
+     compare mode too: cur updates live, prev (the archived comparison
+     vintage) stays fixed, formatVineyardTiles recomputes the delta from
+     the same cached prev each time. */
+  vineyardOverviewCache = (v===CURRENT) ? {ids, cur, prev, other} : null;
 
-  const {t, sm, dry, g, vp, dt, rh, et} = cur;
-  const dT=delta(t,'t'), dG=delta(g,'g'), dS=delta(sm,'sm');
-  return [
-    {l:'Air temperature', v:fmt(t,1), u:'°F',
-      d: dT ? dT.txt : (t==null ? '—' : (t>92?'above seasonal norm':'seasonal norm 87 °F')),
-      c: dT ? (dT.up?'wr':'up') : (t==null ? '' : (t>92?'dn':''))},
-    {l:'Soil moisture, avg', v:fmt(sm,1), u:'% VWC',
-      d: dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—'),
-      c: sm==null ? '' : (sm<15?'dn':'')},
-    {l:'GDD to date', v:fmt(g,0), u:'',
-      d: dG ? dG.txt : 'base 50 °F from 1 Apr',
-      c: dG ? (dG.up?'wr':'up') : ''},
-    {l:'VPD', v:fmt(vp,2), u:'kPa',
-      d: vp==null ? '—' : (vp>3.1?'high vine stress':'within range'),
-      c: vp==null ? '' : (vp>3.1?'wr':'up')},
-    {l:'Diurnal range', v:fmt(dt,1), u:'°F',
-      d: dt==null ? '—' : (dt>=21?'good acid retention':'compressed'),
-      c: dt==null ? '' : (dt>=21?'up':'wr')},
-    {l:'Relative humidity', v:fmt(rh,0), u:'%',
-      d: rh==null ? '—' : (rh>85?'mildew pressure':'normal'),
-      c: rh==null ? '' : (rh>85?'wr':'')},
-    {l:'ET₀ today', v:fmt(et,3), u:'in', d:'irrigation demand'}
-  ];
+  return formatVineyardTiles(cur, prev, other);
+}
+
+function updateVineyardTile(key){
+  if(!vineyardOverviewCache) return;
+  const grid=$('#ovg-vineyard'); if(!grid) return;
+  const {cur, prev, other} = vineyardOverviewCache;
+  const tile = formatVineyardTiles(cur, prev, other).find(t=>t.key===key);
+  const node = tile && grid.querySelector(`.stat[data-key="${key}"]`);
+  if(!node) return;
+  const valEl=node.querySelector('.stat-v'), descEl=node.querySelector('.stat-d');
+  valEl.innerHTML = `${tile.v}${tile.u?`<span class="u">${tile.u}</span>`:''}`;
+  valEl.classList.remove('tick'); void valEl.offsetWidth; valEl.classList.add('tick');
+  descEl.className = `stat-d ${tile.c||''}`;
+  descEl.textContent = tile.d;
+}
+function applyVineyardRealtimeInsert(row){
+  if(!vineyardOverviewCache || row.vintage !== CURRENT) return;
+  const {cur, ids} = vineyardOverviewCache;
+  if(row.metric_key==='air_temp' && row.block_id==null){
+    cur.t = +row.value; updateVineyardTile('t');
+  } else if(row.metric_key==='humidity' && row.block_id==null){
+    cur.rh = +row.value; updateVineyardTile('rh');
+  } else if(row.metric_key==='soil_moisture' && row.block_id!=null){
+    if(!ids.includes(row.block_id)) return; // not one of the currently-selected blocks
+    const entry = cur.soilByBlock.find(b=>b.id===row.block_id);
+    if(entry) entry.v = +row.value; else cur.soilByBlock.push({id:row.block_id, v:+row.value});
+    const valid = cur.soilByBlock.filter(b=>b.v!=null);
+    cur.sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
+    cur.dry = valid.length ? [...valid].sort((a,b)=>a.v-b.v)[0] : null;
+    updateVineyardTile('sm');
+  }
 }
 async function paintOverviewV(tab, c, animate){
   const g=$('#ovg-'+tab); if(!g) return;
   const stats = await overviewStats(tab,c);
   if(!stats) return;
-  g.innerHTML=stats.map(s=>`<div class="stat">
+  g.innerHTML=stats.map(s=>`<div class="stat" data-key="${s.key}">
       <div class="stat-l">${s.l}</div>
       <div class="stat-v ${animate?'tick':''}">${s.v}${s.u?`<span class="u">${s.u}</span>`:''}</div>
       <div class="stat-d ${s.c||''}">${s.d}</div></div>`).join('');
 }
+
+function formatCellarMeter(val,lo,hi,dlo,dhi){
+  const pct=x=>Math.max(0,Math.min(100,(x-dlo)/(dhi-dlo)*100));
+  return `<div class="meter"><div class="meter-bar">
+    <div class="meter-ok" style="left:${pct(lo)}%; width:${pct(hi)-pct(lo)}%"></div>
+    <div class="meter-pin" style="left:calc(${pct(val)}% - 1px)"></div></div>
+    <div class="meter-lbl"><span>${dlo}</span><span style="color:var(--ok)">target ${lo}–${hi}</span><span>${dhi}</span></div></div>`;
+}
+let wineryOverviewCache = null; // {t, rh}
+
 async function paintOverviewW(animate){
   const g=$('#ovg-winery'); if(!g) return;
   const [t, rh] = await Promise.all([
     getLatestValue({metric:'cellar_temp', scope:'cellar', vintage:CURRENT}),
     getLatestValue({metric:'cellar_rh', scope:'cellar', vintage:CURRENT})
   ]);
-  const meter=(val,lo,hi,dlo,dhi)=>{
-    const pct=x=>Math.max(0,Math.min(100,(x-dlo)/(dhi-dlo)*100));
-    return `<div class="meter"><div class="meter-bar">
-      <div class="meter-ok" style="left:${pct(lo)}%; width:${pct(hi)-pct(lo)}%"></div>
-      <div class="meter-pin" style="left:calc(${pct(val)}% - 1px)"></div></div>
-      <div class="meter-lbl"><span>${dlo}</span><span style="color:var(--ok)">target ${lo}–${hi}</span><span>${dhi}</span></div></div>`;
-  };
+  wineryOverviewCache = {t, rh};
   const okT=t!=null&&t>=55&&t<=58, okH=rh!=null&&rh>=68&&rh<=78;
   g.innerHTML=`
-    <div class="stat"><div class="stat-l">Cellar temperature</div>
+    <div class="stat" data-key="t"><div class="stat-l">Cellar temperature</div>
       <div class="stat-v ${animate?'tick':''}">${fmt(t,1)}<span class="u">°F</span></div>
       <div class="stat-d ${okT?'up':'wr'}">${t==null?'no data':(okT?'within target':'outside target band')}</div>
-      ${meter(t,55,58,52,62)}</div>
-    <div class="stat"><div class="stat-l">Cellar humidity</div>
+      ${formatCellarMeter(t,55,58,52,62)}</div>
+    <div class="stat" data-key="rh"><div class="stat-l">Cellar humidity</div>
       <div class="stat-v ${animate?'tick':''}">${fmt(rh,0)}<span class="u">%</span></div>
       <div class="stat-d ${okH?'up':'wr'}">${rh==null?'no data':(okH?'within target':'outside target band')}</div>
-      ${meter(rh,68,78,60,88)}</div>`;
+      ${formatCellarMeter(rh,68,78,60,88)}</div>`;
+}
+
+function updateWineryTile(key, val){
+  const grid=$('#ovg-winery'); if(!grid || !wineryOverviewCache) return;
+  wineryOverviewCache[key]=val;
+  const {t, rh} = wineryOverviewCache;
+  const node = grid.querySelector(`.stat[data-key="${key}"]`);
+  if(!node) return;
+  const okT=t!=null&&t>=55&&t<=58, okH=rh!=null&&rh>=68&&rh<=78;
+  const ok = key==='t' ? okT : okH;
+  const [lo,hi,dlo,dhi] = key==='t' ? [55,58,52,62] : [68,78,60,88];
+  const valEl=node.querySelector('.stat-v'), descEl=node.querySelector('.stat-d'), meterEl=node.querySelector('.meter');
+  valEl.innerHTML = `${fmt(val, key==='t'?1:0)}<span class="u">${key==='t'?'°F':'%'}</span>`;
+  valEl.classList.remove('tick'); void valEl.offsetWidth; valEl.classList.add('tick');
+  descEl.className = `stat-d ${ok?'up':'wr'}`;
+  descEl.textContent = val==null?'no data':(ok?'within target':'outside target band');
+  if(meterEl) meterEl.outerHTML = formatCellarMeter(val,lo,hi,dlo,dhi);
+}
+function applyWineryRealtimeInsert(row){
+  if(row.vintage !== CURRENT) return;
+  if(row.metric_key==='cellar_temp') updateWineryTile('t', +row.value);
+  else if(row.metric_key==='cellar_rh') updateWineryTile('rh', +row.value);
+}
+
+let overviewChannel=null;
+function subscribeOverviewRealtime(){
+  if(overviewChannel) return;
+  overviewChannel = sb.channel('overview-live')
+    .on('postgres_changes', {
+      event:'INSERT', schema:'public', table:'sensor_readings',
+      filter:'metric_key=in.(air_temp,humidity,soil_moisture,cellar_temp,cellar_rh)'
+    }, payload=>{
+      const row=payload.new;
+      if(['air_temp','humidity','soil_moisture'].includes(row.metric_key)) applyVineyardRealtimeInsert(row);
+      else applyWineryRealtimeInsert(row);
+    })
+    .subscribe();
+}
+function unsubscribeOverviewRealtime(){
+  if(overviewChannel){ sb.removeChannel(overviewChannel); overviewChannel=null; }
 }
 
 /* Panel construction */
@@ -2025,7 +2115,12 @@ async function renderTab(tab){
     host.appendChild(head);
     const grid=el('div','grid');
     host.appendChild(grid);
-    ps.forEach(p=>{const m=makePanel(p,c); grid.appendChild(m.panel); pending.push(m.run);});
+    ps.forEach(p=>{
+      const m=makePanel(p,c);
+      grid.appendChild(m.panel);
+      pending.push(m.run);
+      if(POLL_5MIN_PANEL_IDS.includes(p.id)) panelRunsForPolling[p.id]=m.run;
+    });
   });
 
   /* render bodies after layout so clientWidth is correct */
@@ -2042,14 +2137,26 @@ $$('.tab').forEach(t=>t.onclick=()=>{
 });
 
 /* Live tick */
+/* Phase 7: this used to also re-fetch and repaint the overview tiles every
+   5s -- that's now Realtime's job (subscribeOverviewRealtime), pushed
+   instantly on new sensor_readings rows instead of polled. This interval's
+   only remaining job is advancing the mock demo clock, which the rest of
+   the simulated data engine (panel date ranges, GDD, etc.) depends on --
+   unrelated to Phase 7, deliberately untouched. */
 setInterval(()=>{
   NOW.setSeconds(NOW.getSeconds()+60);
-  if($('#ovg-vineyard')){
-    const c=ctxFor('vineyard');
-    if(c.primary===CURRENT) paintOverviewV('vineyard',c,true);
-  }
-  if($('#ovg-winery')) paintOverviewW(true);
 },5000);
+
+/* Phase 7 polling tier: soil moisture/temp + irrigation refresh every
+   5 min. Everything else in the vineyard section (GDD/VPD/DTR/ET0, labour)
+   deliberately has no interval at all -- tab focus/filter-change (via
+   renderTab) is the only refresh trigger for those, unchanged from today. */
+const POLL_5MIN_PANEL_IDS=['soilmoist','soiltemp','irrig','irrigblk'];
+let panelRunsForPolling={};
+setInterval(()=>{
+  if(!dashboardBooted) return;
+  POLL_5MIN_PANEL_IDS.forEach(id=>panelRunsForPolling[id]?.());
+}, 5*60*1000);
 
 /* Real wall-clock header display -- deliberately separate from the mock
    NOW clock above. Panel date ranges, overview tiles, anomaly evaluation,
@@ -2405,6 +2512,7 @@ async function updateHeaderForSession(session, role){
 
 function showAuthOnly(){
   dashboardBooted=false;
+  unsubscribeOverviewRealtime();
   $('#pending-view').classList.remove('on');
   $('.hdr').style.display='none';
   $('.wrap').style.display='none';
@@ -2414,6 +2522,7 @@ function showAuthOnly(){
 }
 function showPendingOnly(){
   dashboardBooted=false;
+  unsubscribeOverviewRealtime();
   $('#auth-view').classList.remove('on');
   $('.hdr').style.display='none';
   $('.wrap').style.display='none';
@@ -2428,6 +2537,7 @@ function showDashboard(){
     dashboardBooted=true;
     renderTab('vineyard');
     renderTab('winery');
+    subscribeOverviewRealtime();
   }
 }
 function showQueueOnly(){

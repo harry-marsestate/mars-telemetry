@@ -29,6 +29,25 @@ def get_connection():
     return psycopg2.connect(os.environ["DATABASE_URL"])
 
 
+def _dedupe_by_key(rows: list[dict], key_fields: tuple[str, ...]) -> list[dict]:
+    """Postgres rejects a single INSERT...ON CONFLICT DO UPDATE batch that
+    contains the same conflict key twice (CardinalityViolation). Confirmed
+    against live data that this happens for InnoVint analyses on lots
+    large enough to span multiple /analyses pages (found via a
+    CardinalityViolation on lot_ZEQX2N9JG4WR83O718D54KRP and
+    lot_2VQ0D3NK7LQJE5ZMZ6WROJ81, both >100 analyses) -- offset-pagination
+    returning the same row across adjacent page boundaries, with
+    byte-identical content both times, not divergent data. Dedupe here
+    defensively regardless of root cause: any batched ON CONFLICT upsert
+    needs this, independent of why a source API might hand back the same
+    key twice.
+    """
+    deduped: dict[tuple, dict] = {}
+    for row in rows:
+        deduped[tuple(row[f] for f in key_fields)] = row
+    return list(deduped.values())
+
+
 def load_innovint_block_map(conn) -> dict[str, str]:
     """InnoVint block id -> local block_id, resolved subset only.
 
@@ -49,6 +68,7 @@ def load_innovint_block_map(conn) -> dict[str, str]:
 def upsert_lot_analyses(conn, rows: list[dict]) -> int:
     if not rows:
         return 0
+    rows = _dedupe_by_key(rows, ("source_system", "source_id"))
     with conn.cursor() as cur:
         psycopg2.extras.execute_values(
             cur,
@@ -88,6 +108,7 @@ def upsert_lot_analyses(conn, rows: list[dict]) -> int:
 def upsert_vessels(conn, rows: list[dict]) -> int:
     if not rows:
         return 0
+    rows = _dedupe_by_key(rows, ("vessel_id",))
     with conn.cursor() as cur:
         psycopg2.extras.execute_values(
             cur,

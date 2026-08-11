@@ -97,20 +97,26 @@ def analyses_sync(context: AssetExecutionContext) -> MaterializeResult:
                     }
                 )
 
+        fetched_count = len(rows)
         written = db.upsert_lot_analyses(conn, rows)
+        deduped = fetched_count - written
         resolved = sum(1 for r in rows if r["block_id"] is not None)
         context.log.info(
             f"upserted {written} analyses rows ({resolved} with block_id); "
             f"skipped {skipped_deleted_or_skipped} deleted/skipped, "
-            f"{skipped_null_value} null-value"
+            f"{skipped_null_value} null-value, {deduped} duplicate source_id "
+            f"(known InnoVint pagination-boundary overlap, see db.py); "
+            f"{len(client.dangling_lot_refs)} dangling lot references"
         )
         return MaterializeResult(
             metadata={
                 "lots_processed": len(lot_ids),
+                "rows_deduped": deduped,
                 "rows_upserted": written,
                 "rows_with_block_id": resolved,
                 "rows_skipped_deleted_or_skipped": skipped_deleted_or_skipped,
                 "rows_skipped_null_value": skipped_null_value,
+                "dangling_lot_refs": sorted(client.dangling_lot_refs),
                 "run_stamp": run_stamp,
             }
         )
@@ -173,18 +179,24 @@ def vessels_sync(context: AssetExecutionContext) -> MaterializeResult:
                 }
             )
 
+        fetched_count = len(rows)
         written = db.upsert_vessels(conn, rows)
+        deduped = fetched_count - written
         context.log.info(
             f"upserted {written} vessel rows ({suspect_count} capacity_suspect, "
-            f"{resolved_count} with block_id)"
+            f"{resolved_count} with block_id, {deduped} duplicate vessel_id); "
+            f"{len(client.dangling_lot_refs)} dangling lot references "
+            f"(vessel current_lot_id pointing at a lot that doesn't exist)"
         )
         return MaterializeResult(
             metadata={
                 "vessels_processed": len(vessels),
                 "rows_upserted": written,
+                "rows_deduped": deduped,
                 "rows_capacity_suspect": suspect_count,
                 "rows_with_block_id": resolved_count,
                 "outlier_threshold_gal": threshold,
+                "dangling_lot_refs": sorted(client.dangling_lot_refs),
                 "run_stamp": run_stamp,
             }
         )

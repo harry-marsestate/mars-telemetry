@@ -2078,7 +2078,7 @@ async function renderTab(tab){
     const ov=el('div','panel');
     ov.innerHTML=`<div class="ov-hd"><div class="ov-ttl">Estate at a glance</div>
       <div class="ov-note">${c.compare?'Comparing '+c.vintages.join(' vs ')+'<br>aligned to '+dstr(NOW)
-        : (c.primary===CURRENT?'Updating every 5 s · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
+        : (c.primary===CURRENT?'Live · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
            :'Vintage '+c.primary+' archive · static')}<br>${c.blocks.length} of 3 blocks in view</div></div>
       <div class="ov-grid" id="ovg-vineyard"></div>`;
     right.appendChild(ov);
@@ -2093,7 +2093,7 @@ async function renderTab(tab){
   } else {
     const ov=el('div','panel');
     ov.innerHTML=`<div class="ov-hd"><div class="ov-ttl">Cellar at a glance</div>
-      <div class="ov-note">Live building sensors<br>updating every 5 s</div></div>
+      <div class="ov-note">Live building sensors<br>updates instantly</div></div>
       <div class="ov-grid duo" id="ovg-winery"></div>`;
     left.appendChild(ov);
     pending.push(()=>paintOverviewW());

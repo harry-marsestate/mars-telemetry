@@ -1,0 +1,161 @@
+"""Pydantic contracts for the InnoVint API responses this ingestion consumes.
+
+Every model uses extra="forbid": a field InnoVint adds, renames, or removes
+should raise a validation error during ingestion, not silently pass through
+or get dropped. Shapes below are transcribed directly from the real
+responses pulled during the InnoVint data inventory (GET
+/wineries/{wineryId}/lots/{lotId}/analyses and GET
+/wineries/{wineryId}/vessels against wnry_2PW0KJ93L726WKKG54OQE1RY), not
+guessed from a spec -- InnoVint's own API docs for this resource set were
+not discoverable (see docs/SECURITY.md and the InnoVint data inventory
+findings).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+# ── Shared envelope shapes ──────────────────────────────────────────────
+
+class Pagination(StrictModel):
+    count: int
+    next: str | None = None
+    previous: str | None = None
+
+
+class OwnerTag(StrictModel):
+    id: int
+    public_id: str = Field(alias="publicId")
+    internal_id: int = Field(alias="internalId")
+    name: str
+
+
+class Access(StrictModel):
+    global_access: bool = Field(alias="globalAccess")
+    owner_tags: list[OwnerTag] = Field(alias="ownerTags")
+
+
+class Measurement(StrictModel):
+    """{value, unit} pairs used for capacity/volume/weight/fruitWeight etc.
+
+    value is optional even though every sample we pulled had a number --
+    InnoVint returns 0.0 rather than omitting the field for "no data" in
+    every case observed, but nothing in the inventory confirmed value can
+    never be null for a vessel type we didn't sample (KEG/STEEL_DRUM
+    capacity, specifically). Defaulting to Optional here is the safer
+    read of evidence we don't fully have, not a guess either way.
+    """
+
+    value: float | None = None
+    unit: str
+
+
+# ── /lots/{lotId}/analyses ──────────────────────────────────────────────
+
+class AnalysisType(StrictModel):
+    name: str
+    abbreviation: str  # seen empty string "" for Brix, not always populated
+    slug: str
+
+
+class AnalysisUnit(StrictModel):
+    name: str
+    unit: str
+
+
+class InnoVintAnalysis(StrictModel):
+    id: str
+    analysis_type: AnalysisType = Field(alias="analysisType")
+    # Always null in every one of the 1,411 real records pulled during the
+    # inventory. True populated shape is unknown -- kept as Any rather than
+    # guessing a structure and having extra="forbid" reject real data the
+    # moment a lot with a populated component shows up.
+    component: Any | None = None
+    deleted: bool
+    lot_id: str = Field(alias="lotId")
+    recorded_at: datetime = Field(alias="recordedAt")
+    skipped: bool
+    unit: AnalysisUnit
+    # Optional defensively: every sampled record had skipped=false and a
+    # real value, but skipped=true records (never observed) may carry a
+    # null value.
+    value: float | None = None
+    vessel_id: str | None = Field(default=None, alias="vesselId")
+    action_id: str = Field(alias="actionId")
+
+
+class AnalysisEnvelopeItem(StrictModel):
+    data: InnoVintAnalysis
+    relationships: dict[str, str | None] = Field(default_factory=dict)
+
+
+class AnalysesResponse(StrictModel):
+    results: list[AnalysisEnvelopeItem]
+    pagination: Pagination
+
+
+# ── /lots/{lotId}/blockComponents ───────────────────────────────────────
+
+class NamedRef(StrictModel):
+    id: str
+    name: str
+
+
+class BlockComponent(StrictModel):
+    block: NamedRef
+    varietal: NamedRef
+    vineyard: NamedRef
+    appellation: NamedRef
+    vintage: int
+    percentage: float
+
+
+class BlockComponentEnvelopeItem(StrictModel):
+    data: BlockComponent
+    relationships: dict[str, str | None] = Field(default_factory=dict)
+
+
+class BlockComponentsResponse(StrictModel):
+    results: list[BlockComponentEnvelopeItem]
+    pagination: Pagination
+
+
+# ── /vessels ─────────────────────────────────────────────────────────────
+
+# Literal, not str: the inventory saw exactly these four values (151
+# BARREL, 78 TANK, 11 KEG, 1 STEEL_DRUM). A fifth value showing up should
+# fail ingestion loudly rather than land as an unrecognized vessel_type in
+# the vessels table.
+VesselType = Literal["TANK", "BARREL", "KEG", "STEEL_DRUM"]
+
+
+class InnoVintVessel(StrictModel):
+    id: str
+    internal_id: int = Field(alias="internalId")
+    capacity: Measurement | None = None
+    code: str | None = None
+    color: str | None = None  # seen 'N/A' as a literal string, not absent
+    vessel_type: VesselType = Field(alias="vesselType")
+    lot_id: str | None = Field(default=None, alias="lotId")
+    volume: Measurement | None = None
+    weight: Measurement | None = None
+    archived: bool
+    access: Access
+
+
+class VesselEnvelopeItem(StrictModel):
+    data: InnoVintVessel
+    relationships: dict[str, str | None] = Field(default_factory=dict)
+
+
+class VesselsResponse(StrictModel):
+    results: list[VesselEnvelopeItem]
+    pagination: Pagination

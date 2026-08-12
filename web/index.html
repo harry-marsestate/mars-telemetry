@@ -259,6 +259,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .ferm-tile-hd{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px}
 .ferm-tile-ttl{font-family:var(--mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted)}
 .ferm-tile-unit{font-family:var(--mono); font-size:9px; color:var(--muted-2)}
+.ferm-tile-date{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); margin-top:4px}
 
 /* anomalies */
 .anom{display:flex; flex-direction:column; gap:9px; width:100%}
@@ -480,7 +481,6 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   </section>
 
   <section class="view" id="view-winery">
-    <div class="filters" id="f-winery"></div>
     <div id="body-winery"></div>
   </section>
 
@@ -972,7 +972,7 @@ async function getLatestDerivedValue({ field, vintage }){
 const state = {
   tab:'vineyard',
   vineyard:{vintages:[CURRENT], blocks:[...ALL_IDS]},
-  winery:  {vintages:[2025],    blocks:[...ALL_IDS]},
+  winery:  {vintages:[CURRENT], blocks:[...ALL_IDS]},
   range:{},
   lotSelect:{},      // per-panel-id selected InnoVint lot (ferm panel)
   vesselsArchived:{} // per-panel-id archived-toggle (tanks panel)
@@ -1348,6 +1348,7 @@ const PANELS = [
 /* ══ WINERY · CELLAR ══ */
 {id:'cellart', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar temperature', unit:'°F',
  sub:'Barrel room · live sensor · target 55–58 °F', range:'5D',
+ rangeOptions:['1D','5D','30D'],
  render: async (b,c) => {
    const sets=[{name:'Cellar',color:METRICS.cellar.color,
      pts: await buildSeriesReal('cellar_temp','cellar',CURRENT,c.range)}];
@@ -1357,6 +1358,7 @@ const PANELS = [
 
 {id:'cellarh', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar humidity', unit:'%',
  sub:'Barrel room · live sensor · target 68–78 %', range:'30D',
+ rangeOptions:['1D','5D','30D'],
  render: async (b,c) => {
    const sets=[{name:'Cellar RH',color:METRICS.cellarRH.color,
      pts: await buildSeriesReal('cellar_rh','cellar',CURRENT,c.range)}];
@@ -1615,6 +1617,19 @@ const ANALYSIS_DECIMALS = {
 // client-side formatting step rather than another schema/ingestion pass.
 const humanizeType = slug => slug.replace(/-/g,' ').replace(/\b\w/g, c=>c.toUpperCase());
 
+// Brix/Temperature/pH first (most commonly referenced in winemaking),
+// everything else alphabetical by slug -- so the grid reads in the same
+// order every time a lot is selected, not whatever order the Map happens
+// to iterate in.
+const FERM_TYPE_PRIORITY = { brix:0, temperature:1, ph:2 };
+
+// A line chart implies a trend; 1-2 discrete lab samples don't show one --
+// two points can technically be connected by a line, but lab analyses
+// aren't continuous sensor data, so a line between two samples that might
+// be weeks apart implies a smooth rate of change that isn't actually
+// known. 3+ points is where an actual trajectory becomes meaningful.
+const FERM_TREND_MIN_POINTS = 3;
+
 async function fetchAnalysisLots(){
   const { data, error } = await sb.from('lot_analyses').select('lot_id, lot_name, lot_code').order('lot_name');
   if(error) throw error;
@@ -1670,16 +1685,30 @@ async function renderFerm(box, ctx){
     {l:'Last recorded', v:dstr(new Date(rows[rows.length-1].recorded_at))}
   ]);
 
+  const sortedEntries = [...byType.entries()].sort((a,b)=>{
+    const ta=a[1].type, tb=b[1].type;
+    const pa = ta in FERM_TYPE_PRIORITY ? FERM_TYPE_PRIORITY[ta] : 100;
+    const pb = tb in FERM_TYPE_PRIORITY ? FERM_TYPE_PRIORITY[tb] : 100;
+    if(pa!==pb) return pa-pb;
+    return ta<tb?-1:ta>tb?1:0;
+  });
+
   const grid=el('div','ferm-grid');
   box.appendChild(grid);
-  for(const [key, {type, unit, pts}] of byType){
+  for(const [key, {type, unit, pts}] of sortedEntries){
     const tile=el('div','ferm-tile');
     tile.innerHTML=`<div class="ferm-tile-hd"><span class="ferm-tile-ttl">${humanizeType(type)}</span><span class="ferm-tile-unit">${unit}</span></div>`;
-    const chartBox=el('div');
-    tile.appendChild(chartBox);
     grid.appendChild(tile);
-    lineChart(chartBox, [{name:humanizeType(type), color:'#7FA3D4', pts}],
-      {unit, dec:ANALYSIS_DECIMALS[type]??1, h:140});
+    const dec=ANALYSIS_DECIMALS[type]??1;
+    if(pts.length < FERM_TREND_MIN_POINTS){
+      const latest=pts[pts.length-1];
+      tile.appendChild(el('div','stat-v', fmt(latest.v,dec)));
+      tile.appendChild(el('div','ferm-tile-date', latest.lbl));
+    } else {
+      const chartBox=el('div');
+      tile.appendChild(chartBox);
+      lineChart(chartBox, [{name:humanizeType(type), color:'#7FA3D4', pts}], {unit, dec, h:140});
+    }
   }
 }
 
@@ -1755,7 +1784,7 @@ function renderFruit(box, ctx){
   const fs=fermSeason(v);
   if(now<fs.start){
     box.appendChild(el('div','empty',
-      `No fruit received for ${v} yet.<br><b>First pick projected around ${dstr(fs.start)}.</b><br>Select an earlier vintage to see a completed harvest record.`));
+      `No fruit received for ${v} yet.<br><b>First pick projected around ${dstr(fs.start)}.</b><br>${v-1}'s completed harvest record is available in the data, not reachable from this tab yet.`));
     return;
   }
   let tons=0;
@@ -2169,7 +2198,8 @@ function makePanel(p, c){
   if(p.range){
     if(!state.range[p.id]) state.range[p.id]=p.range;
     const r=el('div','rng');
-    Object.entries(RANGES).forEach(([k,val])=>{
+    (p.rangeOptions||Object.keys(RANGES)).forEach(k=>{
+      const val=RANGES[k];
       const b=el('button', state.range[p.id]===k?'on':'', val.label);
       b.onclick=()=>{ state.range[p.id]=k; renderTab(c.tab); };
       r.appendChild(b);
@@ -2189,7 +2219,7 @@ async function renderTab(tab){
   const c=ctxFor(tab);
   const role = await getCurrentUserRole();
   const isOperator = role==='operator';
-  renderFilters(tab);
+  if(tab==='vineyard') renderFilters(tab);
   const host=$('#body-'+tab);
   host.innerHTML='';
   const pending=[];

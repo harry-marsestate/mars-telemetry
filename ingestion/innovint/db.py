@@ -119,13 +119,14 @@ def upsert_vessels(conn, rows: list[dict]) -> int:
             """
             insert into vessels
                 (vessel_id, source_system, vessel_type, code, capacity_gal,
-                 capacity_suspect, current_lot_id, current_lot_name, current_lot_code,
-                 block_id, archived, updated_at)
+                 volume_gal, capacity_suspect, current_lot_id, current_lot_name,
+                 current_lot_code, block_id, archived, updated_at)
             values %s
             on conflict (vessel_id) do update set
                 vessel_type = excluded.vessel_type,
                 code = excluded.code,
                 capacity_gal = excluded.capacity_gal,
+                volume_gal = excluded.volume_gal,
                 capacity_suspect = excluded.capacity_suspect,
                 current_lot_id = excluded.current_lot_id,
                 current_lot_name = excluded.current_lot_name,
@@ -141,6 +142,7 @@ def upsert_vessels(conn, rows: list[dict]) -> int:
                     r["vessel_type"],
                     r["code"],
                     r["capacity_gal"],
+                    r["volume_gal"],
                     r["capacity_suspect"],
                     r["current_lot_id"],
                     r["current_lot_name"],

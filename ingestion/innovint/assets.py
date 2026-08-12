@@ -158,6 +158,7 @@ def vessels_sync(context: AssetExecutionContext) -> MaterializeResult:
 
         for v in vessels:
             cap_val = v.capacity.value if v.capacity is not None else None
+            vol_val = v.volume.value if v.volume is not None else None
             suspect = capacity.compute_capacity_suspect(cap_val, threshold)
             if suspect:
                 suspect_count += 1
@@ -180,6 +181,7 @@ def vessels_sync(context: AssetExecutionContext) -> MaterializeResult:
                     "vessel_type": v.vessel_type.lower(),
                     "code": v.code,
                     "capacity_gal": cap_val,
+                    "volume_gal": vol_val,
                     "capacity_suspect": suspect,
                     "current_lot_id": v.lot_id,
                     "current_lot_name": current_lot.name if current_lot else None,

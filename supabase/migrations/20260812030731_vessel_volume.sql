@@ -1,0 +1,11 @@
+-- Captures InnoVint's per-vessel current fill level, distinct from
+-- capacity (total size, ~26% of which is a known placeholder value --
+-- see capacity_suspect). Found while inspecting TD-08's raw record
+-- directly: volume (70 gal) vs capacity (500,000 gal, flagged suspect)
+-- are genuinely different fields, not the same number twice. Nullable,
+-- no default, matching capacity_gal exactly -- the InnoVintVessel
+-- contract already modeled volume as optional (Measurement | None)
+-- before this column existed, so the same "seen non-null in 3 samples
+-- isn't a structural guarantee" caution already applied by design, not
+-- newly relaxed for this addition.
+alter table vessels add column volume_gal numeric;

@@ -1689,7 +1689,7 @@ async function renderFerm(box, ctx){
    here, unlike every other winery/vineyard panel. */
 async function fetchVessels(){
   const { data, error } = await sb.from('vessels').select(
-    'vessel_id, vessel_type, code, capacity_gal, capacity_suspect, current_lot_id, current_lot_name, current_lot_code, archived'
+    'vessel_id, vessel_type, code, capacity_gal, volume_gal, capacity_suspect, current_lot_id, current_lot_name, current_lot_code, archived'
   );
   if(error) throw error;
   return data;
@@ -1723,13 +1723,14 @@ async function renderTanks(box, ctx){
     else if(v.capacity_suspect) cap=`<span class="dim">${fmt(v.capacity_gal,0)}</span><span class="flag" title="Capacity looks like an unset InnoVint placeholder, not a real vessel size">⚠</span>`;
     else cap=fmt(v.capacity_gal,0);
 
+    const volText = v.volume_gal!=null ? ` · ${fmt(v.volume_gal,0)} gal` : '';
     let contents;
     if(v.current_lot_id==null) contents='<span class="dim">—</span>';
-    else if(v.current_lot_name!=null) contents=`${v.current_lot_name}${v.current_lot_code?`<br><span class="dim">${v.current_lot_code}</span>`:''}`;
+    else if(v.current_lot_name!=null) contents=`${v.current_lot_name}${volText}${v.current_lot_code?`<br><span class="dim">${v.current_lot_code}</span>`:''}`;
     else {
       const id=v.current_lot_id, short=id.length>12?id.slice(0,8)+'…'+id.slice(-4):id;
       const tip=`InnoVint reference doesn't resolve — ${id} not found via the InnoVint API`;
-      contents=`<span class="dim" title="${tip}">${short}</span><span class="flag" title="${tip}">⚠</span>`;
+      contents=`<span class="dim" title="${tip}">${short}</span><span class="flag" title="${tip}">⚠</span>${volText}`;
     }
 
     return [v.code||'—', typeLbl, cap, contents];

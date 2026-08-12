@@ -142,3 +142,38 @@ records, vessel assignments, component makeup) onto B1's dashboard data
 with no error or indication anything was mismatched. Only set it from a
 confirmed source (e.g. someone at the winery confirming the InnoVint block
 id directly).
+
+## PostgREST's default 1000-row cap - silent truncation, not an error
+
+An unfiltered `sb.from(table).select(...)` with no `.range()`/`.limit()`
+caps out at 1000 rows and returns successfully - no error, no truncation
+flag, just fewer rows than actually exist. Confirmed directly against
+`lot_analyses` (1,405 real rows): a plain select returned exactly 1000,
+silently dropping the rest. Because the query was ordered by `lot_name`
+and the missing ~405 rows sorted last alphabetically, `Zinfandel, Howell
+Mountain` (and one other lot) vanished entirely from the ferm panel's lot
+dropdown - and, more seriously, from `fetchChartEligibleTypes()`'s global
+chart-vs-card classification, which could have silently misclassified an
+eligible analysis_type as card-only if the row proving otherwise happened
+to sort past the cutoff.
+
+Fixed for `lot_analyses` via a real paginated fetch (`fetchAllRows()`,
+`web/index.html`) - loops `.range()` in 1000-row pages ordered by `id`
+(the stable primary key, chosen only for deterministic pagination
+boundaries, independent of whatever order a caller actually wants) until
+a page returns fewer than 1000 rows.
+
+Known dormant instance, NOT yet fixed: `sensor_readings` is 79,000+ rows
+and every path that reads it in bulk (`buildSeriesReal`, `vSets`, etc.)
+does so through the same unbounded-select pattern. Currently believed
+safe only because every real call site filters by date range and/or
+block first, keeping each individual query's result well under 1000 rows
+in practice - not because pagination was actually added. That belief has
+not been audited call-site by call-site. If a future query ever fetches
+across a wide-enough range or drops a filter, this will fail exactly the
+same way `lot_analyses` did: silently, not loudly.
+
+RULE: any new unfiltered/large-table select needs either an explicit
+`.range()` loop (see `fetchAllRows`) or a hard justification for why the
+result is guaranteed to stay under 1000 rows - "it always has so far" is
+not that justification, per this exact incident.

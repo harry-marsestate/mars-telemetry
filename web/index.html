@@ -243,6 +243,23 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .pill{font-size:9.5px; padding:2px 7px; border-radius:2px; border:1px solid var(--line-2); color:var(--muted); white-space:nowrap}
 .pill.live{border-color:rgba(110,155,114,.5); color:var(--ok)}
 
+/* vessels table (real data) -- scrollable, unlike every table() call
+   before it, since 92+ rows is far beyond anything this app has
+   rendered in one table. Deliberately its own class, not reusing .out's
+   overlay scroll fix (different context: in-page flow vs fixed overlay). */
+.tbl-scroll{max-height:360px; overflow-y:auto}
+.tbl-toggle{font-family:var(--mono); font-size:9.5px; color:var(--gold-dim); background:none; border:none; padding:10px 0 0; cursor:pointer; text-decoration:underline; text-underline-offset:2px; transition:color .16s}
+.tbl-toggle:hover{color:var(--gold)}
+.flag{color:var(--warn); cursor:help; margin-left:3px}
+
+/* lot lab history (real data) */
+.lot-select{font-family:var(--mono); font-size:10.5px; color:var(--cream); background:var(--ink); border:1px solid var(--line); border-radius:2px; padding:6px 10px}
+.ferm-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:16px; margin-top:14px}
+.ferm-tile{background:var(--ink-2); border:1px solid var(--line); border-radius:3px; padding:12px 14px}
+.ferm-tile-hd{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px}
+.ferm-tile-ttl{font-family:var(--mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted)}
+.ferm-tile-unit{font-family:var(--mono); font-size:9px; color:var(--muted-2)}
+
 /* anomalies */
 .anom{display:flex; flex-direction:column; gap:9px; width:100%}
 .anom-i{display:flex; gap:12px; padding:11px 13px; border-radius:3px; background:var(--ink-3); border-left:2px solid var(--sev,var(--muted-2))}
@@ -956,7 +973,9 @@ const state = {
   tab:'vineyard',
   vineyard:{vintages:[CURRENT], blocks:[...ALL_IDS]},
   winery:  {vintages:[2025],    blocks:[...ALL_IDS]},
-  range:{}
+  range:{},
+  lotSelect:{},      // per-panel-id selected InnoVint lot (ferm panel)
+  vesselsArchived:{} // per-panel-id archived-toggle (tanks panel)
 };
 const selV  = tab => [...state[tab].vintages].sort((a,b)=>a-b);
 const primV = tab => Math.max(...state[tab].vintages);
@@ -1151,7 +1170,7 @@ const SECTIONS = [
   {tab:'vineyard', id:'soil',    label:'Soil & water', note:'Probes at 18 in · flow meters'},
   {tab:'vineyard', id:'labour',  label:'Labour',       note:'Crew logs · season to date'},
   {tab:'winery',   id:'cellar',  label:'Cellar',       note:'Building sensors · always live'},
-  {tab:'winery',   id:'ferm',    label:'Fermentation', note:'Tank probes · harvest window only'},
+  {tab:'winery',   id:'ferm',    label:'Fermentation', note:'Real InnoVint lab records · vessel inventory'},
   {tab:'winery',   id:'harvest', label:'Harvest',      note:'Weigh-tag and lab records'}
 ];
 
@@ -1346,12 +1365,12 @@ const PANELS = [
  }},
 
 /* ══ WINERY · FERMENTATION ══ */
-{id:'ferm', tab:'winery', sect:'ferm', span:'s8', minRole:'operator', title:'Fermentation temperature', unit:'°F',
- sub:'Tank probes · plotted only while tanks are fermenting', range:'30D',
+{id:'ferm', tab:'winery', sect:'ferm', span:'s8', minRole:'operator', title:'Lot lab history',
+ sub:'Real InnoVint lab analyses · select a lot below · not tied to the vintage/block filters above',
  render:(b,c)=>renderFerm(b,c)},
 
-{id:'tanks', tab:'winery', sect:'ferm', span:'s4', minRole:'operator', title:'Tank log', unit:'litres · °F · °Bx',
- sub:'Lots from the selected blocks',
+{id:'tanks', tab:'winery', sect:'ferm', span:'s4', minRole:'operator', title:'Vessel inventory', unit:'gal',
+ sub:'InnoVint vessel inventory · no block scoping',
  render:(b,c)=>renderTanks(b,c)},
 
 /* ══ WINERY · HARVEST ══ */
@@ -1572,48 +1591,159 @@ function fermAnchor(v, align){
   const cap=new Date(fs.end); cap.setDate(cap.getDate()+3);
   return hard<cap ? hard : cap;
 }
-function renderFerm(box, ctx){
-  const v=ctx.primary, tk=TANKS.filter(t=>ctx.blocks.includes(t.blk));
-  const fs=fermSeason(v), end=fermAnchor(v,ctx.align);
-  if(!tk.length){box.appendChild(el('div','empty','No lots from the selected blocks.<br><b>Widen the block filter to see fermentation data.</b>')); return;}
-  if(end<fs.start){
-    box.appendChild(el('div','empty',
-      `No fermentation in ${v} yet.<br><b>Harvest is expected to begin around ${dstr(fs.start)}.</b><br>Cellar sensors above stay live year-round.`));
+/* Real InnoVint lab records, keyed on a selected lot -- there's no
+   sensible "current" lot (only 2/47 lots are non-archived), and no
+   vintage/range concept applies to real, absolute-dated lab history the
+   way it does to the rest of this app's simulated timeline. Fully
+   independent of state.winery's vintage/block filters, deliberately. */
+const ANALYSIS_DECIMALS = {
+  // Every value below chosen from the real min/max range per analysis_type
+  // (see the lot_analyses group-by query run before this fix), not
+  // guessed -- confirmed against all 19 real distinct slugs in the
+  // account, not the 11 seen on one sample lot during the original
+  // design pass.
+  brix:1, ph:2, 'titratable-acidity':2, 'volatile-acidity':2, temperature:1,
+  glucosefructose:1, 'ammonia-nh3':0, 'alpha-amino-nitrogen':0,
+  'yeast-assimilable-nitrogen-yan':0, potassium:0, 'malic-acid':2,
+  alcohol:2, ethanol:2, 'ethanol-20c':2, 'ethanol-60f':2, 'free-so2':0,
+  'lactic-acid':2, 'residual-sugar':2, 'total-so2':0
+};
+// Slugs are stored, not InnoVint's display name/abbreviation (a smaller
+// version of the same "only the machine key was captured" gap lot_id had
+// before lot_name/lot_code -- see docs/SECURITY.md). Unlike opaque lot
+// ids, these slugs are self-explanatory once humanized, so left as a
+// client-side formatting step rather than another schema/ingestion pass.
+const humanizeType = slug => slug.replace(/-/g,' ').replace(/\b\w/g, c=>c.toUpperCase());
+
+async function fetchAnalysisLots(){
+  const { data, error } = await sb.from('lot_analyses').select('lot_id, lot_name, lot_code').order('lot_name');
+  if(error) throw error;
+  const seen=new Map();
+  data.forEach(r=>{ if(!seen.has(r.lot_id)) seen.set(r.lot_id, r); });
+  return [...seen.values()];
+}
+async function fetchLotAnalyses(lotId){
+  const { data, error } = await sb.from('lot_analyses')
+    .select('analysis_type, value, unit, recorded_at')
+    .eq('lot_id', lotId).order('recorded_at');
+  if(error) throw error;
+  return data;
+}
+async function renderFerm(box, ctx){
+  const lots = await fetchAnalysisLots();
+  if(!lots.length){ box.appendChild(el('div','empty','No lot analysis records available yet.')); return; }
+
+  const selectedId = lots.some(l=>l.lot_id===state.lotSelect.ferm) ? state.lotSelect.ferm : null;
+  const sel=el('select','lot-select');
+  sel.innerHTML = `<option value="">Select a lot…</option>` + lots.map(l=>
+    `<option value="${l.lot_id}" ${l.lot_id===selectedId?'selected':''}>${l.lot_name}${l.lot_code?' · '+l.lot_code:''}</option>`
+  ).join('');
+  sel.onchange=()=>{ state.lotSelect.ferm = sel.value || null; renderTab(ctx.tab); };
+  box.appendChild(sel);
+
+  if(!selectedId){
+    box.appendChild(el('div','empty','Select a lot above to see its real InnoVint lab history.<br><b>Brix, temperature, pH, acids, nitrogen and more — whatever InnoVint actually recorded for that lot.</b>'));
     return;
   }
-  const sets=tk.map(t=>({name:t.id, color:B(t.blk).color,
-    pts:buildSeries((d,vv)=>tankTemp(t,d,vv), v, ctx.range, {end})}));
-  legendFor(box.parentElement,[...sets.map(s=>({name:s.name,color:s.color})),{name:'Ceiling 88 °F',color:'#C9603F',band:true}]);
-  lineChart(box, sets, {unit:'°F',dec:1,h:206,band:[66,88],bandColor:'#6E9B72',bandLabel:'Working range',
-    emptyMsg:`No tanks fermenting in this window.<br><b>Fermentation ran ${dstr(fs.start)} – ${dstr(fs.end)} in ${v}.</b><br>Widen the range to 1Y to see the gap.`});
+
+  const rows = await fetchLotAnalyses(selectedId);
+  if(!rows.length){ box.appendChild(el('div','empty','No analysis records for this lot.')); return; }
+
+  const byType=new Map();
+  rows.forEach(r=>{
+    // Keyed on (analysis_type, unit), not analysis_type alone: confirmed
+    // alpha-amino-nitrogen is recorded in BOTH g/L and ppm across
+    // different lots (no single lot mixes them today, checked directly),
+    // but grouping on type alone would silently merge two
+    // incompatible-scale series onto one mislabeled chart the moment a
+    // lot ever does. This never triggers on today's data -- it closes a
+    // latent bug, not a currently-visible one.
+    const key = r.analysis_type+'|'+r.unit;
+    if(!byType.has(key)) byType.set(key, {type:r.analysis_type, unit:r.unit, pts:[]});
+    byType.get(key).pts.push({v:+r.value, lbl:dstr(new Date(r.recorded_at))});
+  });
+
+  strip(box,[
+    {l:'Analyses', v:rows.length},
+    {l:'Types', v:byType.size},
+    {l:'First recorded', v:dstr(new Date(rows[0].recorded_at))},
+    {l:'Last recorded', v:dstr(new Date(rows[rows.length-1].recorded_at))}
+  ]);
+
+  const grid=el('div','ferm-grid');
+  box.appendChild(grid);
+  for(const [key, {type, unit, pts}] of byType){
+    const tile=el('div','ferm-tile');
+    tile.innerHTML=`<div class="ferm-tile-hd"><span class="ferm-tile-ttl">${humanizeType(type)}</span><span class="ferm-tile-unit">${unit}</span></div>`;
+    const chartBox=el('div');
+    tile.appendChild(chartBox);
+    grid.appendChild(tile);
+    lineChart(chartBox, [{name:humanizeType(type), color:'#7FA3D4', pts}],
+      {unit, dec:ANALYSIS_DECIMALS[type]??1, h:140});
+  }
 }
 
-/* ── Tank log ── */
-function renderTanks(box, ctx){
-  const v=ctx.primary, tk=TANKS.filter(t=>ctx.blocks.includes(t.blk));
-  const now=endOf(v,ctx.align), fs=fermSeason(v);
-  if(!tk.length){box.appendChild(el('div','empty','No lots from the selected blocks.')); return;}
-  let nAct=0, vol=0;
-  const rows=tk.sort((a,b)=>tankStart(a,v)-tankStart(b,v)).map(t=>{
-    const s=doyDate(v,tankStart(t,v)), e=doyDate(v,tankEnd(t,v));
-    const live=tankTemp(t,now,v), brix=tankBrix(t,now,v);
-    vol+=t.vol;
-    let status, temp, bx;
-    if(live!=null){ nAct++;
-      status=`<span class="pill live">Day ${Math.ceil(fermDay(t,now,v))||1}</span>`;
-      temp=`<span style="color:${live>88?'var(--alert)':live>85?'var(--warn)':'var(--cream)'}">${fmt(live,1)}</span>`;
-      bx=fmt(brix,1);
-    } else if(now>e){ status=`<span class="pill">Pressed ${dstr(e)}</span>`;
-      let pk=0; for(let k=0;k<=t.days;k++){const d=doyDate(v,tankStart(t,v)+k); pk=Math.max(pk,tankTemp(t,d,v)||0);}
-      temp=`<span class="dim">${fmt(pk,1)} pk</span>`; bx='<span class="dim">0.0</span>';
-    } else { status=`<span class="pill">From ${dstr(s)}</span>`; temp='<span class="dim">—</span>'; bx='<span class="dim">—</span>'; }
-    return [`<span class="vdot" style="background:${B(t.blk).color}"></span>${t.id}`,
-            VNAME[t.vk].split(' ').map(w=>w[0]).join(''), fmt(t.vol,0), status, temp, bx];
+/* Vessel inventory (real InnoVint data). No block-filtering -- vessels
+   aren't block-scoped in reality (block_id resolves for ~0-5% of real
+   rows, per the schema design), so ctx.blocks is deliberately unused
+   here, unlike every other winery/vineyard panel. */
+async function fetchVessels(){
+  const { data, error } = await sb.from('vessels').select(
+    'vessel_id, vessel_type, code, capacity_gal, capacity_suspect, current_lot_id, current_lot_name, current_lot_code, archived'
+  );
+  if(error) throw error;
+  return data;
+}
+async function renderTanks(box, ctx){
+  const all = await fetchVessels();
+  const activeCount = all.filter(v=>!v.archived).length;
+  const archivedCount = all.length - activeCount;
+  const showArchived = !!state.vesselsArchived.tanks;
+  const shown = showArchived ? all : all.filter(v=>!v.archived);
+
+  strip(box,[
+    {l:'Vessels shown', v:shown.length},
+    {l:'Currently filled', v:shown.filter(v=>v.current_lot_id!=null).length},
+    {l:'Identified', v:shown.filter(v=>v.current_lot_name!=null).length},
+    {l:'Capacity flagged', v:shown.filter(v=>v.capacity_suspect).length}
+  ]);
+
+  const sorted=[...shown].sort((a,b)=>{
+    const af=a.current_lot_id!=null, bf=b.current_lot_id!=null;
+    if(af!==bf) return af?-1:1;
+    if(a.vessel_type!==b.vessel_type) return a.vessel_type<b.vessel_type?-1:1;
+    return (a.code||'').localeCompare(b.code||'');
   });
-  strip(box,[{l:'Lots',v:tk.length},{l:'Active now',v:nAct},{l:'Volume',v:fmt(vol,0),u:'L'}]);
-  table(box,[{h:'Tank'},{h:'Var.',dim:1},{h:'Litres',num:1},{h:'Status'},{h:'°F',num:1},{h:'°Bx',num:1}],rows);
-  const note=el('div','p-sub', `${v} fermentation ran ${dstr(fs.start)} – ${dstr(fs.end)}`);
-  note.style.paddingTop='11px'; box.appendChild(note);
+
+  const rows=sorted.map(v=>{
+    const typeLbl=v.vessel_type.charAt(0).toUpperCase()+v.vessel_type.slice(1).replace('_',' ');
+
+    let cap;
+    if(v.capacity_gal==null) cap='<span class="dim">—</span>';
+    else if(v.capacity_suspect) cap=`<span class="dim">${fmt(v.capacity_gal,0)}</span><span class="flag" title="Capacity looks like an unset InnoVint placeholder, not a real vessel size">⚠</span>`;
+    else cap=fmt(v.capacity_gal,0);
+
+    let contents;
+    if(v.current_lot_id==null) contents='<span class="dim">—</span>';
+    else if(v.current_lot_name!=null) contents=`${v.current_lot_name}${v.current_lot_code?`<br><span class="dim">${v.current_lot_code}</span>`:''}`;
+    else {
+      const id=v.current_lot_id, short=id.length>12?id.slice(0,8)+'…'+id.slice(-4):id;
+      const tip=`InnoVint reference doesn't resolve — ${id} not found via the InnoVint API`;
+      contents=`<span class="dim" title="${tip}">${short}</span><span class="flag" title="${tip}">⚠</span>`;
+    }
+
+    return [v.code||'—', typeLbl, cap, contents];
+  });
+
+  const scroll=el('div','tbl-scroll');
+  box.appendChild(scroll);
+  table(scroll,[{h:'Code'},{h:'Type',dim:1},{h:'Capacity'},{h:'Contents'}],rows);
+
+  const toggle=el('button','tbl-toggle', showArchived
+    ? `${activeCount} active · showing all ${all.length} — hide archived`
+    : `${activeCount} active · ${archivedCount} archived — show archived`);
+  toggle.onclick=()=>{ state.vesselsArchived.tanks=!showArchived; renderTab(ctx.tab); };
+  box.appendChild(toggle);
 }
 
 /* ── Fruit received ── */

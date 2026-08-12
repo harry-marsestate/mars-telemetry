@@ -74,11 +74,13 @@ def upsert_lot_analyses(conn, rows: list[dict]) -> int:
             cur,
             """
             insert into lot_analyses
-                (source_system, source_id, lot_id, block_id, analysis_type,
-                 value, unit, recorded_at, ingested_at)
+                (source_system, source_id, lot_id, lot_name, lot_code, block_id,
+                 analysis_type, value, unit, recorded_at, ingested_at)
             values %s
             on conflict (source_system, source_id) do update set
                 lot_id = excluded.lot_id,
+                lot_name = excluded.lot_name,
+                lot_code = excluded.lot_code,
                 block_id = excluded.block_id,
                 analysis_type = excluded.analysis_type,
                 value = excluded.value,
@@ -91,6 +93,8 @@ def upsert_lot_analyses(conn, rows: list[dict]) -> int:
                     r["source_system"],
                     r["source_id"],
                     r["lot_id"],
+                    r["lot_name"],
+                    r["lot_code"],
                     r["block_id"],
                     r["analysis_type"],
                     r["value"],
@@ -115,7 +119,8 @@ def upsert_vessels(conn, rows: list[dict]) -> int:
             """
             insert into vessels
                 (vessel_id, source_system, vessel_type, code, capacity_gal,
-                 capacity_suspect, current_lot_id, block_id, archived, updated_at)
+                 capacity_suspect, current_lot_id, current_lot_name, current_lot_code,
+                 block_id, archived, updated_at)
             values %s
             on conflict (vessel_id) do update set
                 vessel_type = excluded.vessel_type,
@@ -123,6 +128,8 @@ def upsert_vessels(conn, rows: list[dict]) -> int:
                 capacity_gal = excluded.capacity_gal,
                 capacity_suspect = excluded.capacity_suspect,
                 current_lot_id = excluded.current_lot_id,
+                current_lot_name = excluded.current_lot_name,
+                current_lot_code = excluded.current_lot_code,
                 block_id = excluded.block_id,
                 archived = excluded.archived,
                 updated_at = excluded.updated_at
@@ -136,6 +143,8 @@ def upsert_vessels(conn, rows: list[dict]) -> int:
                     r["capacity_gal"],
                     r["capacity_suspect"],
                     r["current_lot_id"],
+                    r["current_lot_name"],
+                    r["current_lot_code"],
                     r["block_id"],
                     r["archived"],
                     r["updated_at"],

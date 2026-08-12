@@ -57,15 +57,15 @@ def analyses_sync(context: AssetExecutionContext) -> MaterializeResult:
 
     try:
         innovint_block_map = db.load_innovint_block_map(conn)
-        lot_ids = client.list_lot_ids()
-        context.log.info(f"{len(lot_ids)} lots found")
+        lots = client.list_lots()
+        context.log.info(f"{len(lots)} lots found")
 
         rows: list[dict] = []
         skipped_deleted_or_skipped = 0
         skipped_null_value = 0
 
-        for lot_id in lot_ids:
-            for a in client.fetch_analyses(lot_id):
+        for lot in lots:
+            for a in client.fetch_analyses(lot.id):
                 # deleted/skipped records aren't real observations -- never
                 # seen in the 1,411 real records pulled during the
                 # inventory (all deleted=false, skipped=false), so this is
@@ -88,6 +88,8 @@ def analyses_sync(context: AssetExecutionContext) -> MaterializeResult:
                         "source_system": "innovint",
                         "source_id": a.id,
                         "lot_id": a.lot_id,
+                        "lot_name": lot.name,
+                        "lot_code": lot.code,
                         "block_id": block_id,
                         "analysis_type": a.analysis_type.slug,
                         "value": a.value,
@@ -110,7 +112,7 @@ def analyses_sync(context: AssetExecutionContext) -> MaterializeResult:
         )
         return MaterializeResult(
             metadata={
-                "lots_processed": len(lot_ids),
+                "lots_processed": len(lots),
                 "rows_deduped": deduped,
                 "rows_upserted": written,
                 "rows_with_block_id": resolved,
@@ -135,6 +137,11 @@ def vessels_sync(context: AssetExecutionContext) -> MaterializeResult:
 
     try:
         innovint_block_map = db.load_innovint_block_map(conn)
+        # Keyed by lot.id, not just consulted for name/code: a vessel's
+        # current_lot_id missing from this dict is exactly how a dangling
+        # reference (e.g. TD-07/TD-08, see client.py) surfaces here too --
+        # no special-case handling needed, .get() naturally returns None.
+        lots_by_id = {lot.id: lot for lot in client.list_lots()}
         vessels = list(client.fetch_vessels())
         context.log.info(f"{len(vessels)} vessels found")
 
@@ -161,6 +168,8 @@ def vessels_sync(context: AssetExecutionContext) -> MaterializeResult:
                 if block_id is not None:
                     resolved_count += 1
 
+            current_lot = lots_by_id.get(v.lot_id) if v.lot_id is not None else None
+
             rows.append(
                 {
                     "vessel_id": v.id,
@@ -173,6 +182,8 @@ def vessels_sync(context: AssetExecutionContext) -> MaterializeResult:
                     "capacity_gal": cap_val,
                     "capacity_suspect": suspect,
                     "current_lot_id": v.lot_id,
+                    "current_lot_name": current_lot.name if current_lot else None,
+                    "current_lot_code": current_lot.code if current_lot else None,
                     "block_id": block_id,
                     "archived": v.archived,
                     "updated_at": now,

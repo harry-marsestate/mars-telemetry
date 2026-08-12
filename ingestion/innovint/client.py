@@ -5,7 +5,6 @@ Python objects and never touches HTTP or raw bytes directly.
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Iterator
 
@@ -16,6 +15,8 @@ from .contracts import (
     BlockComponentsResponse,
     InnoVintAnalysis,
     InnoVintVessel,
+    Lot,
+    LotsResponse,
     Pagination,
     VesselsResponse,
 )
@@ -53,17 +54,17 @@ class InnoVintClient:
         time.sleep(REQUEST_PAUSE_SECONDS)
         return resp.content
 
-    def list_lot_ids(self) -> list[str]:
-        ids: list[str] = []
+    def list_lots(self) -> list[Lot]:
+        lots: list[Lot] = []
         url = f"{BASE_URL}/wineries/{self._winery_id}/lots?limit=100"
         page = 0
         while url:
             raw = self._get(url, "lots", f"page{page}")
-            payload = json.loads(raw)
-            ids.extend(r["data"]["id"] for r in payload["results"])
-            url = payload["pagination"]["next"]
+            parsed = LotsResponse.model_validate_json(raw)
+            lots.extend(item.data for item in parsed.results)
+            url = parsed.pagination.next
             page += 1
-        return ids
+        return lots
 
     def fetch_analyses(self, lot_id: str) -> Iterator[InnoVintAnalysis]:
         url = f"{BASE_URL}/wineries/{self._winery_id}/lots/{lot_id}/analyses?limit=50"

@@ -58,6 +58,56 @@ class Measurement(StrictModel):
     unit: str
 
 
+# ── /lots ────────────────────────────────────────────────────────────────
+
+class BottlesOnHand(StrictModel):
+    cases: float
+    bottles: float
+
+
+class Lot(StrictModel):
+    """Only id/name/code are consumed by this ingestion today (see
+    list_lots() in client.py). Every other field must still be modeled --
+    extra="forbid" means an unrecognized field fails the whole response,
+    not just the field nobody reads. Fields not used downstream (stage,
+    lot_type, lot_style, tax_class, color) are typed permissively (plain
+    str, not Literal) rather than enumerated against today's observed
+    values -- over-constraining a field nothing depends on adds fragility
+    without benefiting anything built against it. Contrast with
+    VesselType/analysis fields above, which back real ingestion logic and
+    are deliberately strict.
+    """
+
+    id: str
+    internal_id: int = Field(alias="internalId")
+    access: Access
+    archived: bool
+    bond_id: str | None = Field(default=None, alias="bondId")
+    bottles_on_hand: BottlesOnHand = Field(alias="bottlesOnHand")
+    code: str
+    color: str | None = None
+    expected_yield: float | None = Field(default=None, alias="expectedYield")
+    fruit_weight: Measurement = Field(alias="fruitWeight")
+    lot_style: str = Field(alias="lotStyle")
+    lot_type: str = Field(alias="lotType")
+    name: str
+    stage: str
+    tags: list[Any] = Field(default_factory=list)
+    tax_class: str = Field(alias="taxClass")
+    volume: Measurement | None = None
+    weight: Measurement | None = None
+
+
+class LotEnvelopeItem(StrictModel):
+    data: Lot
+    relationships: dict[str, str | None] = Field(default_factory=dict)
+
+
+class LotsResponse(StrictModel):
+    results: list[LotEnvelopeItem]
+    pagination: Pagination
+
+
 # ── /lots/{lotId}/analyses ──────────────────────────────────────────────
 
 class AnalysisType(StrictModel):

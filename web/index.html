@@ -168,6 +168,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .rng button.on{background:var(--ink-4); color:var(--gold)}
 .p-body{padding:2px 16px 15px; flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center}
 .p-body:has(table){justify-content:flex-start}
+.p-body:has(.anom){justify-content:flex-start}
 .legend{display:flex; flex-wrap:wrap; gap:13px; padding:0 16px 10px; font-family:var(--mono); font-size:9.5px; color:var(--muted)}
 .legend span{display:flex; align-items:center; gap:6px}
 .legend i{width:12px; height:2px; border-radius:1px; background:currentColor; display:block}
@@ -253,11 +254,13 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .flag{color:var(--warn); cursor:help; margin-left:3px}
 
 /* lot lab history (real data) */
-.lot-select{font-family:var(--mono); font-size:10.5px; color:var(--cream); background:var(--ink); border:1px solid var(--line); border-radius:2px; padding:6px 10px}
+.lot-select{font-family:var(--mono); font-size:10.5px; color:var(--cream); background:var(--ink); border:1px solid var(--line); border-radius:2px; padding:6px 10px; margin-bottom:16px}
 .ferm-groups{display:flex; flex-wrap:wrap; gap:20px; margin-top:14px}
 .ferm-groups .ferm-grid{flex:1 1 320px; min-width:0; margin-top:0}
 .ferm-groups .ferm-grid+.ferm-grid{border-left:1px solid var(--line); padding-left:20px}
 .ferm-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:16px; margin-top:14px}
+.ferm-grid.ferm-grid-chart{grid-template-columns:repeat(2,1fr)}
+.ferm-grid.ferm-grid-card{grid-template-columns:repeat(3,1fr)}
 .ferm-tile{background:var(--ink-2); border:1px solid var(--line); border-radius:3px; padding:12px 14px}
 .ferm-tile-hd{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px}
 .ferm-tile-ttl{font-family:var(--mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted)}
@@ -1414,7 +1417,7 @@ async function vSets(c, getterOrMetric, color, name, opts={}){
 const MAP = {
   B1:{pts:[[1085.2,64.3],[1248.8,40.3],[1351.7,155.7],[1292.0,251.9],[1224.7,357.7],[1143.9,465.5],[1057.3,573.2],[986.1,642.5],[947.7,627.1],[930.3,538.6],[913.0,427.0],[898.6,321.2],[887.0,257.7],[978.4,155.7]], lx:1096, ly:352, ang:-52},
   B2:{pts:[[247.1,446.9],[329.5,441.1],[436.8,453.6],[532.6,467.0],[618.8,485.2],[664.8,422.9],[701.2,355.9],[722.3,311.8],[774.0,296.5],[827.7,301.3],[852.6,311.8],[862.2,373.1],[873.7,440.2],[885.2,513.0],[890.9,570.4],[885.2,610.7],[867.9,647.1],[852.6,673.9],[791.3,685.4],[737.6,681.6],[695.5,672.0],[653.3,654.8],[630.3,635.6],[605.4,606.9],[557.5,622.2],[519.2,633.7],[505.8,647.1],[502.0,691.2],[408.1,694.0],[312.3,693.1],[252.9,690.2]], lx:556, ly:548, ang:-4},
-  B3:{pts:[[241.4,711.1],[309.8,709.2],[404.8,711.1],[492.2,709.2],[496.0,665.5],[507.4,654.1],[549.2,642.7],[594.8,650.3],[608.1,661.7],[634.7,694.0],[689.8,724.4],[748.7,732.0],[805.7,743.4],[847.5,754.8],[841.8,783.3],[824.7,798.5],[781.0,817.5],[729.7,804.2],[680.3,797.6],[644.2,801.4],[613.8,812.8],[583.4,827.0],[545.4,837.5],[501.7,846.0],[458.0,856.5],[418.1,870.7],[309.8,872.6],[241.4,874.5]], lx:486, ly:780, ang:-4},
+  B3:{pts:[[241.4,711.1],[309.8,709.2],[404.8,711.1],[492.2,709.2],[508.5,680.0],[507.4,654.1],[549.2,642.7],[594.8,650.3],[608.1,661.7],[634.7,694.0],[689.8,724.4],[748.7,732.0],[805.7,743.4],[847.5,754.8],[841.8,783.3],[824.7,798.5],[781.0,817.5],[729.7,804.2],[680.3,797.6],[644.2,801.4],[613.8,812.8],[583.4,827.0],[545.4,837.5],[501.7,846.0],[458.0,856.5],[418.1,870.7],[309.8,872.6],[241.4,874.5]], lx:486, ly:780, ang:-4},
 };
 const ROADS = [
   [[880.4,236],[862.5,256],[864.3,276],[868.0,296],[875.5,316],[878.5,336],[881.4,356],[884.4,376],[887.5,396],[890.5,416],[893.7,436],[896.8,456],[900.0,476],[903.1,496],[906.1,516],[908.7,536],[911.6,556],[913.9,576],[914.4,596],[914.1,616],[921.5,636],[901.5,656],[881.5,680],[861.5,704],[841.5,728],[866.2,752],[872.3,776],[852.3,800],[832.3,824],[812.3,848],[792.3,872],[772.3,896],[759.3,920],[746.3,944],[733.3,968],[720.3,992]],
@@ -1422,7 +1425,7 @@ const ROADS = [
   [[800,849.2],[760,852.1],[720,842.9],[680,837.6],[640,843.0],[600,859.2],[560,873.5],[520,882.4]],
 ];
 const TREES=[[608,635.8],[642,671.7],[676,690.4],[710,701.2],[744,706.7],[778,711.2],[812,713.3],[846,714.8],[606,916],[646,930],[462,912],[1000,652]];
-const BUILDINGS=[{x:1352,y:182.0,w:70,h:54,r:22},{x:1296,y:265.0,w:40,h:36,r:-8},{x:952,y:676.0,w:28,h:26,r:0},{x:498,y:898,w:72,h:46,r:0},{x:556,y:912,w:42,h:30,r:0}];
+const BUILDINGS=[{x:1385,y:160.0,w:70,h:54,r:22},{x:1310.5,y:273.0,w:40,h:36,r:-8},{x:952,y:676.0,w:28,h:26,r:0},{x:498,y:898,w:72,h:46,r:0},{x:556,y:912,w:42,h:30,r:0}];
 
 /* Rounded-corner smoothing: straight runs are preserved, every vertex becomes
    a quadratic arc, so the outline reads as an organic boundary with no kinks. */
@@ -1762,7 +1765,7 @@ async function renderFerm(box, ctx){
 
   const renderGroup=(entries, mode)=>{
     if(!entries.length) return;
-    const grid=el('div','ferm-grid');
+    const grid=el('div','ferm-grid ferm-grid-'+mode);
     groups.appendChild(grid);
     for(const [key, {type, unit, pts}] of entries){
       const tile=el('div','ferm-tile');
@@ -2092,7 +2095,7 @@ function formatVineyardTiles(cur, prev, other){
     const dd=now-prev[key];
     return {txt:`vs ${other}: ${dd>=0?'+':''}${fmt(dd, Math.abs(dd)<10?1:0)}`, up:dd>=0};
   };
-  const {t, sm, dry, g, vp, dt, rh, et} = cur;
+  const {t, sm, dry, g, vp, dt, rh} = cur;
   const dT=delta(t,'t'), dG=delta(g,'g'), dS=delta(sm,'sm');
   return [
     {key:'t', l:'Air temperature', v:fmt(t,1), u:'°F',
@@ -2112,8 +2115,7 @@ function formatVineyardTiles(cur, prev, other){
       c: dt==null ? '' : (dt>=21?'up':'wr')},
     {key:'rh', l:'Relative humidity', v:fmt(rh,0), u:'%',
       d: rh==null ? '—' : (rh>85?'mildew pressure':'normal'),
-      c: rh==null ? '' : (rh>85?'wr':'')},
-    {key:'et', l:'ET₀ today', v:fmt(et,3), u:'in', d:'irrigation demand'}
+      c: rh==null ? '' : (rh>85?'wr':'')}
   ];
 }
 
@@ -2123,19 +2125,18 @@ async function overviewStats(tab, c){
   const other = c.compare ? c.vintages.find(x=>x!==v) : null;
 
   async function vineyardSnapshot(vv){
-    const [t, soilByBlock, g, vp, dt, rh, et] = await Promise.all([
+    const [t, soilByBlock, g, vp, dt, rh] = await Promise.all([
       getLatestValue({metric:'air_temp', scope:'estate', vintage:vv}),
       Promise.all(ids.map(async id => ({id, v: await getLatestValue({metric:'soil_moisture', scope:id, vintage:vv})}))),
       getLatestDerivedValue({field:'gdd_cumulative', vintage:vv}),
       getLatestDerivedValue({field:'vpd_kpa', vintage:vv}),
       getLatestDerivedValue({field:'dtr_f', vintage:vv}),
-      getLatestValue({metric:'humidity', scope:'estate', vintage:vv}),
-      getLatestDerivedValue({field:'et0_in', vintage:vv})
+      getLatestValue({metric:'humidity', scope:'estate', vintage:vv})
     ]);
     const valid = soilByBlock.filter(b=>b.v!=null);
     const sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
     const dry = valid.length ? [...valid].sort((a,b)=>a.v-b.v)[0] : null;
-    return {t, soilByBlock, sm, dry, g, vp, dt, rh, et};
+    return {t, soilByBlock, sm, dry, g, vp, dt, rh};
   }
 
   const [cur, prev] = await Promise.all([
@@ -2908,6 +2909,11 @@ async function renderApproveForm(formHost, row, wrap){
         <option value="customer">Customer</option>
       </select>
     </div>
+    <div class="fgroup">
+      <label class="flabel queue-admin-label" style="display:flex; align-items:center; gap:8px; cursor:pointer">
+        <input type="checkbox" class="queue-admin-check"> Grant admin privileges
+      </label>
+    </div>
     <div class="queue-customer-fields" style="display:none">
       <div class="fgroup">
         <div class="flabel">Customer account ID</div>
@@ -2936,8 +2942,27 @@ async function renderApproveForm(formHost, row, wrap){
   const formErr=formHost.querySelector('.queue-form-err');
   const confirmBtn=formHost.querySelector('.queue-confirm-btn');
   const cancelBtn=formHost.querySelector('.queue-cancel-btn');
+  const adminCheck=formHost.querySelector('.queue-admin-check');
+  const adminLabel=formHost.querySelector('.queue-admin-label');
 
-  roleSelect.onchange=()=>{ customerFields.style.display = roleSelect.value==='customer' ? '' : 'none'; };
+  // is_admin grants full cross-account profile access -- not reachable on
+  // a customer-tier account even accidentally. Force-unchecked (not just
+  // disabled) on switching to customer, since a disabled checkbox still
+  // reports its last .checked value -- leaving it true would silently
+  // submit is_admin:true if a user checked it, switched to customer, and
+  // confirmed without noticing the checkbox greyed out.
+  function syncAdminAvailability(){
+    const isOperator = roleSelect.value==='operator';
+    adminCheck.disabled = !isOperator;
+    if(!isOperator) adminCheck.checked=false;
+    adminLabel.style.opacity = isOperator ? '' : '.4';
+  }
+  syncAdminAvailability();
+
+  roleSelect.onchange=()=>{
+    customerFields.style.display = roleSelect.value==='customer' ? '' : 'none';
+    syncAdminAvailability();
+  };
   blockChips.forEach(chip=>{ chip.onclick=()=>chip.classList.toggle('on'); });
 
   let collisionTimer=null;
@@ -2978,8 +3003,9 @@ async function renderApproveForm(formHost, row, wrap){
 
     confirmBtn.disabled=true; cancelBtn.disabled=true;
 
+    const isAdmin = role==='operator' && adminCheck.checked;
     const { error: updateErr } = await sb.from('user_profiles').update({
-      status:'approved', role,
+      status:'approved', role, is_admin: isAdmin,
       customer_account_id: role==='customer' ? accountId : null
     }).eq('id', row.id);
 

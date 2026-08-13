@@ -85,7 +85,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .menu-meta{font-family:var(--mono); font-size:10.5px; color:var(--muted-2); padding:11px 0; line-height:1.7}
 .signout, .menu-link{
   width:100%; text-align:left; font-size:11.5px; letter-spacing:.09em; text-transform:uppercase;
-  color:var(--muted); padding:9px 0 2px; border-top:1px solid var(--line); transition:color .16s;
+  color:var(--muted); padding:12px 0 2px; border-top:1px solid var(--line); transition:color .16s;
 }
 .signout:hover{color:var(--alert)}
 .menu-link:hover{color:var(--gold)}
@@ -169,6 +169,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .p-body{padding:2px 16px 15px; flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center}
 .p-body:has(table){justify-content:flex-start}
 .p-body:has(.anom){justify-content:flex-start}
+.p-body:has(.lot-select){justify-content:flex-start}
 .legend{display:flex; flex-wrap:wrap; gap:13px; padding:0 16px 10px; font-family:var(--mono); font-size:9.5px; color:var(--muted)}
 .legend span{display:flex; align-items:center; gap:6px}
 .legend i{width:12px; height:2px; border-radius:1px; background:currentColor; display:block}
@@ -256,7 +257,9 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 /* lot lab history (real data) */
 .lot-select{font-family:var(--mono); font-size:10.5px; color:var(--cream); background:var(--ink); border:1px solid var(--line); border-radius:2px; padding:6px 10px; margin-bottom:16px}
 .ferm-groups{display:flex; flex-wrap:wrap; gap:20px; margin-top:14px}
-.ferm-groups .ferm-grid{flex:1 1 320px; min-width:0; margin-top:0}
+.ferm-groups .ferm-grid{min-width:0; margin-top:0}
+.ferm-groups .ferm-grid-chart{flex:3 1 480px}
+.ferm-groups .ferm-grid-card{flex:2 1 360px}
 .ferm-groups .ferm-grid+.ferm-grid{border-left:1px solid var(--line); padding-left:20px}
 .ferm-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:16px; margin-top:14px}
 .ferm-grid.ferm-grid-chart{grid-template-columns:repeat(2,1fr)}
@@ -2728,6 +2731,11 @@ $$('.logo-img').forEach(img=>img.src=LOGO_SRC);
 /* §10 ── SESSION GATE (Phase 6.4/6.5) ─────────────────── */
 let dashboardBooted=false;
 
+// Central place to update if the customer/operator labels change again --
+// role itself stays 'operator'/'customer' everywhere in the database and
+// RLS; this only maps how it's displayed.
+const ROLE_LABELS = { operator: 'Team Member', customer: 'Obsidian Member' };
+
 function computeInitials(name){
   const parts=name.trim().split(/\s+/).filter(Boolean);
   if(parts.length>=2) return (parts[0][0]+parts[parts.length-1][0]).toUpperCase();
@@ -2740,7 +2748,7 @@ async function updateHeaderForSession(session, role){
     || session.user.email;
   $('#avatar').textContent = computeInitials(displayName);
   $('.menu-name').textContent = displayName;
-  $('.menu-role').textContent = role==='operator' ? 'Operator' : 'Customer';
+  $('.menu-role').textContent = ROLE_LABELS[role] || role;
   $('#menu-queue').style.display = profile?.is_admin ? '' : 'none';
 }
 
@@ -2905,8 +2913,8 @@ async function renderApproveForm(formHost, row, wrap){
     <div class="fgroup">
       <div class="flabel">Role</div>
       <select class="queue-role-select">
-        <option value="operator">Operator</option>
-        <option value="customer">Customer</option>
+        <option value="operator">${ROLE_LABELS.operator}</option>
+        <option value="customer">${ROLE_LABELS.customer}</option>
       </select>
     </div>
     <div class="fgroup">

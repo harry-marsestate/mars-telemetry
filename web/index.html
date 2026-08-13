@@ -256,14 +256,9 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 
 /* lot lab history (real data) */
 .lot-select{font-family:var(--mono); font-size:10.5px; color:var(--cream); background:var(--ink); border:1px solid var(--line); border-radius:2px; padding:6px 10px; margin-bottom:16px}
-.ferm-groups{display:flex; flex-wrap:wrap; gap:20px; margin-top:14px}
-.ferm-groups .ferm-grid{min-width:0; margin-top:0}
-.ferm-groups .ferm-grid-chart{flex:3 1 480px}
-.ferm-groups .ferm-grid-card{flex:2 1 360px}
-.ferm-groups .ferm-grid+.ferm-grid{border-left:1px solid var(--line); padding-left:20px}
-.ferm-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:16px; margin-top:14px}
-.ferm-grid.ferm-grid-chart{grid-template-columns:repeat(2,1fr)}
-.ferm-grid.ferm-grid-card{grid-template-columns:repeat(3,1fr)}
+.ferm-panels{display:flex; align-items:start; gap:16px; margin-top:14px}
+.ferm-charts{flex:2 1 0; display:grid; grid-template-columns:1fr; gap:16px; min-width:0}
+.ferm-cards{flex:1 1 0; display:grid; grid-template-columns:1fr; gap:16px; min-width:0}
 .ferm-tile{background:var(--ink-2); border:1px solid var(--line); border-radius:3px; padding:12px 14px}
 .ferm-tile-hd{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px}
 .ferm-tile-ttl{font-family:var(--mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted)}
@@ -575,7 +570,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 <div class="out" id="queue-view">
   <div class="queue-card">
     <img class="out-mono logo-img" alt="Mars Estate monogram">
-    <div class="out-ttl">Approval queue</div>
+    <div class="out-ttl">Approval Queue</div>
     <div class="out-sub">Mars Estate &middot; Howell Mountain</div>
     <button class="auth-forgot" id="queue-close" type="button">Back to dashboard</button>
     <div class="queue-list" id="queue-list"></div>
@@ -1763,31 +1758,35 @@ async function renderFerm(box, ctx){
   const chartEntries = sortedEntries.filter(([,{type}])=>eligibleTypes.has(type));
   const cardEntries  = sortedEntries.filter(([,{type}])=>!eligibleTypes.has(type));
 
-  const groups=el('div','ferm-groups');
-  box.appendChild(groups);
+  const panels=el('div','ferm-panels');
+  box.appendChild(panels);
 
-  const renderGroup=(entries, mode)=>{
-    if(!entries.length) return;
-    const grid=el('div','ferm-grid ferm-grid-'+mode);
-    groups.appendChild(grid);
-    for(const [key, {type, unit, pts}] of entries){
-      const tile=el('div','ferm-tile');
-      tile.innerHTML=`<div class="ferm-tile-hd"><span class="ferm-tile-ttl">${humanizeType(type)}</span><span class="ferm-tile-unit">${unit}</span></div>`;
-      grid.appendChild(tile);
-      const dec=ANALYSIS_DECIMALS[type]??1;
-      if(mode==='card'){
-        const latest=pts[pts.length-1];
-        tile.appendChild(el('div','stat-v', fmt(latest.v,dec)));
-        tile.appendChild(el('div','ferm-tile-date', latest.lbl));
-      } else {
-        const chartBox=el('div');
-        tile.appendChild(chartBox);
-        lineChart(chartBox, [{name:humanizeType(type), color:'#7FA3D4', pts}], {unit, dec, h:140});
-      }
+  const makeTile=(type, unit, pts, mode)=>{
+    const tile=el('div','ferm-tile');
+    tile.innerHTML=`<div class="ferm-tile-hd"><span class="ferm-tile-ttl">${humanizeType(type)}</span><span class="ferm-tile-unit">${unit}</span></div>`;
+    const dec=ANALYSIS_DECIMALS[type]??1;
+    if(mode==='card'){
+      const latest=pts[pts.length-1];
+      tile.appendChild(el('div','stat-v', fmt(latest.v,dec)));
+      tile.appendChild(el('div','ferm-tile-date', latest.lbl));
+    } else {
+      const chartBox=el('div');
+      tile.appendChild(chartBox);
+      lineChart(chartBox, [{name:humanizeType(type), color:'#7FA3D4', pts}], {unit, dec, h:140});
     }
+    return tile;
   };
-  renderGroup(chartEntries, 'chart');
-  renderGroup(cardEntries, 'card');
+
+  if(chartEntries.length){
+    const chartsGrid=el('div','ferm-charts');
+    panels.appendChild(chartsGrid);
+    chartEntries.forEach(([,{type,unit,pts}])=>chartsGrid.appendChild(makeTile(type,unit,pts,'chart')));
+  }
+  if(cardEntries.length){
+    const cardsGrid=el('div','ferm-cards');
+    panels.appendChild(cardsGrid);
+    cardEntries.forEach(([,{type,unit,pts}])=>cardsGrid.appendChild(makeTile(type,unit,pts,'card')));
+  }
 }
 
 /* Vessel inventory (real InnoVint data). No block-filtering -- vessels
@@ -2883,7 +2882,7 @@ function renderQueueRow(list, row, email){
 
   approveBtn.onclick=()=>{
     if(formHost.style.display==='none'){
-      formHost.style.display='block';
+      formHost.style.display='flex';
       formHost.innerHTML='';
       renderApproveForm(formHost, row, wrap);
     } else {

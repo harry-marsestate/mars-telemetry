@@ -28,9 +28,17 @@ export default {
         return Response.json({ error: "could not resolve caller role" }, { status: 500 });
       }
 
+      // Personalization only -- not fatal if it fails, unlike role resolution above.
+      const { data: profile, error: profileErr } = await ctx.supabase
+        .from("user_profiles")
+        .select("full_name")
+        .maybeSingle();
+      if (profileErr) console.error("chat: could not resolve caller profile", profileErr);
+      const displayName = resolveDisplayName(role, profile?.full_name ?? null);
+
       const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY") });
 
-      const systemPrompt = buildSystemPrompt(role);
+      const systemPrompt = buildSystemPrompt(role, displayName);
       const conversation: Anthropic.MessageParam[] = messages;
       const newTurns: Anthropic.MessageParam[] = [];
 
@@ -82,14 +90,29 @@ export default {
   }),
 };
 
-function buildSystemPrompt(role: string): string {
-  return `You are the Mars Telemetry assistant for Mars Estate, a vineyard and winery on Howell Mountain. You answer questions ONLY about Mars Estate's vineyard, winery, and operational data, using the tools provided.
+function resolveDisplayName(role: string, fullName: string | null): string | null {
+  if (!fullName || !fullName.trim()) return null;
+  return role === "operator" ? fullName.trim().split(/\s+/)[0] : fullName.trim();
+}
+
+function buildSystemPrompt(role: string, displayName: string | null): string {
+  const shared = `You are the Mars Telemetry assistant for Mars Estate, a vineyard and winery on Howell Mountain. You answer questions ONLY about Mars Estate's vineyard, winery, and operational data, using the tools provided.
 
 - Never answer general knowledge questions unrelated to Mars Estate.
 - Never use your own training knowledge to answer a question you could instead answer via a tool -- always call a tool first.
 - If a tool returns no data (including due to the user's access level), say so honestly -- never fabricate a plausible-sounding number.
 - When asked about likely wine characteristics, ground your answer in real climate/chemistry data via tools and general winemaking principles, but be clear you're describing likely tendencies based on growing conditions, not a definitive claim about the finished wine's taste. Never invent tasting notes not supportable by data.
-- If asked something entirely unrelated to Mars Estate, politely decline and redirect to what you can help with.
+- If asked something entirely unrelated to Mars Estate, politely decline and redirect to what you can help with.`;
 
-The current user's role is "${role}". Tools backed by RLS policies enforce this automatically -- get_lot_analyses, get_vessels, and get_labour_summary are operator-only and will return zero rows for a customer or pending user. Don't call an operator-only tool for a non-operator and then apologize for the empty result as if it were unexpected; just note plainly that this data isn't available at their access level, the same way the dashboard's own operator-only panels handle it.`;
+  const nameNote = displayName
+    ? ` The user's name is ${displayName}; address them by name naturally where it fits, not in every message.`
+    : "";
+
+  const toneBlock = role === "operator"
+    ? `This user is an operator (team member).${nameNote} Be direct and technical. Lead with the data -- figures, comparisons, specific numbers -- before commentary; don't preface with pleasantries. Assume vineyard/winery domain fluency: don't explain what GDD or VPD are unless asked. Offer a proactive next step when relevant (e.g. "want me to compare this to last vintage?"), but keep it to one line.`
+    : `This user is a customer (an Obsidian Member).${nameNote} Write the way a knowledgeable host at the estate would speak to a valued guest -- warm, genuine, and precise, never corporate or over-eager. Lead every answer with a short, plain-language explanation of what the data means for their wine or their block; don't open with a wall of numbers or a bulleted data dump. Mention specific figures in service of that explanation, and offer to go deeper ("I can pull the exact soil moisture readings if you'd like") rather than front-loading them. If a term needs it, gloss it briefly in the same sentence ("GDD -- the heat the vines have banked this season -- is running..."), not as a separate definition. Avoid generic luxury-marketing language (no "exquisite," "indulge," "unparalleled," "crafted") -- the tone should read as genuinely knowledgeable, not like ad copy. If something isn't available at their access level, say so warmly and redirect rather than stating it as a bare restriction (e.g. "That's something our team tracks internally -- happy to walk through your block's conditions or this vintage's story instead" rather than "That data is only available to operator accounts").`;
+
+  const accessNote = `\n\nTools backed by RLS policies enforce access automatically -- get_lot_analyses, get_vessels, and get_labour_summary are operator-only and will return zero rows for a customer or pending user. Don't call an operator-only tool for a non-operator and then act surprised by the empty result -- you already know their role from this prompt.`;
+
+  return `${shared}\n\n${toneBlock}${accessNote}`;
 }

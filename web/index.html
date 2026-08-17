@@ -336,16 +336,24 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .typing i{width:5px; height:5px; border-radius:50%; background:var(--muted-2); animation:blink 1.3s infinite}
 .typing i:nth-child(2){animation-delay:.17s} .typing i:nth-child(3){animation-delay:.34s}
 @keyframes blink{0%,60%,100%{opacity:.24} 30%{opacity:1}}
-#sugg{padding:16px 0 12px}
+.chip-toggle{display:flex; align-items:center; gap:6px; cursor:pointer; padding:8px 0; font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted-2); transition:color .16s; user-select:none}
+.chip-toggle:hover{color:var(--gold)}
+.chip-panel{max-height:300px; overflow-y:auto; padding:6px 2px 14px; display:flex; flex-direction:column; gap:16px}
+.chip-panel::-webkit-scrollbar{width:5px}
+.chip-panel::-webkit-scrollbar-thumb{background:var(--line-2); border-radius:3px}
+.chip-cat-label{font-family:var(--mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted-2); margin-bottom:8px}
+.chip-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+.chip-card{text-align:left; padding:14px 16px; border:1px solid var(--line); border-radius:3px; background:var(--ink-2); color:var(--muted); font-family:var(--ui); font-size:12.5px; line-height:1.45; transition:all .16s}
+.chip-card:hover{border-color:var(--gold-dim); color:var(--gold); background:var(--ink-3)}
 .chat-in{display:flex; gap:10px; align-items:flex-end; padding-top:16px; border-top:1px solid var(--line)}
 .chat-in textarea{
   flex:1; resize:none; background:var(--ink-2); border:1px solid var(--line); border-radius:3px;
-  color:var(--cream); font-family:var(--ui); font-size:13.5px; padding:13px 15px; line-height:1.55; max-height:130px;
+  color:var(--muted); font-family:var(--ui); font-size:12.5px; padding:9px 12px; line-height:1.5; max-height:110px;
 }
-.chat-in textarea:focus{outline:none; border-color:var(--gold-dim)}
+.chat-in textarea:focus{outline:none; border-color:var(--gold-dim); color:var(--cream)}
 .chat-in textarea::placeholder{color:var(--muted-2)}
-.send{padding:13px 22px; background:var(--gold-glow); border:1px solid var(--gold-dim); border-radius:3px; color:var(--gold); font-size:11px; letter-spacing:.14em; text-transform:uppercase; transition:all .16s; flex:none}
-.send:hover{background:rgba(198,169,97,.24)}
+.send{width:34px; height:34px; display:flex; align-items:center; justify-content:center; background:none; border:1px solid var(--line); border-radius:3px; color:var(--muted-2); font-size:14px; transition:all .16s; flex:none}
+.send:hover{border-color:var(--gold-dim); color:var(--gold)}
 .chat-note{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); text-align:center; padding-top:12px; letter-spacing:.03em}
 
 /* ── Signed out ────────────────────────────────── */
@@ -493,10 +501,11 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
         <div class="chat-sub">Vineyard and winery telemetry &middot; Blocks 1&ndash;3 &middot; Vintages 2022&ndash;2026</div>
       </div>
       <div class="chat-log" id="chatlog"></div>
-      <div class="chips" id="sugg"></div>
+      <div class="chip-toggle" id="chipToggle"><span>Suggestions</span><span id="chipChevron">&#9652;</span></div>
+      <div class="chip-panel" id="chipPanel"></div>
       <div class="chat-in">
-        <textarea id="chatin" rows="1" placeholder="Ask about soil moisture, heat, GDD, labour cost, fermentation&hellip;"></textarea>
-        <button class="send" id="send">Ask</button>
+        <textarea id="chatin" rows="1" placeholder="&hellip;or type your own question"></textarea>
+        <button class="send" id="send" aria-label="Send">&rarr;</button>
       </div>
       <div class="chat-note">Answers are generated from Mars Estate's live data &middot; verify anything safety-critical against the dashboard</div>
     </div>
@@ -2438,8 +2447,8 @@ let rz; addEventListener('resize',()=>{clearTimeout(rz); rz=setTimeout(()=>{
 <script>
 /* §8 ── CHAT (live, via the "chat" Edge Function) ─────── */
 let chatHistory = []; // Anthropic-shaped {role, content} turns, held client-side -- the chat function is stateless and expects full history every call
-let conversationStarted = false;
 let chatUserId = null; // tracks which authenticated user the visible chat belongs to
+let chipsExpanded = true;
 
 const LOG=$('#chatlog');
 function addMsg(who, html){
@@ -2453,10 +2462,38 @@ function addMsg(who, html){
 function renderReply(text){
   return text.split(/\n{2,}/).map(p=>`<p>${escapeHtml(p).replace(/\n/g,'<br>')}</p>`).join('');
 }
+function resolveDisplayName(role, fullName){
+  if(!fullName || !fullName.trim()) return null;
+  return role==='operator' ? fullName.trim().split(/\s+/)[0] : fullName.trim();
+}
+
+function setChipsExpanded(expanded){
+  chipsExpanded = expanded;
+  $('#chipPanel').style.display = expanded ? '' : 'none';
+  $('#chipChevron').textContent = expanded ? '▴' : '▾';
+}
+$('#chipToggle').onclick=()=>setChipsExpanded(!chipsExpanded);
+
+function renderChipPanel(groups){
+  const panel=$('#chipPanel');
+  panel.innerHTML='';
+  groups.forEach(g=>{
+    const section=el('div','chip-cat');
+    section.appendChild(el('div','chip-cat-label',g.category));
+    const grid=el('div','chip-grid');
+    g.items.forEach(s=>{
+      const card=el('button','chip-card',s);
+      card.onclick=()=>ask(s); // clicked chip text sent as-is, no name-prefixing
+      grid.appendChild(card);
+    });
+    section.appendChild(grid);
+    panel.appendChild(section);
+  });
+}
 
 async function ask(q){
   if(!q.trim()) return;
-  if(!conversationStarted){ conversationStarted=true; $('#sugg').style.display='none'; }
+  if(chipsExpanded) setChipsExpanded(false); // collapses on every send, not just the first -- toggle stays reachable
   addMsg('u',`<p>${escapeHtml(q)}</p>`);
   const t=addMsg('a','<div class="typing"><i></i><i></i><i></i></div>');
   chatHistory.push({role:'user', content:q});
@@ -2479,40 +2516,80 @@ $('#send').onclick=()=>{ask($('#chatin').value); $('#chatin').value=''; $('#chat
 $('#chatin').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault(); $('#send').click();}});
 $('#chatin').addEventListener('input',e=>{e.target.style.height='auto'; e.target.style.height=Math.min(130,e.target.scrollHeight)+'px';});
 
+function operatorSuggestions(brixLotName){
+  return [
+    { category:'Climate & Season', items:[
+      "How's this season's GDD tracking?",
+      "What's the current VPD and diurnal range?",
+      "Compare this vintage's climate to last year"
+    ]},
+    { category:'Vineyard Conditions', items:[
+      'Which block is driest right now?',
+      'Any anomalies I should know about?',
+      "What's irrigation volume looked like by block this season?"
+    ]},
+    { category:'Cellar', items:[
+      'What are current cellar temperature and humidity?'
+    ]},
+    { category:'Lab Analyses', items:[
+      brixLotName ? `What's the Brix trend for ${brixLotName}?` : "What's the Brix trend for our most recent lot?",
+      'Show me the latest lab results across all lots',
+      'Any lots showing chemistry I should keep an eye on?'
+    ]},
+    { category:'Barrels & Tanks', items:[
+      "What's in each barrel and tank right now?",
+      'Any vessels sitting empty?'
+    ]},
+    { category:'Labor & Cost', items:[
+      'Show me labor cost by block this season',
+      'How many hours went to harvest vs. pruning this year?'
+    ]}
+  ];
+}
+const CUSTOMER_SUGGESTIONS = [
+  { category:'Your Block', items:[
+    "What's the current soil moisture in my block?",
+    "How's the weather been at the estate this week?"
+  ]},
+  { category:'This Vintage', items:[
+    "What's the GDD to date this season?",
+    "How does this vintage compare to last year's climate?",
+    'Any risks I should know about this season?'
+  ]},
+  { category:'Your Wine', items:[
+    "What might this vintage's wine characteristics be, based on the growing season?"
+  ]}
+];
+
 // Called on first successful sign-in and again whenever the signed-in user's
 // id actually changes (see runSessionGate) -- NOT on every auth event, so a
 // background token refresh for the same user doesn't wipe an in-progress
 // conversation.
 async function initChat(){
   chatHistory = [];
-  conversationStarted = false;
   LOG.innerHTML = '';
-  const sugg = $('#sugg');
-  sugg.innerHTML = '';
-  sugg.style.display = '';
 
-  const role = await getCurrentUserRole();
-  let suggestions;
+  const [role, profileRes] = await Promise.all([
+    getCurrentUserRole(),
+    sb.from('user_profiles').select('full_name').maybeSingle()
+  ]);
+  const name = resolveDisplayName(role, profileRes?.data?.full_name ?? null);
+
+  let groups;
   if(role==='operator'){
     const { data: recentBrix } = await sb.from('lot_analyses').select('lot_name').eq('analysis_type','brix').order('recorded_at',{ascending:false}).limit(1);
-    const lot = recentBrix?.[0]?.lot_name;
-    suggestions = [
-      "How's this season's GDD tracking?",
-      'Any anomalies I should know about?',
-      lot ? `What's the Brix trend for ${lot}?` : "What's the Brix trend for our most recent lot?",
-      'Show me labor cost by block this season'
-    ];
+    groups = operatorSuggestions(recentBrix?.[0]?.lot_name);
   } else {
-    suggestions = [
-      "What's the current soil moisture in my block?",
-      "How does this vintage compare to last year's climate?",
-      "What's the GDD to date this season?",
-      "What might this vintage's wine characteristics be, based on the growing season?"
-    ];
+    groups = CUSTOMER_SUGGESTIONS;
   }
-  suggestions.forEach(s=>{const b=el('button','chip',s); b.onclick=()=>ask(s); sugg.appendChild(b);});
-  addMsg('a',`<p>I can answer questions about Mars Estate's vineyard and winery data &mdash; climate, soil, anomalies${role==='operator'?', lab analyses, tanks, and labour':''} &mdash; for any block and vintage from 2022.</p>
-  <p>Ask in plain language, or start with one of the prompts below.</p>`);
+  renderChipPanel(groups);
+  setChipsExpanded(true);
+
+  const greetingLead = role==='operator'
+    ? (name ? `${name} &mdash; what can I help you find?` : 'What can I help you find?')
+    : (name ? `Welcome back, ${name} &mdash; how can I help with your Mars Estate wine today?` : 'Welcome &mdash; how can I help with your Mars Estate wine today?');
+  addMsg('a',`<p>${greetingLead}</p>
+  <p>I can help with Mars Estate's vineyard and winery data &mdash; climate, soil, anomalies${role==='operator'?', lab analyses, tanks, and labour':''} &mdash; for any block and vintage from 2022.</p>`);
 }
 
 /* §9 ── AUTH VIEW (Phase 6.1 — view + logic only; no session gate yet) ── */

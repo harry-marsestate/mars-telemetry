@@ -1,0 +1,95 @@
+import "@supabase/functions-js/edge-runtime.d.ts";
+import { withSupabase } from "@supabase/server";
+import Anthropic from "@anthropic-ai/sdk";
+import { TOOLS, runTool } from "./tools.ts";
+
+// RAG chat for Mars Estate/Mars Telemetry. ctx.supabase is RLS-scoped to the
+// caller's own JWT for every tool call -- deliberately never ctx.supabaseAdmin,
+// so a customer or pending user gets exactly the rows their role/RLS policies
+// already allow (including zero rows), the same way the rest of the app works.
+// Stateless: no conversation history persisted server-side -- the frontend
+// sends the full message history every call and appends what we return.
+export default {
+  fetch: withSupabase({ auth: ["user"] }, async (req, ctx) => {
+    try {
+      const { messages } = await req.json();
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return Response.json({ error: "messages required" }, { status: 400 });
+      }
+
+      // Resolved once per request via the same RLS-safe, SECURITY DEFINER
+      // RPC the frontend already uses for role display (getCurrentUserRole()).
+      // Folding it into the system prompt means the model knows up front
+      // whether operator-only tools will return real rows or honest
+      // emptiness, instead of discovering it tool-call by tool-call.
+      const { data: role, error: roleErr } = await ctx.supabase.rpc("current_role_name");
+      if (roleErr) {
+        console.error("chat: could not resolve caller role", roleErr);
+        return Response.json({ error: "could not resolve caller role" }, { status: 500 });
+      }
+
+      const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY") });
+
+      const systemPrompt = buildSystemPrompt(role);
+      const conversation: Anthropic.MessageParam[] = messages;
+      const newTurns: Anthropic.MessageParam[] = [];
+
+      // Bounds cost/latency on a single chat turn -- six round trips is far
+      // more than any legitimate question over this tool set should need.
+      const MAX_TOOL_ITERATIONS = 6;
+
+      for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+        const response = await anthropic.messages.create({
+          model: "claude-sonnet-5",
+          max_tokens: 2048,
+          system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+          tools: TOOLS,
+          messages: [...conversation, ...newTurns],
+        });
+
+        newTurns.push({ role: "assistant", content: response.content });
+
+        if (response.stop_reason !== "tool_use") {
+          const reply = response.content
+            .filter((b): b is Anthropic.TextBlock => b.type === "text")
+            .map((b) => b.text)
+            .join("\n");
+          return Response.json({ reply, appended: newTurns }, { status: 200 });
+        }
+
+        const toolResults: Anthropic.ToolResultBlockParam[] = [];
+        for (const block of response.content) {
+          if (block.type !== "tool_use") continue;
+          const result = await runTool(ctx.supabase, block.name, block.input as Record<string, unknown>);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: result.content,
+            is_error: result.isError,
+          });
+        }
+        newTurns.push({ role: "user", content: toolResults });
+      }
+
+      return Response.json(
+        { error: "conversation needed too many tool calls to resolve" },
+        { status: 500 },
+      );
+    } catch (err) {
+      console.error("chat: unexpected error", err);
+      return Response.json({ error: "unexpected error" }, { status: 500 });
+    }
+  }),
+};
+
+function buildSystemPrompt(role: string): string {
+  return `You are the Mars Telemetry assistant for Mars Estate, a vineyard and winery on Howell Mountain. You answer questions ONLY about Mars Estate's vineyard, winery, and operational data, using the tools provided.
+
+- Never answer general knowledge questions unrelated to Mars Estate.
+- Never use your own training knowledge to answer a question you could instead answer via a tool -- always call a tool first.
+- If a tool returns no data (including due to the user's access level), say so honestly -- never fabricate a plausible-sounding number.
+- When asked about likely wine characteristics, ground your answer in real climate/chemistry data via tools and general winemaking principles, but be clear you're describing likely tendencies based on growing conditions, not a definitive claim about the finished wine's taste. Never invent tasting notes not supportable by data.
+- If asked something entirely unrelated to Mars Estate, politely decline and redirect to what you can help with.
+
+The current user's role is "${role}". Tools backed by RLS policies enforce this automatically -- get_lot_analyses, get_vessels, and get_labour_summary are operator-only and will return zero rows for a customer or pending user. Don't call an operator-only tool for a non-operator and then apologize for the empty result as if it were unexpected; just note plainly that this data isn't available at their access level, the same way the dashboard's own operator-only panels handle it.`;
+}

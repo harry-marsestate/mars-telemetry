@@ -336,9 +336,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .typing i{width:5px; height:5px; border-radius:50%; background:var(--muted-2); animation:blink 1.3s infinite}
 .typing i:nth-child(2){animation-delay:.17s} .typing i:nth-child(3){animation-delay:.34s}
 @keyframes blink{0%,60%,100%{opacity:.24} 30%{opacity:1}}
-.sugg{display:flex; flex-wrap:wrap; gap:7px; padding:16px 0 12px}
-.sugg button{font-size:11px; padding:8px 13px; border:1px solid var(--line); border-radius:2px; color:var(--muted); background:var(--ink-2); transition:all .16s; text-align:left}
-.sugg button:hover{border-color:var(--gold-dim); color:var(--gold)}
+#sugg{padding:16px 0 12px}
 .chat-in{display:flex; gap:10px; align-items:flex-end; padding-top:16px; border-top:1px solid var(--line)}
 .chat-in textarea{
   flex:1; resize:none; background:var(--ink-2); border:1px solid var(--line); border-radius:3px;
@@ -495,12 +493,12 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
         <div class="chat-sub">Vineyard and winery telemetry &middot; Blocks 1&ndash;3 &middot; Vintages 2022&ndash;2026</div>
       </div>
       <div class="chat-log" id="chatlog"></div>
-      <div class="sugg" id="sugg"></div>
+      <div class="chips" id="sugg"></div>
       <div class="chat-in">
         <textarea id="chatin" rows="1" placeholder="Ask about soil moisture, heat, GDD, labour cost, fermentation&hellip;"></textarea>
         <button class="send" id="send">Ask</button>
       </div>
-      <div class="chat-note">Mock-up &middot; responses are scripted demo content, not live analysis</div>
+      <div class="chat-note">Answers are generated from Mars Estate's live data &middot; verify anything safety-critical against the dashboard</div>
     </div>
   </section>
 
@@ -2438,151 +2436,84 @@ let rz; addEventListener('resize',()=>{clearTimeout(rz); rz=setTimeout(()=>{
 </script>
 
 <script>
-/* §8 ── CHAT (scripted demo responses) ─────────────── */
-const SUGGESTIONS=[
-  'Which block is driest right now?',
-  'How is GDD tracking against last vintage?',
-  'Any risks I should know about today?',
-  'What has labour cost us this season?',
-  'When will we hit the harvest window?',
-  'Compare 2023 and 2026 so far'
-];
-const CANNED=[
-  {k:['dry','driest','soil moisture','moisture','water'], src:'Soil probes · Blocks 1–3 · last reading',
-   a:()=>{
-     const d=new Date(NOW);
-     const rows=ALL_IDS.map(id=>({id,v:sample('soilMoist',id,d,CURRENT)})).sort((a,b)=>a.v-b.v);
-     const dry=rows[0], wet=rows[rows.length-1];
-     return `<p><strong>${B(dry.id).label}</strong> is driest at <code>${fmt(dry.v,1)}% VWC</code>, against <strong>${B(wet.id).label}</strong> at <code>${fmt(wet.v,1)}%</code> — ${fmt(wet.v-dry.v,1)} points apart.</p>
-     <p>${B(dry.id).label} sits at ${B(dry.id).elev} ft on a ${B(dry.id).aspect} aspect, so it dries faster than the deeper, cooler profile in ${B(wet.id).label} at ${B(wet.id).elev} ft.</p>
-     <ul>${rows.map(r=>`<li><code>${B(r.id).label}</code> — ${fmt(r.v,1)}% VWC${r.v<15?' <strong>· below the 15 % refill point</strong>':''}</li>`).join('')}</ul>
-     <p>The target band is 15–25 % VWC — shaded on the soil moisture chart so you can see at a glance whether any block has dropped out of it.</p>`;}},
-
-  {k:['gdd','degree day','heat accum','veraison'], src:'Weather station · base 50 °F from 1 Apr',
-   a:()=>{
-     const now=gddTo(new Date(NOW),CURRENT);
-     const ly=gddTo(new Date(2025,6,28),2025), cool=gddTo(new Date(2023,6,28),2023);
-     const d=now-ly;
-     return `<p>Season to date the estate has accumulated <strong>${fmt(now,0)} GDD</strong> (base 50 °F, from 1 April).</p>
-     <p>At the same date in 2025 the figure was <code>${fmt(ly,0)}</code>, and in the cool 2023 vintage <code>${fmt(cool,0)}</code> — so 2026 is running <strong>${d>=0?'+':''}${fmt(d,0)} GDD</strong> on last year and ${fmt(now-cool,0)} ahead of 2023.</p>
-     <p>The picking band on this site is ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD, shaded on the Growing degree days panel. Block 1 is highest and colours first, so sample there ahead of Blocks 2 and 3.</p>`;}},
-
-  {k:['harvest','pick','when will','ready'], src:'GDD accumulation vs the site picking band',
-   a:()=>{
-     const now=gddTo(new Date(NOW),CURRENT);
-     const rate=(gddTo(new Date(NOW),CURRENT)-gddTo(new Date(2026,6,14),CURRENT))/14;
-     const days=Math.round((HARVEST_BAND[0]-now)/rate);
-     const eta=new Date(NOW); eta.setDate(eta.getDate()+days);
-     return `<p>The estate is at <strong>${fmt(now,0)} GDD</strong> and accumulating about <code>${fmt(rate,1)} GDD/day</code> at present.</p>
-     <p>The bottom of the picking band is ${HARVEST_BAND[0]} GDD, so on the current rate that is roughly <strong>${days} days out — around ${dstr(eta)}</strong>. The band runs to ${HARVEST_BAND[1]} GDD, which is the practical latest.</p>
-     <p>That is a heat-accumulation estimate only. It doesn't know about berry sampling, so treat it as the window to start tasting rather than a pick date.</p>`;}},
-
-  {k:['risk','anomal','alert','flag','problem','worry','attention'], src:'Rule engine · vineyard and cellar thresholds',
-   a:()=>{
-     const cv={primary:CURRENT, blocks:[...ALL_IDS], end:new Date(NOW), align:false};
-     const all=RULES.map(r=>{let o=null; try{o=r.test(cv);}catch(e){} return {sev:r.sev,tab:r.tab,out:o};}).filter(x=>x.out);
-     const brk=all.filter(x=>x.sev!=='note'), notes=all.filter(x=>x.sev==='note');
-     const nl = notes.length ? `<p>Worth noting: ${notes.map(n=>'<strong>'+n.out.t.toLowerCase()+'</strong>').join(', ')}.</p>` : '';
-     if(!brk.length) return `<p>Nothing is outside its threshold. Soil moisture, VPD, diurnal range and the cellar are all inside their configured bands.</p>${nl}<p>The rule set re-evaluates on every incoming reading, so anything new shows up in the Anomalies &amp; risks panel on either tab.</p>`;
-     return `<p>${brk.length} item${brk.length>1?'s are':' is'} outside threshold:</p>
-     <ul>${brk.map(h=>`<li><strong>${h.out.t}</strong> (${h.tab}) — ${h.out.d}</li>`).join('')}</ul>${nl}
-     <p>Next step: ${brk[0].out.m.replace(/^(Action|Watch) · /,'')}.</p>`;}},
-
-  {k:['labour','labor','cost','hours','spend','payroll'], src:'Crew logs · season to date · Blocks 1–3',
-   a:()=>{
-     let tc=0, th=0; const per=[];
-     ALL_IDS.forEach(id=>{const L=labour(id,CURRENT), h=L.reduce((s,r)=>s+r.hours,0), cc=L.reduce((s,r)=>s+r.cost,0);
-       tc+=cc; th+=h; per.push({id,h,cc,pa:cc/B(id).acres});});
-     per.sort((a,b)=>b.pa-a.pa);
-     return `<p>Season to date: <strong>${fmt(th,0)} crew hours</strong> at <strong>${money(tc)}</strong> — about <code>${money(tc/7.3)}/acre</code> across 7.3 acres.</p>
-     <p>Per-acre cost is highest in <strong>${B(per[0].id).label}</strong> at ${money(per[0].pa)} and lowest in <strong>${B(per[per.length-1].id).label}</strong> at ${money(per[per.length-1].pa)}.</p>
-     <p>Harvest hours aren't booked yet, so expect this to climb materially through September.</p>`;}},
-
-  {k:['compare','versus',' vs ','2022','2023','2024','2025','vintage'], src:'Multi-vintage archive · 2022–2026',
-   a:()=>{
-     const rows=VINTAGES.map(y=>({y, g:gddTo(endOf(y,true),y), c:VCHAR[y].label}));
-     return `<p>GDD at the same calendar date (28 July) across the archive:</p>
-     <ul>${rows.map(r=>`<li><code>${r.y}</code> — ${fmt(r.g,0)} GDD · ${r.c}</li>`).join('')}</ul>
-     <p>2023 is the cool outlier; 2022 ran hottest and compressed the picking window. 2026 sits closest to 2025 on heat but drier, so water is the limiting factor this year rather than warmth.</p>
-     <p>You can hold two vintages at once — click a second year in the Vintage filter and every chart redraws with one line per vintage, aligned to the same calendar date.</p>`;}},
-
-  {k:['ferment','tank','brix','press'], src:'Tank probes · harvest window only',
-   a:()=>{
-     const v=2025, fs=fermSeason(v);
-     const rows=TANKS.map(t=>{
-       let pk=0; for(let k=0;k<=t.days;k++){const d=doyDate(v,tankStart(t,v)+k); pk=Math.max(pk,tankTemp(t,d,v)||0);}
-       return {t, pk, s:doyDate(v,tankStart(t,v)), e:doyDate(v,tankEnd(t,v))};}).sort((a,b)=>b.pk-a.pk);
-     return `<p>Nothing is fermenting right now — it's late July and the ${CURRENT} harvest is projected to start around <strong>${dstr(fermSeason(CURRENT).start)}</strong>. The cellar is holding ${CURRENT-1} lots in barrel.</p>
-     <p>For the ${v} vintage, fermentation ran ${dstr(fs.start)} – ${dstr(fs.end)}. Peak temperatures by tank:</p>
-     <ul>${rows.map(r=>`<li><code>${r.t.id}</code> ${B(r.t.blk).label} ${VNAME[r.t.vk]} — peak ${fmt(r.pk,1)} °F · ${dstr(r.s)} to ${dstr(r.e)}</li>`).join('')}</ul>
-     <p>The fermentation chart only plots tanks while they're actually working, so outside those windows the lines simply stop.</p>`;}},
-
-  {k:['cellar','barrel','humidity'], src:'Cellar HVAC sensors · live',
-   a:()=>{
-     const d=new Date(NOW);
-     const t=sample('cellar','cellar',d,CURRENT), rh=sample('cellarRH','cellar',d,CURRENT);
-     return `<p>Barrel room is at <code>${fmt(t,1)} °F</code> against a 55–58 °F target, and <code>${fmt(rh,0)} %</code> RH against 68–78 %.</p>
-     <p>${(t>=55&&t<=58)?'Temperature is inside the band.':'Temperature has drifted outside the band — check the HVAC set point.'} ${(rh>=68&&rh<=78)?'Humidity is inside the band too.':'Humidity is outside the band; dry air accelerates barrel evaporation loss.'}</p>
-     <p>These are building sensors, so they read live year-round regardless of which vintage you've selected.</p>`;}},
-
-  {k:['solar','insolation','radiation','sun','uv'], src:'Pyranometer + UV sensor · vs clear-sky model',
-   a:()=>{
-     const d=new Date(NOW);
-     const act=sample('solar','estate',d,CURRENT), exp=clearSky(d), uv=sample('uv','estate',d,CURRENT);
-     const pct=exp>25?Math.round(act/exp*100):null;
-     return `<p>Insolation is <code>${fmt(act,0)} W/m²</code> against a clear-sky expectation of <code>${fmt(exp,0)} W/m²</code>${pct!=null?` — <strong>${pct} % of clear sky</strong>`:''}. UV index ${fmt(uv,1)}.</p>
-     <p>Higher radiation means faster photosynthesis and sugar accumulation, but more heat load and sunburn risk on exposed fruit. Lower means slower ripening, and paired with high humidity it raises mildew pressure.</p>
-     <p>The number only means something relative to the clear-sky ceiling, which falls through the season — that's why the panel plots both lines.</p>`;}},
-
-  {k:['block','acre','variety','cabernet','franc','verdot','map'], src:'Block register · estate survey',
-   a:()=>`<p>7.3 planted acres in three blocks:</p>
-     <ul>${BLOCKS.map(b=>`<li><strong>${b.label}</strong> (${b.sub}) — ${fmt(b.acres,1)} acres, ${b.rows} rows, ${b.aspect} aspect at ${b.elev} ft, planted ${b.planted}. ${b.lots.map(l=>VNAME[l.vk]+' '+fmt(l.acres,1)+' ac').join(', ')}.</li>`).join('')}</ul>
-     <p>Click a block on the map to filter the whole tab to it, or use the block chips in the filter bar.</p>`},
-
-  {k:['temperature','temp','hot','heat','cold','weather','wind','rain','humid'], src:'Estate weather station · live',
-   a:()=>{
-     const d=new Date(NOW);
-     const t=sample('airTemp','estate',d,CURRENT), rh=sample('humidity','estate',d,CURRENT),
-           w=sample('wind','estate',d,CURRENT), dt=dtrAt('estate',d,CURRENT);
-     return `<p>Current station readings:</p>
-     <ul><li>Air temperature <code>${fmt(t,1)} °F</code></li><li>Relative humidity <code>${fmt(rh,0)} %</code></li>
-     <li>Wind <code>${fmt(w,1)} mph</code></li><li>Diurnal range today <code>${fmt(dt,1)} °F</code></li></ul>
-     <p>${dt>=21?'The swing is holding above 21 °F, which is what preserves acid on this site.'
-                :'The swing is compressed today — warm nights push sugar ahead of phenolic ripeness, so watch the Brix–pH gap.'}</p>`;}}
-];
-const FALLBACK=()=>`<p>I don't have a scripted answer for that in this mock-up. The demo covers:</p>
-<ul><li>soil moisture, irrigation and the target band</li><li>heat accumulation, the harvest window and vintage comparisons</li>
-<li>current risks and threshold breaches</li><li>labour hours and cost by block</li>
-<li>fermentation windows, tanks and cellar conditions</li><li>block, variety and acreage detail</li></ul>
-<p>In a live build this would query the same series the panels draw from, so anything the dashboard shows visually would be answerable here in words.</p>`;
+/* §8 ── CHAT (live, via the "chat" Edge Function) ─────── */
+let chatHistory = []; // Anthropic-shaped {role, content} turns, held client-side -- the chat function is stateless and expects full history every call
+let conversationStarted = false;
+let chatUserId = null; // tracks which authenticated user the visible chat belongs to
 
 const LOG=$('#chatlog');
-function addMsg(who, html, src){
+function addMsg(who, html){
   const m=el('div','msg '+(who==='u'?'u':'a'));
-  m.innerHTML=`<div class="msg-av">${who==='u'?'CY':'M'}</div>
-    <div class="msg-b"><div class="msg-who">${who==='u'?'Colin Yuan':'Mars Telemetry'}</div>
-    <div class="msg-tx">${html}</div>${src?`<div class="msg-src">Source · ${src}</div>`:''}</div>`;
+  m.innerHTML=`<div class="msg-av">${who==='u'?'Y':'M'}</div>
+    <div class="msg-b"><div class="msg-who">${who==='u'?'You':'Mars Telemetry'}</div>
+    <div class="msg-tx">${html}</div></div>`;
   LOG.appendChild(m); LOG.scrollTop=LOG.scrollHeight;
   return m;
 }
-function ask(q){
+function renderReply(text){
+  return text.split(/\n{2,}/).map(p=>`<p>${escapeHtml(p).replace(/\n/g,'<br>')}</p>`).join('');
+}
+
+async function ask(q){
   if(!q.trim()) return;
-  addMsg('u',`<p>${q.replace(/</g,'&lt;')}</p>`);
+  if(!conversationStarted){ conversationStarted=true; $('#sugg').style.display='none'; }
+  addMsg('u',`<p>${escapeHtml(q)}</p>`);
   const t=addMsg('a','<div class="typing"><i></i><i></i><i></i></div>');
-  const lower=q.toLowerCase();
-  const hit=CANNED.find(c=>c.k.some(k=>lower.includes(k)));
-  setTimeout(()=>{
-    t.querySelector('.msg-tx').innerHTML = hit?hit.a():FALLBACK();
-    if(hit) t.querySelector('.msg-b').insertAdjacentHTML('beforeend',`<div class="msg-src">Source · ${hit.src}</div>`);
-    LOG.scrollTop=LOG.scrollHeight;
-  }, 620+Math.random()*520);
+  chatHistory.push({role:'user', content:q});
+  const {data, error} = await sb.functions.invoke('chat', {body:{messages:chatHistory}});
+  if(error){
+    let message=error.message;
+    if(error.context && typeof error.context.json==='function'){
+      try{ const body=await error.context.json(); if(body?.error) message=body.error; }catch{}
+    }
+    console.error('ask: chat function failed', error);
+    t.querySelector('.msg-tx').innerHTML = `<p>Something went wrong reaching the assistant.<br><code>${escapeHtml(message)}</code></p>`;
+    chatHistory.pop(); // drop the unanswered turn so a retry doesn't duplicate it
+    return;
+  }
+  chatHistory.push(...data.appended);
+  t.querySelector('.msg-tx').innerHTML = renderReply(data.reply || '(no response)');
+  LOG.scrollTop=LOG.scrollHeight;
 }
 $('#send').onclick=()=>{ask($('#chatin').value); $('#chatin').value=''; $('#chatin').style.height='auto';};
 $('#chatin').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault(); $('#send').click();}});
 $('#chatin').addEventListener('input',e=>{e.target.style.height='auto'; e.target.style.height=Math.min(130,e.target.scrollHeight)+'px';});
-SUGGESTIONS.forEach(s=>{const b=el('button',null,s); b.onclick=()=>ask(s); $('#sugg').appendChild(b);});
-addMsg('a',`<p>Good afternoon, Colin. I can read across every series on this dashboard — climate, soil and water, labour, and the cellar — for any block and any vintage from 2022.</p>
-<p>Ask in plain language, or start with one of the prompts below.</p>`,'Mock-up · scripted demo responses');
+
+// Called on first successful sign-in and again whenever the signed-in user's
+// id actually changes (see runSessionGate) -- NOT on every auth event, so a
+// background token refresh for the same user doesn't wipe an in-progress
+// conversation.
+async function initChat(){
+  chatHistory = [];
+  conversationStarted = false;
+  LOG.innerHTML = '';
+  const sugg = $('#sugg');
+  sugg.innerHTML = '';
+  sugg.style.display = '';
+
+  const role = await getCurrentUserRole();
+  let suggestions;
+  if(role==='operator'){
+    const { data: recentBrix } = await sb.from('lot_analyses').select('lot_name').eq('analysis_type','brix').order('recorded_at',{ascending:false}).limit(1);
+    const lot = recentBrix?.[0]?.lot_name;
+    suggestions = [
+      "How's this season's GDD tracking?",
+      'Any anomalies I should know about?',
+      lot ? `What's the Brix trend for ${lot}?` : "What's the Brix trend for our most recent lot?",
+      'Show me labor cost by block this season'
+    ];
+  } else {
+    suggestions = [
+      "What's the current soil moisture in my block?",
+      "How does this vintage compare to last year's climate?",
+      "What's the GDD to date this season?",
+      "What might this vintage's wine characteristics be, based on the growing season?"
+    ];
+  }
+  suggestions.forEach(s=>{const b=el('button','chip',s); b.onclick=()=>ask(s); sugg.appendChild(b);});
+  addMsg('a',`<p>I can answer questions about Mars Estate's vineyard and winery data &mdash; climate, soil, anomalies${role==='operator'?', lab analyses, tanks, and labour':''} &mdash; for any block and vintage from 2022.</p>
+  <p>Ask in plain language, or start with one of the prompts below.</p>`);
+}
 
 /* §9 ── AUTH VIEW (Phase 6.1 — view + logic only; no session gate yet) ── */
 let authMode='signin';
@@ -2791,10 +2722,11 @@ function showQueueOnly(){
 
 async function runSessionGate(){
   const { data: { session } } = await sb.auth.getSession();
-  if(!session){ showAuthOnly(); return; }
+  if(!session){ chatUserId=null; showAuthOnly(); return; }
   _userRolePromise=null; /* always re-check fresh, not a stale cached role from a prior session */
   const role = await getCurrentUserRole();
   if(role==='pending' || role===null){ showPendingOnly(); return; }
+  if(session.user.id !== chatUserId){ chatUserId = session.user.id; initChat(); }
   await updateHeaderForSession(session, role);
   showDashboard();
 }

@@ -119,6 +119,42 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   background:var(--c,var(--muted-2)); margin-right:7px; vertical-align:middle;
 }
 .chip.on.vc{background:color-mix(in srgb, var(--c) 16%, transparent); border-color:var(--c); color:var(--c)}
+
+/* ── Vintage multi-select dropdown ─────────────── */
+.vdd{position:relative}
+.vdd-trigger{
+  display:flex; align-items:center; justify-content:space-between; gap:10px; min-width:168px;
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.04em;
+  padding:6px 10px 6px 12px; border-radius:2px; color:var(--cream);
+  border:1px solid var(--line); background:var(--ink); transition:all .16s;
+}
+.vdd-trigger:hover{border-color:var(--line-2)}
+.vdd-trigger.open{border-color:var(--gold-dim); background:var(--ink-4)}
+.vdd-caret{color:var(--muted-2); font-size:8px; transition:transform .16s}
+.vdd-trigger.open .vdd-caret{transform:rotate(180deg); color:var(--gold)}
+.vdd-menu{
+  position:absolute; top:calc(100% + 6px); left:0; z-index:20; min-width:216px; padding:6px;
+  background:var(--ink-2); border:1px solid var(--line-2); border-radius:4px;
+  box-shadow:0 18px 44px rgba(0,0,0,.62); opacity:0; visibility:hidden;
+  transform:translateY(-5px); transition:opacity .16s, transform .16s, visibility .16s;
+}
+.vdd-menu.open{opacity:1; visibility:visible; transform:none}
+.vdd-opt{display:flex; align-items:center; gap:9px; padding:7px 8px; border-radius:2px; transition:background .14s}
+.vdd-opt:not(.disabled){cursor:pointer}
+.vdd-opt:not(.disabled):hover{background:var(--ink-4)}
+.vdd-opt.disabled{opacity:.35}
+.vdd-check{
+  width:13px; height:13px; border-radius:2px; border:1px solid var(--line-2);
+  background:var(--ink); display:grid; place-items:center; flex:none; transition:all .14s;
+}
+.vdd-opt.on .vdd-check{background:var(--gold-glow); border-color:var(--gold-dim)}
+.vdd-check::after{content:''; width:6px; height:6px; border-radius:1px; background:var(--gold); opacity:0; transform:scale(.5); transition:all .12s}
+.vdd-opt.on .vdd-check::after{opacity:1; transform:scale(1)}
+.vdd-dot{width:6px; height:6px; border-radius:50%; background:var(--c,var(--muted-2)); flex:none}
+.vdd-label{display:flex; flex-direction:column; gap:1px; min-width:0}
+.vdd-y{font-family:var(--mono); font-size:11px; color:var(--cream)}
+.vdd-sub{font-family:var(--mono); font-size:8.5px; color:var(--muted-2); letter-spacing:.02em; white-space:nowrap}
+.vdd-cap-note{font-family:var(--mono); font-size:8.5px; color:var(--muted-2); padding:8px 8px 2px; margin-top:2px; border-top:1px solid var(--line)}
 .fspacer{flex:1}
 .fmeta{display:flex; flex-direction:column; align-items:flex-end; gap:6px; padding-top:2px}
 .live{display:flex; align-items:center; gap:7px; font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase}
@@ -705,6 +741,11 @@ const VCHAR = {2022:{t:+3.1,w:-.30,hs:-8, label:'hot, compressed harvest'},
                2024:{t:+0.3,w:+.06,hs:0,  label:'textbook, even ripening'},
                2025:{t:+1.6,w:-.12,hs:-4, label:'warm, early veraison'},
                2026:{t:+1.9,w:-.22,hs:-5, label:'warm, dry — in progress'}};
+// Cap on simultaneous vintage selection in the dropdown -- all 5 VINTAGES
+// entries are selectable in principle (groupedBars/legendFor/VCOLOR are all
+// already N-vintage-generic), but a chart with 5 overlapping lines reads as
+// noise rather than a comparison. 4 leaves one vintage always excludable.
+const VINTAGE_SELECT_CAP = 4;
 
 /* §2 ── SIMULATED SENSOR ENGINE ────────────────────── */
 function hash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
@@ -991,6 +1032,12 @@ const state = {
 const selV  = tab => [...state[tab].vintages].sort((a,b)=>a-b);
 const primV = tab => Math.max(...state[tab].vintages);
 const selB  = tab => state[tab].blocks.length ? state[tab].blocks : [...ALL_IDS];
+
+// Vintage dropdown open/closed state, kept outside `state` (not app data,
+// purely a UI toggle) and outside renderFilters() itself so it survives
+// the renderTab() rebuild triggered by each checkbox click -- otherwise
+// picking a 2nd/3rd vintage would close the menu after every click.
+let vintageDDOpen = false;
 </script>
 
 <script>
@@ -1277,12 +1324,11 @@ const PANELS = [
  sub:'Tipping-bucket gauge · total per interval', range:'1Y',
  render: async (b,c) => {
    if(c.compare){
-     const a=c.vintages[0], z=c.vintages[1];
-     const sa=await buildSeriesReal('precipitation','estate',a,c.range,{agg:'sum'});
-     const sz=await buildSeriesReal('precipitation','estate',z,c.range,{agg:'sum'});
-     const groups=sa.map((p,i)=>({lbl:p.lbl, v:[p.v||0, sz[i].v||0]}));
-     legendFor(b.parentElement,[{name:String(a),color:VCOLOR[a]},{name:String(z),color:VCOLOR[z]}]);
-     groupedBars(b,groups,[String(a),String(z)],[VCOLOR[a],VCOLOR[z]],{unit:'in',dec:2,h:172});
+     const series=await Promise.all(c.vintages.map(async v=>({v,
+       s: await buildSeriesReal('precipitation','estate',v,c.range,{agg:'sum'})})));
+     const groups=series[0].s.map((p,i)=>({lbl:p.lbl, v:series.map(x=>x.s[i].v||0)}));
+     legendFor(b.parentElement,series.map(x=>({name:String(x.v),color:VCOLOR[x.v]})));
+     groupedBars(b,groups,series.map(x=>String(x.v)),series.map(x=>VCOLOR[x.v]),{unit:'in',dec:2,h:172});
    } else {
      const sets = await buildSeriesReal('precipitation','estate',c.primary,c.range,{agg:'sum'});
      barChart(b, sets, {unit:'in',dec:2,color:'#7FA3D4',name:'Rain',h:172});
@@ -1293,12 +1339,12 @@ const PANELS = [
  sub:'Flow meters · total across selected blocks', range:'30D',
  render: async (b,c) => {
    if(c.compare){
-     const a=c.vintages[0], z=c.vintages[1];
-     const sa=await sumSeriesReal('irrigation_volume', c.blocks, a, c.range, {agg:'sum'});
-     const sz=await sumSeriesReal('irrigation_volume', c.blocks, z, c.range, {agg:'sum'});
-     legendFor(b.parentElement,[{name:String(a),color:VCOLOR[a]},{name:String(z),color:VCOLOR[z]}]);
-     groupedBars(b, sa.map((p,i)=>({lbl:p.lbl,v:[p.v||0,sz[i].v||0]})),[String(a),String(z)],
-       [VCOLOR[a],VCOLOR[z]],{unit:'gal',dec:0,h:190});
+     const series=await Promise.all(c.vintages.map(async v=>({v,
+       s: await sumSeriesReal('irrigation_volume', c.blocks, v, c.range, {agg:'sum'})})));
+     const groups=series[0].s.map((p,i)=>({lbl:p.lbl, v:series.map(x=>x.s[i].v||0)}));
+     legendFor(b.parentElement,series.map(x=>({name:String(x.v),color:VCOLOR[x.v]})));
+     groupedBars(b, groups, series.map(x=>String(x.v)),
+       series.map(x=>VCOLOR[x.v]),{unit:'gal',dec:0,h:190});
    } else {
      const sets = await sumSeriesReal('irrigation_volume', c.blocks, c.primary, c.range, {agg:'sum'});
      barChart(b, sets, {unit:'gal',dec:0,color:'#7FA3D4',name:'Applied',h:190});
@@ -1328,11 +1374,10 @@ const PANELS = [
  sub:'Selected blocks · season to date',
  render:(b,c)=>{
    if(c.compare){
-     const [a,z]=c.vintages;
-     const groups=OPS.map(o=>({lbl:o.op, v:[a,z].map(v=>
+     const groups=OPS.map(o=>({lbl:o.op, v:c.vintages.map(v=>
        c.blocks.reduce((s,id)=>s+(labour(id,v).find(r=>r.op===o.op).hours),0))}));
-     legendFor(b.parentElement,[{name:String(a),color:VCOLOR[a]},{name:String(z),color:VCOLOR[z]}]);
-     groupedBars(b,groups,[String(a),String(z)],[VCOLOR[a],VCOLOR[z]],{unit:'hrs',dec:0,h:206});
+     legendFor(b.parentElement,c.vintages.map(v=>({name:String(v),color:VCOLOR[v]})));
+     groupedBars(b,groups,c.vintages.map(v=>String(v)),c.vintages.map(v=>VCOLOR[v]),{unit:'hrs',dec:0,h:206});
    } else {
      const agg={};
      c.blocks.forEach(id=>labour(id,c.primary).forEach(r=>agg[r.op]=(agg[r.op]||0)+r.hours));
@@ -2035,24 +2080,47 @@ function renderFilters(tab){
 
   const gV=el('div','fgroup');
   gV.appendChild(el('div','flabel','Vintage'));
-  const cV=el('div','chips');
+
+  const wrap=el('div','vdd'); wrap.id='vdd-wrap';
+  const trigger=el('button','vdd-trigger'+(vintageDDOpen?' open':''));
+  const menu=el('div','vdd-menu'+(vintageDDOpen?' open':''));
+  const summary = st.vintages.length<=3 ? [...st.vintages].sort((a,b)=>b-a).join(', ')
+                                         : st.vintages.length+' vintages';
+  trigger.innerHTML=`<span>${summary}</span><span class="vdd-caret">&#9662;</span>`;
+  trigger.onclick=e=>{
+    e.stopPropagation();
+    vintageDDOpen=!vintageDDOpen;
+    trigger.classList.toggle('open',vintageDDOpen);
+    menu.classList.toggle('open',vintageDDOpen);
+  };
   VINTAGES.forEach(y=>{
     const on=st.vintages.includes(y);
-    const b=el('button','chip vc'+(on?' on':''), y+(y===CURRENT?' ·':''));
-    b.style.setProperty('--c',VCOLOR[y]);
-    b.title = y===CURRENT ? 'Current growing season — live feed' : VCHAR[y].label;
-    b.onclick=()=>{
-      let v=[...st.vintages];
-      if(on){ if(v.length>1) v=v.filter(x=>x!==y); }
-      else { v.push(y); if(v.length>2) v=v.slice(-2); }
-      st.vintages=v; renderTab(tab);
-    };
-    cV.appendChild(b);
+    const atCap=st.vintages.length>=VINTAGE_SELECT_CAP;
+    const opt=el('div','vdd-opt'+(on?' on':'')+((!on&&atCap)?' disabled':''));
+    opt.innerHTML=`<span class="vdd-check"></span><span class="vdd-dot" style="--c:${VCOLOR[y]}"></span>
+      <span class="vdd-label"><span class="vdd-y">${y}</span><span class="vdd-sub">${y===CURRENT?'current · live feed':VCHAR[y].label}</span></span>`;
+    if(!on && atCap){
+      // Cap reached: leave unselected options visible but inert, rather than
+      // hiding them -- the user can see what they'd need to deselect first.
+    } else {
+      opt.onclick=e=>{
+        e.stopPropagation();
+        let v=[...st.vintages];
+        if(on){ if(v.length>1) v=v.filter(x=>x!==y); }
+        else if(v.length<VINTAGE_SELECT_CAP){ v.push(y); }
+        st.vintages=v; renderTab(tab);
+      };
+    }
+    menu.appendChild(opt);
   });
-  gV.appendChild(cV);
-  gV.appendChild(el('div','fhint', st.vintages.length>1
-    ? 'Comparing '+selV(tab).join(' vs ')+' — aligned to the same calendar date'
-    : 'Pick a second vintage to compare'));
+  if(st.vintages.length>=VINTAGE_SELECT_CAP){
+    menu.appendChild(el('div','vdd-cap-note',`Up to ${VINTAGE_SELECT_CAP} vintages at once`));
+  }
+  wrap.appendChild(trigger); wrap.appendChild(menu);
+  gV.appendChild(wrap);
+  if(st.vintages.length>1){
+    gV.appendChild(el('div','fhint','Comparing '+selV(tab).join(', ')+' — aligned to the same calendar date'));
+  }
   host.appendChild(gV);
 
   const gB=el('div','fgroup');
@@ -2371,7 +2439,7 @@ async function renderTab(tab){
 
     const ov=el('div','panel');
     ov.innerHTML=`<div class="ov-hd"><div class="ov-ttl">Estate at a glance</div>
-      <div class="ov-note">${c.compare?'Comparing '+c.vintages.join(' vs ')+'<br>aligned to '+dstr(NOW)
+      <div class="ov-note">${c.compare?'Comparing '+c.vintages.join(', ')+'<br>aligned to '+dstr(NOW)
         : (c.primary===CURRENT?'Live · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
            :'Vintage '+c.primary+' archive · static')}<br>${c.blocks.length} of 3 blocks in view</div></div>
       <div class="ov-grid" id="ovg-vineyard"></div>`;
@@ -2490,6 +2558,14 @@ function scheduleClockTick(){
 $('#avatar').onclick=e=>{e.stopPropagation(); const m=$('#menu'); m.classList.toggle('open');
   $('#avatar').setAttribute('aria-expanded',m.classList.contains('open'));};
 document.addEventListener('click',e=>{if(!$('#pwrap').contains(e.target)) $('#menu').classList.remove('open');});
+document.addEventListener('click',e=>{
+  const w=$('#vdd-wrap');
+  if(w && !w.contains(e.target) && vintageDDOpen){
+    vintageDDOpen=false;
+    w.querySelector('.vdd-trigger')?.classList.remove('open');
+    w.querySelector('.vdd-menu')?.classList.remove('open');
+  }
+});
 $('#signout').onclick=()=>{$('#menu').classList.remove('open'); hideTip(); sb.auth.signOut();};
 $('#menu-queue').onclick=()=>{
   $('#menu').classList.remove('open');

@@ -225,10 +225,18 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   white-space:nowrap; line-height:1.65;
 }
 .tip.on{opacity:1}
+.tip.wide{white-space:normal; max-width:260px; line-height:1.6}
 .tip-t{color:var(--muted-2); margin-bottom:5px; font-size:9.5px; letter-spacing:.06em}
 .tip-r{display:flex; align-items:center; gap:7px; color:var(--cream)}
 .tip-r i{width:7px; height:7px; border-radius:50%; background:currentColor; flex:none}
 .tip-r b{font-weight:400; color:var(--muted); min-width:56px}
+.info-ic{
+  width:14px; height:14px; border-radius:50%; border:1px solid var(--line-2);
+  font-family:var(--mono); font-size:9px; color:var(--muted-2);
+  display:inline-flex; align-items:center; justify-content:center; flex:none;
+  transition:all .15s; cursor:help;
+}
+.info-ic:hover{border-color:var(--gold-dim); color:var(--gold); background:var(--gold-glow)}
 
 /* ── Overview ──────────────────────────────────── */
 .ov-hd{
@@ -340,8 +348,6 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .sr-rows{display:flex; flex-direction:column; gap:8px}
 .sr-row{display:flex; justify-content:space-between; gap:12px; font-family:var(--mono); font-size:10px; color:var(--muted-2)}
 .sr-row b{font-weight:400; color:var(--cream)}
-.sr-note{font-size:10.5px; line-height:1.7; color:var(--muted); border-top:1px solid var(--line); padding-top:11px}
-.sr-note b{color:var(--cream); font-weight:500}
 
 /* compass */
 .compass-row{display:flex; align-items:center; gap:20px; flex-wrap:wrap; justify-content:center; width:100%}
@@ -1050,8 +1056,9 @@ const money = v => '$'+Math.round(v).toLocaleString('en-US');
 const dstr = d => d.getDate()+' '+MON[d.getMonth()];
 
 const TIP=$('#tip');
-function showTip(x,y,html){
+function showTip(x,y,html,opts={}){
   TIP.innerHTML=html; TIP.classList.add('on');
+  TIP.classList.toggle('wide', !!opts.wide);
   const r=TIP.getBoundingClientRect();
   TIP.style.left=Math.min(x+14, innerWidth-r.width-12)+'px';
   TIP.style.top =Math.max(8, y-r.height-12)+'px';
@@ -1236,6 +1243,7 @@ const PANELS = [
 /* ══ VINEYARD · CLIMATE ══ */
 {id:'airtemp', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Air temperature', unit:'°F',
  sub:'Estate weather station', range:'5D',
+ info:"Higher temperatures speed sugar accumulation and phenolic ripening, but above roughly 95°F photosynthesis slows and sunburn risk rises on exposed fruit. Below the 50°F growing threshold the vine is essentially dormant for the day. Read alongside GDD for the season-long picture.",
  render: async (b,c) => {
    const sets = await vSets(c, {metric:'air_temp', scope:'estate'}, METRICS.airTemp.color, 'Air temp');
    lineChart(b, sets, {unit:'°F',dec:1,h:186,aria:'Air temperature over time'});
@@ -1243,6 +1251,7 @@ const PANELS = [
 
 {id:'gdd', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Growing degree days', unit:'GDD · base 50 °F',
  sub:'Cumulative from 1 April · band shows normal picking range', range:'30D',
+ info:"The running total of heat banked since April 1st, base 50°F — the best single predictor of where the season sits relative to picking. The shaded band marks the normal harvest window for this site; approaching it means berry sampling should begin.",
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
@@ -1254,6 +1263,7 @@ const PANELS = [
 
 {id:'dtr', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Diurnal range', unit:'°F',
  sub:'Daily max − min · derived', range:'30D',
+ info:"The gap between daily high and low. A wide swing lets grapes build sugar in daytime heat and retain acid overnight, the hallmark of balanced fruit. A narrow, compressed range flattens that balance and tends to soften acidity faster than desired.",
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
@@ -1264,6 +1274,7 @@ const PANELS = [
 
 {id:'rh', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Relative humidity', unit:'%',
  sub:'Estate weather station', range:'1D',
+ info:"Humidity above roughly 85% raises mildew pressure, especially with warm nights. Low humidity accelerates vine water loss and can worsen stress during heat spikes. Read alongside VPD for the fuller picture of vine stress.",
  render: async (b,c) => {
    const sets = await vSets(c, {metric:'humidity', scope:'estate'}, METRICS.humidity.color, 'RH');
    lineChart(b, sets, {unit:'%',dec:0,h:172});
@@ -1271,15 +1282,18 @@ const PANELS = [
 
 {id:'wind', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Wind speed & direction', unit:'mph · degrees',
  sub:'Estate weather station · current reading',
+ info:"Sustained wind above about 22 mph creates spray drift risk and can damage young shoots and exposed clusters. Below that, moderate airflow is beneficial: it dries the canopy after rain or irrigation and reduces mildew pressure.",
  render:(b,c)=>renderWind(b,c)},
 
 {id:'solar', tab:'vineyard', sect:'climate', span:'s12', minRole:'all', title:'Solar insolation & UV', unit:'W/m² · UV index',
  sub:'Pyranometer + UV sensor · measured against clear-sky expectation', range:'1D',
+ info:"Higher means more radiation reaching the canopy: faster photosynthesis and sugar accumulation, with more heat load and sunburn risk. Lower means slower ripening, and combined with high humidity, more mildew pressure. Compare against the clear-sky line, not against a fixed number — the ceiling falls through the season.",
  render:(b,c)=>renderSolar(b,c)},
 
 /* ══ VINEYARD · SOIL & WATER ══ */
 {id:'soilmoist', tab:'vineyard', sect:'soil', span:'s8', minRole:'all', title:'Soil moisture', unit:'% VWC',
  sub:'Probes at 18 in · band shows target range for deficit irrigation', range:'30D', perBlock:'soilMoist',
+ info:"Percent of soil volume held as water at 18 inches, where most feeder roots sit. The shaded band is the deficit-irrigation target, deliberately kept below field capacity to concentrate flavor and manage canopy vigor — not a sign of stress unless it drops well under the band.",
  render: async (b,c) => {
    const sets = c.compare
      ? await vSets(c, {metric:'soil_moisture', blocks:c.blocks}, null, 'mean of selection')
@@ -1291,6 +1305,7 @@ const PANELS = [
 
 {id:'soiltemp', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Soil temperature', unit:'°F',
  sub:'Probes at 18 in', range:'5D', perBlock:'soilTemp',
+ info:"Warmer soil speeds root activity and nutrient uptake early in the season. Very high soil temperatures late season can push vines toward drought-avoidance behavior even when moisture is adequate. Read alongside soil moisture, not as a standalone number.",
  render: async (b,c) => {
    const sets = c.compare
      ? await vSets(c, {metric:'soil_temp', blocks:c.blocks}, null, 'mean of selection')
@@ -1302,6 +1317,7 @@ const PANELS = [
 
 {id:'vpd', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Vapour pressure deficit', unit:'kPa',
  sub:'Derived from temp + RH · vine stress proxy', range:'5D',
+ info:"Vapour pressure deficit measures how strongly the air pulls moisture from the leaf — a stronger driver of vine water stress than temperature alone. Above roughly 3.1 kPa the vine starts closing stomata to conserve water, which also slows photosynthesis and ripening.",
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
@@ -1312,6 +1328,7 @@ const PANELS = [
 
 {id:'et0', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Reference ET (ET₀)', unit:'in / day',
  sub:'Derived · irrigation demand', range:'30D',
+ info:"Reference evapotranspiration estimates how much water a well-watered reference crop loses to the atmosphere that day, the baseline irrigation scheduling is built from. Higher ET₀ on hot, dry, windy days means blocks dry out faster and may need an earlier or larger set.",
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
@@ -1322,6 +1339,7 @@ const PANELS = [
 
 {id:'precip', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Precipitation', unit:'inches',
  sub:'Tipping-bucket gauge · total per interval', range:'1Y',
+ info:"Rain late in the season is a double-edged read: it can relieve vine stress, but also dilutes sugars and raises rot and mildew risk on tight clusters close to harvest. A dry stretch before picking is generally preferred for concentration.",
  render: async (b,c) => {
    if(c.compare){
      const series=await Promise.all(c.vintages.map(async v=>({v,
@@ -1405,6 +1423,7 @@ const PANELS = [
 {id:'cellart', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar temperature', unit:'°F',
  sub:'Barrel room · live sensor · target 55–58 °F', range:'5D',
  rangeOptions:['1D','5D','30D'],
+ info:"Barrel room temperature drives the pace of elevage: malolactic activity, oxygen ingress through the barrel, and how fast the wine integrates oak. Sustained drift outside the 55–58°F target shows up later as inconsistency across lots aging side by side.",
  render: async (b,c) => {
    const sets=[{name:'Cellar',color:METRICS.cellar.color,
      pts: await buildSeriesReal('cellar_temp','cellar',CURRENT,c.range)}];
@@ -1415,6 +1434,7 @@ const PANELS = [
 {id:'cellarh', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar humidity', unit:'%',
  sub:'Barrel room · live sensor · target 68–78 %', range:'30D',
  rangeOptions:['1D','5D','30D'],
+ info:"Barrel room humidity controls evaporative loss (the angels share) and barrel integrity. Too dry and barrels lose volume faster, concentrating the wine and increasing topping frequency; too humid and mold risk on barrel exteriors rises.",
  render: async (b,c) => {
    const sets=[{name:'Cellar RH',color:METRICS.cellarRH.color,
      pts: await buildSeriesReal('cellar_rh','cellar',CURRENT,c.range)}];
@@ -1425,10 +1445,12 @@ const PANELS = [
 /* ══ WINERY · FERMENTATION ══ */
 {id:'ferm', tab:'winery', sect:'ferm', span:'s8', minRole:'operator', title:'Lot lab history',
  sub:'Real InnoVint lab analyses · select a lot below · not tied to the vintage/block filters above',
+ info:"Brix, pH, and TA track fermentation and ripeness progress for each lot. Falling Brix alongside rising temperature usually signals an active, healthy ferment; a stall across several readings is the first sign of a sluggish or stuck one worth investigating.",
  render:(b,c)=>renderFerm(b,c)},
 
 {id:'tanks', tab:'winery', sect:'ferm', span:'s4', minRole:'operator', title:'Vessel inventory', unit:'gal',
  sub:'InnoVint vessel inventory · no block scoping',
+ info:"Current fill volume against capacity for every working vessel. A vessel sitting well under capacity for an extended stretch usually means a lot is due for consolidation or racking; a near-full vessel during active fermentation is worth watching for headspace during peak CO₂ production.",
  render:(b,c)=>renderTanks(b,c)},
 
 /* ══ WINERY · HARVEST ══ */
@@ -1596,6 +1618,7 @@ function renderWind(box, ctx){
 
 /* ── Solar insolation with interpretation ── */
 function renderSolar(box, ctx){
+  box.innerHTML='';
   const v=ctx.primary, now=endOf(v,ctx.align);
   const row=el('div','solar-row');
   const cwrap=el('div','solar-c'), rwrap=el('div','solar-r');
@@ -1639,8 +1662,7 @@ function renderSolar(box, ctx){
       <div class="sr-row"><span>Peak today</span><b>${fmt(peak,0)} W/m²</b></div>
       <div class="sr-row"><span>Daily total</span><b>${fmt(kwh,1)} kWh/m²</b></div>
       <div class="sr-row"><span>UV index</span><b>${fmt(uv,1)} · ${uvTxt}</b></div>
-    </div>
-    <div class="sr-note"><b>Reading the number.</b> Higher means more radiation reaching the canopy: faster photosynthesis and sugar accumulation, with more heat load and sunburn risk. Lower means slower ripening, and combined with high humidity, more mildew pressure. Compare against the clear-sky line, not against a fixed number — the ceiling falls through the season.</div>`;
+    </div>`;
 }
 
 /* ── Fermentation temperature, gaps outside the harvest window ── */
@@ -2213,17 +2235,17 @@ function formatVineyardTiles(cur, prev, other){
   const {t, sm, dry, g, vp, dt, rh, norm} = cur;
   const dT=delta(t,'t'), dG=delta(g,'g'), dS=delta(sm,'sm');
   return [
-    {key:'t', l:'Air temperature', v:fmt(t,1), u:'°F',
+    {key:'t', l:'Air temperature · hourly', v:fmt(t,1), u:'°F',
       d: dT ? dT.txt : (t==null ? '—' : (t>92?'above seasonal norm':
           (norm?.value!=null ? `avg of ${norm.vintageCount} prior season${norm.vintageCount===1?'':'s'} ${fmt(norm.value,0)} °F` : '—'))),
       c: dT ? (dT.up?'wr':'up') : (t==null ? '' : (t>92?'dn':''))},
-    {key:'rh', l:'Relative humidity', v:fmt(rh,0), u:'%',
+    {key:'rh', l:'Relative humidity · hourly', v:fmt(rh,0), u:'%',
       d: rh==null ? '—' : (rh>85?'mildew pressure':'normal'),
       c: rh==null ? '' : (rh>85?'wr':'')},
     {key:'g', l:'GDD to date', v:fmt(g,0), u:'',
       d: dG ? dG.txt : 'base 50 °F from 1 Apr',
       c: dG ? (dG.up?'wr':'up') : ''},
-    {key:'sm', l:'Soil moisture, avg', v:fmt(sm,1), u:'% VWC',
+    {key:'sm', l:'Soil moisture, avg · hourly', v:fmt(sm,1), u:'% VWC',
       d: dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—'),
       c: sm==null ? '' : (sm<15?'dn':'')},
     {key:'vp', l:'VPD', v:fmt(vp,2), u:'kPa',
@@ -2329,11 +2351,11 @@ async function paintOverviewW(animate){
   wineryOverviewCache = {t, rh};
   const okT=t!=null&&t>=55&&t<=58, okH=rh!=null&&rh>=68&&rh<=78;
   g.innerHTML=`
-    <div class="stat" data-key="t"><div class="stat-l">Cellar temperature</div>
+    <div class="stat" data-key="t"><div class="stat-l">Cellar temperature · hourly</div>
       <div class="stat-v ${animate?'tick':''}">${fmt(t,1)}<span class="u">°F</span></div>
       <div class="stat-d ${okT?'up':'wr'}">${t==null?'no data':(okT?'within target':'outside target band')}</div>
       ${formatCellarMeter(t,55,58,52,62)}</div>
-    <div class="stat" data-key="rh"><div class="stat-l">Cellar humidity</div>
+    <div class="stat" data-key="rh"><div class="stat-l">Cellar humidity · hourly</div>
       <div class="stat-v ${animate?'tick':''}">${fmt(rh,0)}<span class="u">%</span></div>
       <div class="stat-d ${okH?'up':'wr'}">${rh==null?'no data':(okH?'within target':'outside target band')}</div>
       ${formatCellarMeter(rh,68,78,60,88)}</div>`;
@@ -2385,6 +2407,14 @@ function makePanel(p, c){
   const hd=el('div','p-hd');
   hd.innerHTML=`<div class="p-hl"><div class="p-ttl-row"><span class="p-ttl">${p.title}</span>${p.unit?`<span class="p-unit">${p.unit}</span>`:''}</div>
     ${p.sub?`<div class="p-sub">${p.sub}</div>`:''}</div>`;
+  if(p.info){
+    const ic=el('button','info-ic','i');
+    ic.setAttribute('aria-label','About this reading');
+    ic.onmouseenter=e=>showTip(e.clientX,e.clientY,p.info,{wide:true});
+    ic.onmousemove=e=>showTip(e.clientX,e.clientY,p.info,{wide:true});
+    ic.onmouseleave=hideTip;
+    hd.querySelector('.p-ttl-row').appendChild(ic);
+  }
   if(p.range){
     if(!state.range[p.id]) state.range[p.id]=p.range;
     const r=el('div','rng');

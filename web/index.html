@@ -2126,9 +2126,6 @@ function renderFilters(tab){
   const gB=el('div','fgroup');
   gB.appendChild(el('div','flabel','Vineyard block'));
   const cB=el('div','chips');
-  const all=el('button','chip'+(st.blocks.length===ALL_IDS.length?' on':''),'All');
-  all.onclick=()=>{ st.blocks=[...ALL_IDS]; renderTab(tab); };
-  cB.appendChild(all);
   BLOCKS.forEach(bl=>{
     const on=st.blocks.includes(bl.id);
     const b=el('button','chip dot'+(on?' on':''), bl.label);

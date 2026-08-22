@@ -2217,21 +2217,21 @@ function formatVineyardTiles(cur, prev, other){
       d: dT ? dT.txt : (t==null ? '—' : (t>92?'above seasonal norm':
           (norm?.value!=null ? `avg of ${norm.vintageCount} prior season${norm.vintageCount===1?'':'s'} ${fmt(norm.value,0)} °F` : '—'))),
       c: dT ? (dT.up?'wr':'up') : (t==null ? '' : (t>92?'dn':''))},
-    {key:'sm', l:'Soil moisture, avg', v:fmt(sm,1), u:'% VWC',
-      d: dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—'),
-      c: sm==null ? '' : (sm<15?'dn':'')},
+    {key:'rh', l:'Relative humidity', v:fmt(rh,0), u:'%',
+      d: rh==null ? '—' : (rh>85?'mildew pressure':'normal'),
+      c: rh==null ? '' : (rh>85?'wr':'')},
     {key:'g', l:'GDD to date', v:fmt(g,0), u:'',
       d: dG ? dG.txt : 'base 50 °F from 1 Apr',
       c: dG ? (dG.up?'wr':'up') : ''},
+    {key:'sm', l:'Soil moisture, avg', v:fmt(sm,1), u:'% VWC',
+      d: dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—'),
+      c: sm==null ? '' : (sm<15?'dn':'')},
     {key:'vp', l:'VPD', v:fmt(vp,2), u:'kPa',
       d: vp==null ? '—' : (vp>3.1?'high vine stress':'within range'),
       c: vp==null ? '' : (vp>3.1?'wr':'up')},
     {key:'dt', l:'Diurnal range', v:fmt(dt,1), u:'°F',
       d: dt==null ? '—' : (dt>=21?'good acid retention':'compressed'),
-      c: dt==null ? '' : (dt>=21?'up':'wr')},
-    {key:'rh', l:'Relative humidity', v:fmt(rh,0), u:'%',
-      d: rh==null ? '—' : (rh>85?'mildew pressure':'normal'),
-      c: rh==null ? '' : (rh>85?'wr':'')}
+      c: dt==null ? '' : (dt>=21?'up':'wr')}
   ];
 }
 

@@ -1421,8 +1421,8 @@ async function vSets(c, getterOrMetric, color, name, opts={}){
    fall within ~1.5 pt of the reference, area shares within ~1 pt. */
 const MAP = {
   B1:{pts:[[1085.2,64.3],[1248.8,40.3],[1351.7,155.7],[1292.0,251.9],[1224.7,357.7],[1143.9,465.5],[1057.3,573.2],[986.1,642.5],[947.7,627.1],[930.3,538.6],[913.0,427.0],[898.6,321.2],[887.0,257.7],[978.4,155.7]], lx:1096, ly:352, ang:-52},
-  B2:{pts:[[247.1,446.9],[329.5,441.1],[436.8,453.6],[532.6,467.0],[618.8,485.2],[664.8,422.9],[701.2,355.9],[722.3,311.8],[774.0,296.5],[827.7,301.3],[852.6,311.8],[862.2,373.1],[873.7,440.2],[885.2,513.0],[890.9,570.4],[885.2,610.7],[867.9,647.1],[852.6,673.9],[791.3,685.4],[737.6,681.6],[695.5,672.0],[653.3,654.8],[630.3,635.6],[605.4,606.9],[557.5,622.2],[519.2,633.7],[505.8,647.1],[502.0,691.2],[408.1,694.0],[312.3,693.1],[252.9,690.2]], lx:556, ly:548, ang:-4},
-  B3:{pts:[[241.4,711.1],[309.8,709.2],[404.8,711.1],[492.2,709.2],[508.5,680.0],[507.4,654.1],[549.2,642.7],[594.8,650.3],[608.1,661.7],[634.7,694.0],[689.8,724.4],[748.7,732.0],[805.7,743.4],[847.5,754.8],[841.8,783.3],[824.7,798.5],[781.0,817.5],[729.7,804.2],[680.3,797.6],[644.2,801.4],[613.8,812.8],[583.4,827.0],[545.4,837.5],[501.7,846.0],[458.0,856.5],[418.1,870.7],[309.8,872.6],[241.4,874.5]], lx:486, ly:780, ang:-4},
+  B2:{pts:[[247.1,446.9],[329.5,441.1],[436.8,453.6],[532.6,467.0],[618.8,485.2],[664.8,422.9],[701.2,355.9],[722.3,311.8],[774.0,296.5],[827.7,301.3],[852.6,311.8],[862.2,373.1],[873.7,440.2],[885.2,513.0],[890.9,570.4],[885.2,610.7],[867.9,647.1],[852.6,673.9],[791.3,685.4],[737.6,681.6],[695.5,672.0],[653.3,654.8],[630.3,635.6],[605.4,606.9],[557.5,622.2],[519.2,618.0],[505.8,632.0],[502.0,691.2],[408.1,694.0],[312.3,693.1],[252.9,690.2]], lx:556, ly:548, ang:-4},
+  B3:{pts:[[241.4,711.1],[309.8,709.2],[404.8,711.1],[492.2,709.2],[508.5,680.0],[507.4,654.1],[549.2,657.0],[594.8,650.3],[608.1,661.7],[634.7,694.0],[689.8,724.4],[748.7,732.0],[805.7,743.4],[847.5,754.8],[841.8,783.3],[824.7,798.5],[781.0,817.5],[729.7,804.2],[680.3,797.6],[644.2,801.4],[613.8,812.8],[583.4,827.0],[545.4,837.5],[501.7,846.0],[458.0,856.5],[418.1,870.7],[309.8,872.6],[241.4,874.5]], lx:486, ly:780, ang:-4},
 };
 const ROADS = [
   [[880.4,236],[862.5,256],[864.3,276],[868.0,296],[875.5,316],[878.5,336],[881.4,356],[884.4,376],[887.5,396],[890.5,416],[893.7,436],[896.8,456],[900.0,476],[903.1,496],[906.1,516],[908.7,536],[911.6,556],[913.9,576],[914.4,596],[914.1,616],[921.5,636],[901.5,656],[881.5,680],[861.5,704],[841.5,728],[866.2,752],[872.3,776],[852.3,800],[832.3,824],[812.3,848],[792.3,872],[772.3,896],[759.3,920],[746.3,944],[733.3,968],[720.3,992]],
@@ -2098,17 +2098,59 @@ function renderFilters(tab){
    instead of re-running the full multi-metric overviewStats() fetch. */
 let vineyardOverviewCache = null; // {ids, cur, prev, other}
 
+/* Seasonal norm: mean air_temp across whichever archived vintages actually
+   have data for the ±SEASONAL_NORM_WINDOW_DAYS window around the day-of-
+   year `anchorDate` falls on. anchorDate is endOfReal(v) for whichever
+   vintage is primary, so this tracks the same "current" the rest of the
+   app uses -- moves correctly as MOCK_NOW/the season advances. Returns the
+   contributing-vintage count alongside the value so the caller can label
+   it honestly (e.g. "avg of 2 prior seasons") rather than implying a fixed
+   baseline regardless of actual sample size.
+   The <3-contributing-vintage path this enables is currently unreachable:
+   all 4 archived vintages (2022-2025; 2026 is the live/current vintage,
+   not archived) have full real Apr-Oct sensor coverage today, so
+   vintageCount is always 4 in practice. Kept for if that ever changes --
+   e.g. a fresh environment seeded with fewer archived years. */
+const SEASONAL_NORM_VINTAGES = [2022,2023,2024,2025];
+const SEASONAL_NORM_WINDOW_DAYS = 7;
+
+async function getSeasonalNorm(metric, scope, anchorDate){
+  const centerDoy = doy(anchorDate);
+  const perVintage = await Promise.all(SEASONAL_NORM_VINTAGES.map(async y => {
+    const start = doyDate(y, centerDoy - SEASONAL_NORM_WINDOW_DAYS);
+    const end   = doyDate(y, centerDoy + SEASONAL_NORM_WINDOW_DAYS);
+    const { data, error } = await sb.rpc('series_bucketed', {
+      p_metric: metric,
+      p_block: (scope==='estate'||scope==='cellar') ? null : scope,
+      p_vintage: y,
+      p_start: start.toISOString(),
+      p_end: end.toISOString(),
+      p_bucket: '1 day',
+      p_agg: 'avg'
+    });
+    if (error) { console.error('getSeasonalNorm error:', error); return []; }
+    return data.map(r=>r.v).filter(v=>v!=null);
+  }));
+  const contributing = perVintage.filter(vals=>vals.length>0);
+  const all = perVintage.flat();
+  return {
+    value: all.length ? all.reduce((s,x)=>s+x,0)/all.length : null,
+    vintageCount: contributing.length
+  };
+}
+
 function formatVineyardTiles(cur, prev, other){
   const delta = (now, key) => {
     if(prev==null || now==null || prev[key]==null) return null;
     const dd=now-prev[key];
     return {txt:`vs ${other}: ${dd>=0?'+':''}${fmt(dd, Math.abs(dd)<10?1:0)}`, up:dd>=0};
   };
-  const {t, sm, dry, g, vp, dt, rh} = cur;
+  const {t, sm, dry, g, vp, dt, rh, norm} = cur;
   const dT=delta(t,'t'), dG=delta(g,'g'), dS=delta(sm,'sm');
   return [
     {key:'t', l:'Air temperature', v:fmt(t,1), u:'°F',
-      d: dT ? dT.txt : (t==null ? '—' : (t>92?'above seasonal norm':'seasonal norm 87 °F')),
+      d: dT ? dT.txt : (t==null ? '—' : (t>92?'above seasonal norm':
+          (norm?.value!=null ? `avg of ${norm.vintageCount} prior season${norm.vintageCount===1?'':'s'} ${fmt(norm.value,0)} °F` : '—'))),
       c: dT ? (dT.up?'wr':'up') : (t==null ? '' : (t>92?'dn':''))},
     {key:'sm', l:'Soil moisture, avg', v:fmt(sm,1), u:'% VWC',
       d: dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—'),
@@ -2145,7 +2187,8 @@ async function overviewStats(tab, c){
     const valid = soilByBlock.filter(b=>b.v!=null);
     const sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
     const dry = valid.length ? [...valid].sort((a,b)=>a.v-b.v)[0] : null;
-    return {t, soilByBlock, sm, dry, g, vp, dt, rh};
+    const norm = (t!=null && t<=92) ? await getSeasonalNorm('air_temp','estate', endOfReal(vv)) : null;
+    return {t, soilByBlock, sm, dry, g, vp, dt, rh, norm};
   }
 
   const [cur, prev] = await Promise.all([
@@ -2283,7 +2326,15 @@ function makePanel(p, c){
     (p.rangeOptions||Object.keys(RANGES)).forEach(k=>{
       const val=RANGES[k];
       const b=el('button', state.range[p.id]===k?'on':'', val.label);
-      b.onclick=()=>{ state.range[p.id]=k; renderTab(c.tab); };
+      b.onclick=()=>{
+        state.range[p.id]=k;
+        if(SCOPED_RERENDER_SAFE.has(p.id)){
+          r.querySelectorAll('button').forEach(x=>x.classList.toggle('on', x===b));
+          rerenderPanel(p.id);
+        } else {
+          renderTab(c.tab);
+        }
+      };
       r.appendChild(b);
     });
     hd.appendChild(r);
@@ -2362,7 +2413,7 @@ async function renderTab(tab){
       const m=makePanel(p,c);
       grid.appendChild(m.panel);
       pending.push(m.run);
-      if(POLL_5MIN_PANEL_IDS.includes(p.id)) panelRunsForPolling[p.id]=m.run;
+      panelRuns[p.id]=m.run;
     });
   });
 
@@ -2395,10 +2446,21 @@ setInterval(()=>{
    deliberately has no interval at all -- tab focus/filter-change (via
    renderTab) is the only refresh trigger for those, unchanged from today. */
 const POLL_5MIN_PANEL_IDS=['soilmoist','soiltemp','irrig','irrigblk'];
-let panelRunsForPolling={};
+// Explicit safe-list for scoped range-change re-renders -- every id here was
+// individually verified to write only into its own panel body (never a
+// sibling's DOM, never shared/global state). Anything NOT in this set falls
+// back to the existing full renderTab() behavior automatically -- a panel
+// added later without this check gets today's behavior, not a silent bug.
+const SCOPED_RERENDER_SAFE = new Set(['airtemp','gdd','dtr','rh','solar',
+  'soilmoist','soiltemp','vpd','et0','precip','irrig','cellart','cellarh']);
+let panelRuns={}; // panelId -> run(); shared by 5-min polling and scoped re-render
+async function rerenderPanel(panelId){
+  const run = panelRuns[panelId];
+  if(run) await run();
+}
 setInterval(()=>{
   if(!dashboardBooted) return;
-  POLL_5MIN_PANEL_IDS.forEach(id=>panelRunsForPolling[id]?.());
+  POLL_5MIN_PANEL_IDS.forEach(id=>panelRuns[id]?.());
 }, 5*60*1000);
 
 /* Real wall-clock header display -- deliberately separate from the mock

@@ -554,7 +554,6 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   </section>
 
   <div class="foot">
-    <div>Mars Telemetry &middot; draft mock-up &middot; simulated data</div>
     <div>1984 Summit Lake Drive, Angwin CA 94508 &middot; 7.3 acres &middot; Howell Mountain AVA</div>
   </div>
 </div>
@@ -1231,12 +1230,12 @@ function legendFor(panel, sets){
    is one object; the grid and section headings follow.  */
 
 const SECTIONS = [
-  {tab:'vineyard', id:'climate', label:'Climate',      note:'Estate weather station · 1,700 ft'},
-  {tab:'vineyard', id:'soil',    label:'Soil & water', note:'Probes at 18 in · flow meters'},
-  {tab:'vineyard', id:'labour',  label:'Labour',       note:'Crew logs · season to date'},
-  {tab:'winery',   id:'cellar',  label:'Cellar',       note:'Building sensors · always live'},
-  {tab:'winery',   id:'ferm',    label:'Fermentation', note:'Real InnoVint lab records · vessel inventory'},
-  {tab:'winery',   id:'harvest', label:'Harvest',      note:'Weigh-tag and lab records'}
+  {tab:'vineyard', id:'climate', label:'Climate',      note:'Estate weather station'},
+  {tab:'vineyard', id:'soil',    label:'Soil & water', note:'Vineyard sensors'},
+  {tab:'vineyard', id:'labour',  label:'Labour',       note:'Simulated labor record'},
+  {tab:'winery',   id:'cellar',  label:'Cellar',       note:'Cellar HVAC sensors'},
+  {tab:'winery',   id:'ferm',    label:'Fermentation', note:'InnoVint winery data'},
+  {tab:'winery',   id:'harvest', label:'Harvest',      note:'Simulated weigh-tag record'}
 ];
 
 /* Single source of truth for every panel's data-source subtitle text.
@@ -1255,18 +1254,18 @@ const SECTIONS = [
 const DATA_SOURCES = {
   air_temp:          {kind:'weather'},
   humidity:          {kind:'weather'},
-  soil_moisture:     {kind:'weather', detail:'probes at 18 in'},
-  soil_temp:         {kind:'weather', detail:'probes at 18 in'},
-  precipitation:     {kind:'weather', detail:'total per interval'},
-  irrigation_volume: {kind:'weather', detail:'total across selected blocks'},
+  soil_moisture:     {kind:'sensor', detail:'probes at 18 in'},
+  soil_temp:         {kind:'sensor', detail:'probes at 18 in'},
+  precipitation:     {kind:'weather'},
+  irrigation_volume: {kind:'weather'},
   cellar_temp:       {kind:'building'},
   cellar_rh:         {kind:'building'},
   gdd_cumulative:    {kind:'derived', detail:'from air temperature (base 50°F)'},
   dtr_f:             {kind:'derived', detail:'from air temperature (daily max − min)'},
   vpd_kpa:           {kind:'derived', detail:'from air temperature and humidity'},
   et0_in:            {kind:'derived', detail:'from temperature, humidity, wind, and solar radiation'},
-  lot_analyses:      {kind:'real', detail:'Real InnoVint lab analyses'},
-  vessels:           {kind:'real', detail:'Real InnoVint vessel inventory'},
+  lot_analyses:      {kind:'real', detail:'InnoVint lab analyses'},
+  vessels:           {kind:'real', detail:'InnoVint vessel inventory'},
   solar:             {kind:'procedural', detail:'Simulated pyranometer + UV reading'},
   wind:              {kind:'procedural', detail:'Simulated weather-station reading'},
   irrigation_by_block:{kind:'procedural', detail:'Simulated flow-meter reading'},
@@ -1280,6 +1279,9 @@ function getDataSourceLabel(metricKey, vintage){
     ? `Regional weather data (Howell Mountain) · on-site sensors pending${s.detail?' · '+s.detail:''}`
     : `Regional weather data (Howell Mountain)${s.detail?' · '+s.detail:''}`;
   if(s.kind==='building') return `Simulated building sensor · on-site sensors pending${s.detail?' · '+s.detail:''}`;
+  if(s.kind==='sensor') return vintage===CURRENT
+    ? `Simulated ${s.detail} · on-site sensors pending`
+    : `Simulated ${s.detail}`;
   if(s.kind==='derived')  return `Derived metric · ${s.detail}`;
   return s.detail; // 'real' and 'procedural' are static, vintage-independent strings
 }
@@ -1385,8 +1387,9 @@ const PANELS = [
 {id:'precip', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Precipitation', unit:'inches',
  sub:(c)=>getDataSourceLabel('precipitation',c.primary), range:'1Y',
  info:"Rain late in the season is a double-edged read: it can relieve vine stress, but also dilutes sugars and raises rot and mildew risk on tight clusters close to harvest. A dry stretch before picking is generally preferred for concentration.",
- render: async (b,c) => {
+ render: async (b,c,unitEl) => {
    if(c.compare){
+     if(unitEl) unitEl.textContent='inches'; // one figure can't honestly summarize several vintages at once
      const series=await Promise.all(c.vintages.map(async v=>({v,
        s: await buildSeriesReal('precipitation','estate',v,c.range,{agg:'sum'})})));
      const groups=series[0].s.map((p,i)=>({lbl:p.lbl, v:series.map(x=>x.s[i].v||0)}));
@@ -1394,14 +1397,16 @@ const PANELS = [
      groupedBars(b,groups,series.map(x=>String(x.v)),series.map(x=>VCOLOR[x.v]),{unit:'in',dec:2,h:172});
    } else {
      const sets = await buildSeriesReal('precipitation','estate',c.primary,c.range,{agg:'sum'});
+     if(unitEl) unitEl.textContent='in · '+fmt(sets.reduce((s,p)=>s+(p.v||0),0),2)+' total';
      barChart(b, sets, {unit:'in',dec:2,color:'#7FA3D4',name:'Rain',h:172});
    }
  }},
 
 {id:'irrig', tab:'vineyard', sect:'soil', span:'s8', minRole:'operator', title:'Irrigation volume applied', unit:'gallons',
  sub:(c)=>getDataSourceLabel('irrigation_volume',c.primary), range:'30D',
- render: async (b,c) => {
+ render: async (b,c,unitEl) => {
    if(c.compare){
+     if(unitEl) unitEl.textContent='gallons'; // one figure can't honestly summarize several vintages at once
      const series=await Promise.all(c.vintages.map(async v=>({v,
        s: await sumSeriesReal('irrigation_volume', c.blocks, v, c.range, {agg:'sum'})})));
      const groups=series[0].s.map((p,i)=>({lbl:p.lbl, v:series.map(x=>x.s[i].v||0)}));
@@ -1410,6 +1415,7 @@ const PANELS = [
        series.map(x=>VCOLOR[x.v]),{unit:'gal',dec:0,h:190});
    } else {
      const sets = await sumSeriesReal('irrigation_volume', c.blocks, c.primary, c.range, {agg:'sum'});
+     if(unitEl) unitEl.textContent='gal · '+fmt(sets.reduce((s,p)=>s+(p.v||0),0)/acresOf(c.blocks),0)+'/ac';
      barChart(b, sets, {unit:'gal',dec:0,color:'#7FA3D4',name:'Applied',h:190});
    }
  }},
@@ -1434,7 +1440,7 @@ const PANELS = [
 
 /* ══ VINEYARD · LABOUR ══ */
 {id:'labhours', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour hours by operation', unit:'hours',
- sub:(c)=>getDataSourceLabel('labour',c.primary)+' · selected blocks, season to date',
+ sub:(c)=>getDataSourceLabel('labour',c.primary)+' · selected blocks',
  render:(b,c)=>{
    if(c.compare){
      const groups=OPS.map(o=>({lbl:o.op, v:c.vintages.map(v=>
@@ -1448,7 +1454,7 @@ const PANELS = [
        {unit:'hrs',dec:0,name:'Hours',h:206});}}},
 
 {id:'labcost', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour cost by block', unit:'USD · USD/acre',
- sub:(c)=>getDataSourceLabel('labour',c.primary)+' · selected blocks, season to date',
+ sub:(c)=>getDataSourceLabel('labour',c.primary)+' · selected blocks',
  render:(b,c)=>{
    const v=c.primary; let tc=0, th=0;
    const rows=c.blocks.map(id=>{
@@ -1466,7 +1472,7 @@ const PANELS = [
 
 /* ══ WINERY · CELLAR ══ */
 {id:'cellart', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar temperature', unit:'°F',
- sub:(c)=>getDataSourceLabel('cellar_temp',c.primary)+' · target 55–58 °F', range:'5D',
+ sub:(c)=>getDataSourceLabel('cellar_temp',c.primary), range:'5D',
  rangeOptions:['1D','5D','30D'],
  info:"Barrel room temperature drives the pace of elevage: malolactic activity, oxygen ingress through the barrel, and how fast the wine integrates oak. Sustained drift outside the 55–58°F target shows up later as inconsistency across lots aging side by side.",
  render: async (b,c) => {
@@ -1477,7 +1483,7 @@ const PANELS = [
  }},
 
 {id:'cellarh', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar humidity', unit:'%',
- sub:(c)=>getDataSourceLabel('cellar_rh',c.primary)+' · target 68–78 %', range:'30D',
+ sub:(c)=>getDataSourceLabel('cellar_rh',c.primary), range:'30D',
  rangeOptions:['1D','5D','30D'],
  info:"Barrel room humidity controls evaporative loss (the angels share) and barrel integrity. Too dry and barrels lose volume faster, concentrating the wine and increasing topping frequency; too humid and mold risk on barrel exteriors rises.",
  render: async (b,c) => {
@@ -2483,8 +2489,10 @@ function makePanel(p, c){
   panel.appendChild(hd);
   const body=el('div','p-body'+(p.id==='map'?' mapbody':''));
   panel.appendChild(body);
+  const unitEl=hd.querySelector('.p-unit'); // passed to render() so a panel can
+    // show a computed figure (e.g. "gal · 1,234/ac") instead of a static unit
   return {panel, body, run: async ()=>{
-    try{ await p.render(body,{...c, range:state.range[p.id]||'5D'}); }
+    try{ await p.render(body,{...c, range:state.range[p.id]||'5D'}, unitEl); }
     catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); }
   }};
 }
@@ -2520,8 +2528,7 @@ async function renderTab(tab){
     pending.push(()=>paintOverviewV('vineyard',c));
 
     if(isOperator){
-      const an=makePanel({id:'anom-v', title:'Anomalies & risks', unit:'rule-based',
-        sub:'Evaluated against the current readings',
+      const an=makePanel({id:'anom-v', title:'Insights and Anomalies', unit:'rule-based',
         render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c);
       right.appendChild(an.panel); pending.push(an.run);
     }
@@ -2534,8 +2541,7 @@ async function renderTab(tab){
     pending.push(()=>paintOverviewW());
 
     if(isOperator){
-      const an=makePanel({id:'anom-w', title:'Anomalies & risks', unit:'rule-based',
-        sub:'Simulated building sensor · cellar limits and tank ceilings',
+      const an=makePanel({id:'anom-w', title:'Insights and Anomalies', unit:'rule-based',
         render:(b,cc)=>renderAnomalies(b,cc,'winery')}, c);
       right.appendChild(an.panel); pending.push(an.run);
     }

@@ -2679,10 +2679,6 @@ function addMsg(who, html){
 function renderReply(text){
   return text.split(/\n{2,}/).map(p=>`<p>${escapeHtml(p).replace(/\n/g,'<br>')}</p>`).join('');
 }
-function resolveDisplayName(role, fullName){
-  if(!fullName || !fullName.trim()) return null;
-  return role==='operator' ? fullName.trim().split(/\s+/)[0] : fullName.trim();
-}
 
 function setChipsExpanded(expanded){
   chipsExpanded = expanded;
@@ -2782,15 +2778,17 @@ const CUSTOMER_SUGGESTIONS = [
 // id actually changes (see runSessionGate) -- NOT on every auth event, so a
 // background token refresh for the same user doesn't wipe an in-progress
 // conversation.
-async function initChat(){
+async function initChat(session, role){
   chatHistory = [];
   LOG.innerHTML = '';
 
-  const [role, profileRes] = await Promise.all([
-    getCurrentUserRole(),
-    sb.from('user_profiles').select('full_name').maybeSingle()
-  ]);
-  const name = resolveDisplayName(role, profileRes?.data?.full_name ?? null);
+  // Same source/fallback chain as updateHeaderForSession(), so the greeting
+  // and the header avatar/menu never disagree on who's signed in.
+  const { data: profile } = await sb.from('user_profiles').select('full_name').eq('id', session.user.id).single();
+  const displayName = profile?.full_name
+    || session.user.user_metadata?.full_name || session.user.user_metadata?.name
+    || session.user.email;
+  const firstName = escapeHtml(displayName.trim().split(/\s+/)[0]);
 
   let groups;
   if(role==='operator'){
@@ -2802,11 +2800,16 @@ async function initChat(){
   renderChipPanel(groups);
   setChipsExpanded(true);
 
-  const greetingLead = role==='operator'
-    ? (name ? `${name} &mdash; what can I help you find?` : 'What can I help you find?')
-    : (name ? `Welcome back, ${name} &mdash; how can I help with your Mars Estate wine today?` : 'Welcome &mdash; how can I help with your Mars Estate wine today?');
-  addMsg('a',`<p>${greetingLead}</p>
-  <p>I can help with Mars Estate's vineyard and winery data &mdash; climate, soil, anomalies${role==='operator'?', lab analyses, tanks, and labour':''} &mdash; for any block and vintage from 2022.</p>`);
+  // Two synthetic bubbles, split right after the salutation -- neither
+  // touches chatHistory (addMsg is purely a DOM render), so this has no
+  // effect on the backend's role-alternation or the chip-collapse logic,
+  // both of which key off ask() being called, not message count.
+  addMsg('a', `<p>Hi ${firstName},</p>`);
+  addMsg('a', role==='operator'
+    ? `<p>I'm the Mars Telemetry AI assistant. I can draw on real vineyard and winery data across climate, soil, lab analyses, tanks, anomalies, and labor for any block and vintage since 2022. I can also surface insights and inferences across those data types together.</p>
+       <p>Ask me anything specific, or start with one of the suggestions below.</p>`
+    : `<p>Welcome to Mars Telemetry. I'm your AI assistant, and I'm here to help you understand the story behind your wine. I can share how the vineyard has fared this season, what the growing conditions have meant for the fruit, and what to expect as this vintage comes together.</p>
+       <p>Please feel free to begin with one of the suggestions below, or simply share what you would like to know.</p>`);
 }
 
 /* §9 ── AUTH VIEW (Phase 6.1 — view + logic only; no session gate yet) ── */
@@ -3020,7 +3023,7 @@ async function runSessionGate(){
   _userRolePromise=null; /* always re-check fresh, not a stale cached role from a prior session */
   const role = await getCurrentUserRole();
   if(role==='pending' || role===null){ showPendingOnly(); return; }
-  if(session.user.id !== chatUserId){ chatUserId = session.user.id; initChat(); }
+  if(session.user.id !== chatUserId){ chatUserId = session.user.id; initChat(session, role); }
   await updateHeaderForSession(session, role);
   showDashboard();
 }

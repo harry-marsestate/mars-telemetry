@@ -177,3 +177,33 @@ RULE: any new unfiltered/large-table select needs either an explicit
 `.range()` loop (see `fetchAllRows`) or a hard justification for why the
 result is guaranteed to stay under 1000 rows - "it always has so far" is
 not that justification, per this exact incident.
+
+## anomalies_eval()'s latest_sensor DISTINCT ON key doesn't include sensor_id - a real reading can silently mask synthetic test data
+
+`latest_sensor`'s `distinct on (metric_key, coalesce(block_id,''),
+coalesce(tank_id,''))` picks one row per (metric, scope) at or before
+p_as_of, ordered by `recorded_at desc`. `sensor_id` is not part of that
+key. A synthetic reading inserted for testing (e.g. to prove a rule fires
+on a specific value) that shares its exact `recorded_at` with a real
+seed-data reading for the same metric/scope ties in that ordering, and
+Postgres does not guarantee which row of the tie `DISTINCT ON` keeps - it
+can silently be the real reading, not the synthetic one.
+
+This surfaced concretely testing `frost_risk`'s `valid_to_doy` gate (Phase
+12 Step 6): a synthetic 30°F reading inserted at `2022-05-10T06:00:00Z`,
+the same timestamp as a real 57.93°F seed reading, produced "0 rows" from
+`anomalies_eval()` - read at first glance as "the rule doesn't fire,"
+when the actual cause was the tie picking the real warm reading over the
+synthetic cold one. Using a distinct `sensor_id` did NOT fix this, since
+`sensor_id` isn't in the dedup key at all - only moving `recorded_at` off
+the real seed grid (a regular 3-hour `:00` grid) resolved it.
+
+RULE: any synthetic/adversarial test reading inserted into
+`sensor_readings` for verification (inside a transaction, rolled back
+after) must use a `recorded_at` that does not coincide with any real
+reading for the same `(metric_key, block_id, tank_id)` - an off-grid
+minute offset (e.g. `:07` past the hour, not `:00`) is sufficient given
+the seed data's regular cadence. A distinct `sensor_id` alone is not
+enough. A "0 rows" / "doesn't fire" result during such a test should be
+treated as ambiguous until this is checked, not taken as proof the code
+path was actually exercised.

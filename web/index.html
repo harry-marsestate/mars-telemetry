@@ -1290,7 +1290,10 @@ const PANELS = [
 /* ══ VINEYARD · CLIMATE ══ */
 {id:'airtemp', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Air temperature', unit:'°F',
  sub:(c)=>getDataSourceLabel('air_temp',c.primary), range:'5D',
- info:"Higher temperatures speed sugar accumulation and phenolic ripening, but above roughly 95°F photosynthesis slows and sunburn risk rises on exposed fruit. Below the 50°F growing threshold the vine is essentially dormant for the day. Read alongside GDD for the season-long picture.",
+ info:(th)=>{
+   const t = interpolateThreshold(th?.byKey.get('air_temp_high'), th?.byKey)?.threshold ?? 92;
+   return `Higher temperatures speed sugar accumulation and phenolic ripening, but above roughly ${t}°F photosynthesis slows and sunburn risk rises on exposed fruit. Below the 50°F growing threshold the vine is essentially dormant for the day. Read alongside GDD for the season-long picture.`;
+ },
  render: async (b,c) => {
    const sets = await vSets(c, {metric:'air_temp', scope:'estate'}, METRICS.airTemp.color, 'Air temp');
    lineChart(b, sets, {unit:'°F',dec:1,h:186,aria:'Air temperature over time'});
@@ -1321,7 +1324,10 @@ const PANELS = [
 
 {id:'rh', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Relative humidity', unit:'%',
  sub:(c)=>getDataSourceLabel('humidity',c.primary), range:'1D',
- info:"Humidity above roughly 85% raises mildew pressure, especially with warm nights. Low humidity accelerates vine water loss and can worsen stress during heat spikes. Read alongside VPD for the fuller picture of vine stress.",
+ info:(th)=>{
+   const t = interpolateThreshold(th?.byKey.get('humidity_high'), th?.byKey)?.threshold ?? 88;
+   return `Humidity above roughly ${t}% raises mildew pressure, especially with warm nights. Low humidity accelerates vine water loss and can worsen stress during heat spikes. Read alongside VPD for the fuller picture of vine stress.`;
+ },
  render: async (b,c) => {
    const sets = await vSets(c, {metric:'humidity', scope:'estate'}, METRICS.humidity.color, 'RH');
    lineChart(b, sets, {unit:'%',dec:0,h:172});
@@ -1329,7 +1335,10 @@ const PANELS = [
 
 {id:'wind', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Wind speed & direction', unit:'mph · degrees',
  sub:(c)=>getDataSourceLabel('wind',c.primary),
- info:"Sustained wind above about 22 mph creates spray drift risk and can damage young shoots and exposed clusters. Below that, moderate airflow is beneficial: it dries the canopy after rain or irrigation and reduces mildew pressure.",
+ info:(th)=>{
+   const t = interpolateThreshold(th?.byKey.get('wind_high'), th?.byKey)?.threshold ?? 22;
+   return `Sustained wind above about ${t} mph creates spray drift risk and can damage young shoots and exposed clusters. Below that, moderate airflow is beneficial: it dries the canopy after rain or irrigation and reduces mildew pressure.`;
+ },
  render:(b,c)=>renderWind(b,c)},
 
 {id:'solar', tab:'vineyard', sect:'climate', span:'s12', minRole:'all', title:'Solar insolation & UV', unit:'W/m² · UV index',
@@ -1342,12 +1351,16 @@ const PANELS = [
  sub:(c)=>getDataSourceLabel('soil_moisture',c.primary), range:'30D', perBlock:'soilMoist',
  info:"Percent of soil volume held as water at 18 inches, where most feeder roots sit. The shaded band is the deficit-irrigation target, deliberately kept below field capacity to concentrate flavor and manage canopy vigor — not a sign of stress unless it drops well under the band.",
  render: async (b,c) => {
+   const th = await getThresholds();
+   const row = interpolateThreshold(th.byKey.get('soil_below_refill'), th.byKey);
+   const lo = row?.threshold ?? 15, hi = 25; // hi: no DB row -- field-capacity gap, Step 1
+   const label = row?.display_label ?? `Target ${lo}–${hi} % VWC`;
    const sets = c.compare
      ? await vSets(c, {metric:'soil_moisture', blocks:c.blocks}, null, 'mean of selection')
      : await Promise.all(c.blocks.map(async id=>({name:B(id).label,color:B(id).color,
          pts: await buildSeriesReal('soil_moisture', id, c.primary, c.range)})));
-   legendFor(b.parentElement,[...sets,{name:'Target 15–25 % VWC',color:'#6E9B72',band:true}]);
-   lineChart(b,sets,{unit:'% VWC',dec:1,h:196,band:[15,25],bandColor:'#6E9B72',bandLabel:'Target band'});
+   legendFor(b.parentElement,[...sets,{name:label,color:'#6E9B72',band:true}]);
+   lineChart(b,sets,{unit:'% VWC',dec:1,h:196,band:[lo,hi],bandColor:'#6E9B72',bandLabel:'Target band'});
  }},
 
 {id:'soiltemp', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Soil temperature', unit:'°F',
@@ -1364,14 +1377,21 @@ const PANELS = [
 
 {id:'vpd', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Vapour pressure deficit', unit:'kPa',
  sub:(c)=>getDataSourceLabel('vpd_kpa',c.primary), range:'5D',
- info:"Vapour pressure deficit measures how strongly the air pulls moisture from the leaf — a stronger driver of vine water stress than temperature alone. Above roughly 3.1 kPa the vine starts closing stomata to conserve water, which also slows photosynthesis and ripening.",
+ info:(th)=>{
+   const t = interpolateThreshold(th?.byKey.get('vpd_high'), th?.byKey)?.threshold ?? 3.1;
+   return `Vapour pressure deficit measures how strongly the air pulls moisture from the leaf — a stronger driver of vine water stress than temperature alone. Above roughly ${t} kPa the vine starts closing stomata to conserve water, which also slows photosynthesis and ripening.`;
+ },
  render: async (b,c) => {
+   const th = await getThresholds();
+   const row = interpolateThreshold(th.byKey.get('vpd_high'), th.byKey);
+   const hi = row?.threshold ?? 3.1, lo = 0.4; // lo: no DB row -- same gap
+   const label = row?.display_label ?? `Productive band ${lo}–${hi} kPa`;
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
          pts: await buildDerivedSeriesReal('vpd_kpa', v, c.range)})))
      : [{name:'VPD', color:'#C9603F', pts: await buildDerivedSeriesReal('vpd_kpa', c.primary, c.range)}];
-   legendFor(b.parentElement,[...sets,{name:'Productive band 0.4–3.1 kPa',color:'#6E9B72',band:true}]);
-   lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[0.4,3.1],bandColor:'#6E9B72'});}},
+   legendFor(b.parentElement,[...sets,{name:label,color:'#6E9B72',band:true}]);
+   lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[lo,hi],bandColor:'#6E9B72'});}},
 
 {id:'et0', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Reference ET (ET₀)', unit:'in / day',
  sub:(c)=>getDataSourceLabel('et0_in',c.primary), range:'30D',
@@ -1474,12 +1494,20 @@ const PANELS = [
 {id:'cellart', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar temperature', unit:'°F',
  sub:(c)=>getDataSourceLabel('cellar_temp',c.primary), range:'5D',
  rangeOptions:['1D','5D','30D'],
- info:"Barrel room temperature drives the pace of elevage: malolactic activity, oxygen ingress through the barrel, and how fast the wine integrates oak. Sustained drift outside the 55–58°F target shows up later as inconsistency across lots aging side by side.",
+ info:(th)=>{
+   const row = interpolateThreshold(th?.byKey.get('cellar_temp_high'), th?.byKey);
+   const lo = row?.low ?? 55, hi = row?.high ?? 58;
+   return `Barrel room temperature drives the pace of elevage: malolactic activity, oxygen ingress through the barrel, and how fast the wine integrates oak. Sustained drift outside the ${lo}–${hi}°F target shows up later as inconsistency across lots aging side by side.`;
+ },
  render: async (b,c) => {
+   const th = await getThresholds();
+   const row = interpolateThreshold(th.byKey.get('cellar_temp_high'), th.byKey);
+   const lo = row?.low ?? 55, hi = row?.high ?? 58;
+   const label = row?.display_label ?? `Target ${lo}–${hi} °F`;
    const sets=[{name:'Cellar',color:METRICS.cellar.color,
      pts: await buildSeriesReal('cellar_temp','cellar',CURRENT,c.range)}];
-   legendFor(b.parentElement,[...sets,{name:'Target 55–58 °F',color:'#6E9B72',band:true}]);
-   lineChart(b,sets,{unit:'°F',dec:1,h:186,band:[55,58],bandColor:'#6E9B72',bandLabel:'Target'});
+   legendFor(b.parentElement,[...sets,{name:label,color:'#6E9B72',band:true}]);
+   lineChart(b,sets,{unit:'°F',dec:1,h:186,band:[lo,hi],bandColor:'#6E9B72',bandLabel:'Target'});
  }},
 
 {id:'cellarh', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar humidity', unit:'%',
@@ -1487,10 +1515,14 @@ const PANELS = [
  rangeOptions:['1D','5D','30D'],
  info:"Barrel room humidity controls evaporative loss (the angels share) and barrel integrity. Too dry and barrels lose volume faster, concentrating the wine and increasing topping frequency; too humid and mold risk on barrel exteriors rises.",
  render: async (b,c) => {
+   const th = await getThresholds();
+   const row = interpolateThreshold(th.byKey.get('cellar_rh_high'), th.byKey);
+   const lo = row?.low ?? 68, hi = row?.high ?? 78;
+   const label = row?.display_label ?? `Target ${lo}–${hi} %`;
    const sets=[{name:'Cellar RH',color:METRICS.cellarRH.color,
      pts: await buildSeriesReal('cellar_rh','cellar',CURRENT,c.range)}];
-   legendFor(b.parentElement,[...sets,{name:'Target 68–78 %',color:'#6E9B72',band:true}]);
-   lineChart(b,sets,{unit:'%',dec:0,h:186,band:[68,78],bandColor:'#6E9B72',bandLabel:'Target'});
+   legendFor(b.parentElement,[...sets,{name:label,color:'#6E9B72',band:true}]);
+   lineChart(b,sets,{unit:'%',dec:0,h:186,band:[lo,hi],bandColor:'#6E9B72',bandLabel:'Target'});
  }},
 
 /* ══ WINERY · FERMENTATION ══ */
@@ -1818,6 +1850,54 @@ function getChartEligibleTypes(){
   return chartEligibleTypesPromise;
 }
 
+// One-time cache of anomaly_thresholds, mirroring getChartEligibleTypes
+// above. Table has no `id` column (rule_key is the PK) and is tiny (13
+// rows), so this is a plain select, not fetchAllRows -- fetchAllRows'
+// id-ordered .range() pagination would be wrong here, not just unneeded.
+async function fetchThresholds(){
+  const { data, error } = await sb.from('anomaly_thresholds')
+    .select('rule_key, tab, severity, metric_key, operator, threshold, rule_group, display_label, tooltip_phrase, action_line, enabled');
+  if(error) throw error;
+  const byKey = new Map(data.map(r=>[r.rule_key, r]));
+  const byMetric = new Map();
+  data.forEach(r=>{
+    const k = r.metric_key+'|'+r.tab;
+    if(!byMetric.has(k)) byMetric.set(k, []);
+    byMetric.get(k).push(r);
+  });
+  return { byKey, byMetric };
+}
+let thresholdsPromise = null;
+function getThresholds(){
+  if(!thresholdsPromise) thresholdsPromise = fetchThresholds();
+  return thresholdsPromise;
+}
+// Synchronous mirror for call sites that can't await (info-tooltip hover
+// handlers, updateVineyardTile's live-poll redraw). Kicked off immediately
+// at parse time so it's warm well before a user can hover anything or a
+// realtime tick fires. Every reader below treats THRESHOLDS as possibly
+// still null and falls back to the pre-consolidation literal.
+let THRESHOLDS = null;
+getThresholds().then(t => { THRESHOLDS = t; }).catch(e => console.error('getThresholds failed:', e));
+
+// Resolves {threshold}/{threshold_low}/{threshold_high} tokens per the
+// convention documented in the Step 1 migration: lt-row supplies _low,
+// gt-row supplies _high, matched via rule_group. Returns null for a
+// missing row so callers can `row?.threshold ?? fallback`.
+function interpolateThreshold(row, byKey){
+  if(!row) return null;
+  const sibling = row.rule_group
+    ? [...byKey.values()].find(r=>r.rule_group===row.rule_group && r.rule_key!==row.rule_key)
+    : null;
+  const low  = row.operator==='lt' ? row.threshold : sibling?.threshold;
+  const high = row.operator==='gt' ? row.threshold : sibling?.threshold;
+  const sub = s => s==null ? s : s
+    .replace(/\{threshold_low\}/g, low)
+    .replace(/\{threshold_high\}/g, high)
+    .replace(/\{threshold\}/g, row.threshold);
+  return { ...row, low, high, tooltip_phrase: sub(row.tooltip_phrase), display_label: sub(row.display_label) };
+}
+
 async function fetchAnalysisLots(){
   const data = await fetchAllRows('lot_analyses', 'lot_id, lot_name, lot_code');
   const seen=new Map();
@@ -2014,56 +2094,35 @@ function renderFruit(box, ctx){
 
 /* ── Anomalies & risks ── */
 const RULES = [
-  {tab:'vineyard', sev:'alert', test:c=>{
-     const low=c.blocks.map(id=>({id,v:sample('soilMoist',id,c.end,c.primary)})).filter(x=>x.v<15);
-     return low.length && {t:'Soil moisture below refill point',
-       d:`${low.map(x=>B(x.id).label+' at '+fmt(x.v,1)+'%').join(', ')} — under the 15 % VWC floor for deficit irrigation on these volcanic soils.`,
-       m:'Action · schedule an irrigation set within 48 h'};}},
-  {tab:'vineyard', sev:'alert', test:c=>{
-     const t=sample('airTemp','estate',c.end,c.primary);
-     return t>95 && {t:'Heat spike',
-       d:`Station reading ${fmt(t,1)} °F. Sustained temperatures above 95 °F sunburn exposed fruit on the west-facing rows.`,
-       m:'Action · check Block 3 and the Block 1 margins'};}},
-  {tab:'vineyard', sev:'warn', test:c=>{
-     const v=vpdAt('estate',c.end,c.primary);
-     return v>3.1 && {t:'Elevated vapour pressure deficit',
-       d:`VPD at ${fmt(v,2)} kPa. Beyond roughly 3 kPa stomata close and ripening stalls even in full sun.`,
-       m:'Watch · reassess at 16:00'};}},
-  {tab:'vineyard', sev:'warn', test:c=>{
-     const t=sample('airTemp','estate',c.end,c.primary);
-     return t<34 && doy(c.end)<130 && {t:'Frost risk',
-       d:`Station reading ${fmt(t,1)} °F inside the budbreak window. Cold air pools in the lower rows of Block 3.`,
-       m:'Action · frost watch overnight'};}},
-  {tab:'vineyard', sev:'warn', test:c=>{
-     const d=dtrAt('estate',c.end,c.primary);
-     return d<21 && {t:'Compressed diurnal range',
-       d:`Daily swing ${fmt(d,1)} °F against the 25 °F typical here. Warm nights push sugar ahead of phenolic ripeness.`,
-       m:'Watch · monitor the Brix–pH gap'};}},
-  {tab:'vineyard', sev:'warn', test:c=>{
-     const h=sample('humidity','estate',c.end,c.primary);
-     return h>88 && {t:'Sustained high humidity',
-       d:`RH at ${fmt(h,0)} %. Prolonged canopy wetness raises powdery mildew pressure, worst in the denser Block 1 rows.`,
-       m:'Watch · review the spray interval'};}},
-  {tab:'vineyard', sev:'warn', test:c=>{
-     const w=sample('wind','estate',c.end,c.primary);
-     return w>22 && {t:'High wind',
-       d:`Sustained ${fmt(w,1)} mph. Shoot damage and spray drift risk across the exposed ridge.`,
-       m:'Action · suspend spraying'};}},
-  {tab:'vineyard', sev:'note', test:c=>{
-     let worst=null;
-     c.blocks.forEach(id=>{
-       let gap=0;
-       for(let d=new Date(c.end); d>new Date(c.primary,4,1); d.setDate(d.getDate()-1)){
-         if(irrigDay(id,new Date(d),c.primary)>0) break; gap++;}
-       if(!worst||gap>worst.gap) worst={id,gap};});
-     return worst && worst.gap>=7 && {t:'Irrigation interval lengthening',
-       d:`${B(worst.id).label} has gone ${worst.gap} days since the last recorded set. The cycle here runs 7–10 days through July.`,
-       m:'Note · next set likely due this week'};}},
-  {tab:'vineyard', sev:'note', test:c=>{
-     const g=gddTo(c.end,c.primary);
-     return g>1800 && g<HARVEST_BAND[0] && {t:'Veraison window',
-       d:`At ${fmt(g,0)} GDD the estate is between veraison and the ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD picking band. Block 1 sits highest and colours first.`,
-       m:'Note · begin berry sampling in Block 1'};}},
+  // The 9 tab:'vineyard' rule entries formerly here were deleted in Phase 12
+  // Step 3 as dead code: renderAnomalies's 'vineyard' branch (below) is
+  // RPC-only with no RULES fallback, and the plain-RULES `else` branch is
+  // unreachable -- no caller ever passes a tab besides 'vineyard'/'winery'.
+  // 5 of the 9 duplicated rules already live via anomalies_eval RPC (soil
+  // moisture, VPD, humidity, wind, DTR) and needed no preservation. The
+  // other 4 have no RPC/DB equivalent and their logic would otherwise be
+  // lost to git archaeology -- kept here for a future revival:
+  //
+  // Heat spike (alert): air_temp@estate > 95°F -> "Sustained temperatures
+  //   above 95°F sunburn exposed fruit on the west-facing rows."
+  //   Action · check Block 3 and the Block 1 margins.
+  //   (Note: superseded in spirit by air_temp_high=92 added this same
+  //   step, but that row is a *different* rule shape -- a soft seasonal-
+  //   norm comparison, not a sunburn alert. Reviving this would need its
+  //   own rule_key/row, not a reuse of air_temp_high.)
+  // Frost risk (warn): air_temp@estate < 34°F AND day-of-year < 130 ->
+  //   "Station reading inside the budbreak window. Cold air pools in the
+  //   lower rows of Block 3." Action · frost watch overnight.
+  // Irrigation interval lengthening (note): per-block, walk back from the
+  //   period end counting days since the last recorded irrigation event;
+  //   flag if the gap >= 7 days. "The cycle here runs 7-10 days through
+  //   July." Note · next set likely due this week.
+  //   (Not threshold-table-shaped: no metric_key, derived from event gaps.)
+  // Veraison window (note): cumulative GDD > 1800 AND < HARVEST_BAND[0]
+  //   (3000) -> "Between veraison and the picking band. Block 1 sits
+  //   highest and colours first." Note · begin berry sampling in Block 1.
+  //   (Uses HARVEST_BAND, an informational range, not a breach threshold
+  //   -- doesn't fit anomaly_thresholds' single-operator row shape either.)
   {tab:'winery', sev:'alert', test:c=>{
      const hot=TANKS.filter(t=>c.blocks.includes(t.blk)).map(t=>({t,v:tankTemp(t,c.end,c.primary)}))
        .filter(x=>x.v!=null&&x.v>88);
@@ -2289,7 +2348,7 @@ async function getSeasonalNorm(metric, scope, anchorDate){
   };
 }
 
-function formatVineyardTiles(cur, prev, other){
+function formatVineyardTiles(cur, prev, other, th){
   const delta = (now, key) => {
     if(prev==null || now==null || prev[key]==null) return null;
     const dd=now-prev[key];
@@ -2297,26 +2356,31 @@ function formatVineyardTiles(cur, prev, other){
   };
   const {t, sm, dry, g, vp, dt, rh, norm} = cur;
   const dT=delta(t,'t'), dG=delta(g,'g'), dS=delta(sm,'sm');
+  const tAir   = th?.byKey.get('air_temp_high')?.threshold ?? 92;
+  const tHumid = th?.byKey.get('humidity_high')?.threshold ?? 88;
+  const tSoil  = th?.byKey.get('soil_below_refill')?.threshold ?? 15;
+  const tVpd   = th?.byKey.get('vpd_high')?.threshold ?? 3.1;
+  const tDtr   = th?.byKey.get('dtr_low')?.threshold ?? 21;
   return [
     {key:'t', l:'Air temperature · hourly', v:fmt(t,1), u:'°F',
-      d: dT ? dT.txt : (t==null ? '—' : (t>92?'above seasonal norm':
+      d: dT ? dT.txt : (t==null ? '—' : (t>tAir?'above seasonal norm':
           (norm?.value!=null ? `avg of ${norm.vintageCount} prior season${norm.vintageCount===1?'':'s'} ${fmt(norm.value,0)} °F` : '—'))),
-      c: dT ? (dT.up?'wr':'up') : (t==null ? '' : (t>92?'dn':''))},
+      c: dT ? (dT.up?'wr':'up') : (t==null ? '' : (t>tAir?'dn':''))},
     {key:'rh', l:'Relative humidity · hourly', v:fmt(rh,0), u:'%',
-      d: rh==null ? '—' : (rh>85?'mildew pressure':'normal'),
-      c: rh==null ? '' : (rh>85?'wr':'')},
+      d: rh==null ? '—' : (rh>tHumid?'mildew pressure':'normal'),
+      c: rh==null ? '' : (rh>tHumid?'wr':'')},
     {key:'g', l:'GDD to date', v:fmt(g,0), u:'',
       d: dG ? dG.txt : 'base 50 °F from 1 Apr',
       c: dG ? (dG.up?'wr':'up') : ''},
     {key:'sm', l:'Soil moisture, avg · hourly', v:fmt(sm,1), u:'% VWC',
       d: dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—'),
-      c: sm==null ? '' : (sm<15?'dn':'')},
+      c: sm==null ? '' : (sm<tSoil?'dn':'')},
     {key:'vp', l:'VPD', v:fmt(vp,2), u:'kPa',
-      d: vp==null ? '—' : (vp>3.1?'high vine stress':'within range'),
-      c: vp==null ? '' : (vp>3.1?'wr':'up')},
+      d: vp==null ? '—' : (vp>tVpd?'high vine stress':'within range'),
+      c: vp==null ? '' : (vp>tVpd?'wr':'up')},
     {key:'dt', l:'Diurnal range', v:fmt(dt,1), u:'°F',
-      d: dt==null ? '—' : (dt>=21?'good acid retention':'compressed'),
-      c: dt==null ? '' : (dt>=21?'up':'wr')}
+      d: dt==null ? '—' : (dt>=tDtr?'good acid retention':'compressed'),
+      c: dt==null ? '' : (dt>=tDtr?'up':'wr')}
   ];
 }
 
@@ -2324,6 +2388,7 @@ async function overviewStats(tab, c){
   if(tab!=='vineyard') return null;
   const v=c.primary, ids=c.blocks;
   const other = c.compare ? c.vintages.find(x=>x!==v) : null;
+  const th = await getThresholds();
 
   async function vineyardSnapshot(vv){
     const [t, soilByBlock, g, vp, dt, rh] = await Promise.all([
@@ -2337,7 +2402,8 @@ async function overviewStats(tab, c){
     const valid = soilByBlock.filter(b=>b.v!=null);
     const sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
     const dry = valid.length ? [...valid].sort((a,b)=>a.v-b.v)[0] : null;
-    const norm = (t!=null && t<=92) ? await getSeasonalNorm('air_temp','estate', endOfReal(vv)) : null;
+    const tAir = th.byKey.get('air_temp_high')?.threshold ?? 92;
+    const norm = (t!=null && t<=tAir) ? await getSeasonalNorm('air_temp','estate', endOfReal(vv)) : null;
     return {t, soilByBlock, sm, dry, g, vp, dt, rh, norm};
   }
 
@@ -2351,16 +2417,16 @@ async function overviewStats(tab, c){
      compare mode too: cur updates live, prev (the archived comparison
      vintage) stays fixed, formatVineyardTiles recomputes the delta from
      the same cached prev each time. */
-  vineyardOverviewCache = (v===CURRENT) ? {ids, cur, prev, other} : null;
+  vineyardOverviewCache = (v===CURRENT) ? {ids, cur, prev, other, th} : null;
 
-  return formatVineyardTiles(cur, prev, other);
+  return formatVineyardTiles(cur, prev, other, th);
 }
 
 function updateVineyardTile(key){
   if(!vineyardOverviewCache) return;
   const grid=$('#ovg-vineyard'); if(!grid) return;
-  const {cur, prev, other} = vineyardOverviewCache;
-  const tile = formatVineyardTiles(cur, prev, other).find(t=>t.key===key);
+  const {cur, prev, other, th} = vineyardOverviewCache;
+  const tile = formatVineyardTiles(cur, prev, other, th).find(t=>t.key===key);
   const node = tile && grid.querySelector(`.stat[data-key="${key}"]`);
   if(!node) return;
   const valEl=node.querySelector('.stat-v'), descEl=node.querySelector('.stat-d');
@@ -2472,10 +2538,11 @@ function makePanel(p, c){
   hd.innerHTML=`<div class="p-hl"><div class="p-ttl-row"><span class="p-ttl">${p.title}</span>${p.unit?`<span class="p-unit">${p.unit}</span>`:''}</div>
     ${subText?`<div class="p-sub">${subText}</div>`:''}</div>`;
   if(p.info){
+    const infoText = typeof p.info==='function' ? p.info(THRESHOLDS) : p.info;
     const ic=el('button','info-ic','i');
     ic.setAttribute('aria-label','About this reading');
-    ic.onmouseenter=e=>showTip(e.clientX,e.clientY,p.info,{wide:true});
-    ic.onmousemove=e=>showTip(e.clientX,e.clientY,p.info,{wide:true});
+    ic.onmouseenter=e=>showTip(e.clientX,e.clientY,infoText,{wide:true});
+    ic.onmousemove=e=>showTip(e.clientX,e.clientY,infoText,{wide:true});
     ic.onmouseleave=hideTip;
     hd.querySelector('.p-ttl-row').appendChild(ic);
   }

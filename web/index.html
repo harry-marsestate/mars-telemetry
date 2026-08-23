@@ -2800,16 +2800,17 @@ async function initChat(session, role){
   renderChipPanel(groups);
   setChipsExpanded(true);
 
-  // Two synthetic bubbles, split right after the salutation -- neither
-  // touches chatHistory (addMsg is purely a DOM render), so this has no
-  // effect on the backend's role-alternation or the chip-collapse logic,
-  // both of which key off ask() being called, not message count.
-  addMsg('a', `<p>Hi ${firstName},</p>`);
-  addMsg('a', role==='operator'
+  // One bubble, multiple <p> tags -- same convention renderReply() uses for
+  // every real LLM reply (split on paragraph breaks, not <br>). Doesn't
+  // touch chatHistory (addMsg is purely a DOM render either way), so this
+  // has no effect on the backend's role-alternation or the chip-collapse
+  // logic, both of which key off ask() being called, not message count.
+  const body = role==='operator'
     ? `<p>I'm the Mars Telemetry AI assistant. I can draw on real vineyard and winery data across climate, soil, lab analyses, tanks, anomalies, and labor for any block and vintage since 2022. I can also surface insights and inferences across those data types together.</p>
        <p>Ask me anything specific, or start with one of the suggestions below.</p>`
     : `<p>Welcome to Mars Telemetry. I'm your AI assistant, and I'm here to help you understand the story behind your wine. I can share how the vineyard has fared this season, what the growing conditions have meant for the fruit, and what to expect as this vintage comes together.</p>
-       <p>Please feel free to begin with one of the suggestions below, or simply share what you would like to know.</p>`);
+       <p>Please feel free to begin with one of the suggestions below, or simply share what you would like to know.</p>`;
+  addMsg('a', `<p>Hi ${firstName},</p>${body}`);
 }
 
 /* §9 ── AUTH VIEW (Phase 6.1 — view + logic only; no session gate yet) ── */

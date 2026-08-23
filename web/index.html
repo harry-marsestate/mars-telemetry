@@ -1239,10 +1239,55 @@ const SECTIONS = [
   {tab:'winery',   id:'harvest', label:'Harvest',      note:'Weigh-tag and lab records'}
 ];
 
+/* Single source of truth for every panel's data-source subtitle text.
+   Two genuinely different kinds of "mock" exist today:
+   - 'weather'/'building': backed by a real Supabase table, currently
+     seeded with synthetic values pending the Phase 7 ingestion TODO
+     above (MOCK_NOW) -- a real pipeline swap will make these real with
+     no panel-level changes needed.
+   - 'procedural': pure client-side hash/noise formulas with no table
+     at all (solar, wind, irrigation-by-block, labour, fruit) -- there
+     is no pending pipeline for these; becoming real means new
+     instrumentation or a new integration, not a data-source flip.
+   Flipping any metric from mock to real later (or narrowing which
+   vintages count as "sensors pending") means editing this table, not
+   hunting through every panel's sub: string. */
+const DATA_SOURCES = {
+  air_temp:          {kind:'weather'},
+  humidity:          {kind:'weather'},
+  soil_moisture:     {kind:'weather', detail:'probes at 18 in'},
+  soil_temp:         {kind:'weather', detail:'probes at 18 in'},
+  precipitation:     {kind:'weather', detail:'total per interval'},
+  irrigation_volume: {kind:'weather', detail:'total across selected blocks'},
+  cellar_temp:       {kind:'building'},
+  cellar_rh:         {kind:'building'},
+  gdd_cumulative:    {kind:'derived', detail:'from air temperature (base 50°F)'},
+  dtr_f:             {kind:'derived', detail:'from air temperature (daily max − min)'},
+  vpd_kpa:           {kind:'derived', detail:'from air temperature and humidity'},
+  et0_in:            {kind:'derived', detail:'from temperature, humidity, wind, and solar radiation'},
+  lot_analyses:      {kind:'real', detail:'Real InnoVint lab analyses'},
+  vessels:           {kind:'real', detail:'Real InnoVint vessel inventory'},
+  solar:             {kind:'procedural', detail:'Simulated pyranometer + UV reading'},
+  wind:              {kind:'procedural', detail:'Simulated weather-station reading'},
+  irrigation_by_block:{kind:'procedural', detail:'Simulated flow-meter reading'},
+  labour:            {kind:'procedural', detail:'Simulated labor record'},
+  fruit:             {kind:'procedural', detail:'Simulated weigh-tag record'},
+};
+function getDataSourceLabel(metricKey, vintage){
+  const s = DATA_SOURCES[metricKey];
+  if(!s) return '';
+  if(s.kind==='weather') return vintage===CURRENT
+    ? `Regional weather data (Howell Mountain) · on-site sensors pending${s.detail?' · '+s.detail:''}`
+    : `Regional weather data (Howell Mountain)${s.detail?' · '+s.detail:''}`;
+  if(s.kind==='building') return `Simulated building sensor · on-site sensors pending${s.detail?' · '+s.detail:''}`;
+  if(s.kind==='derived')  return `Derived metric · ${s.detail}`;
+  return s.detail; // 'real' and 'procedural' are static, vintage-independent strings
+}
+
 const PANELS = [
 /* ══ VINEYARD · CLIMATE ══ */
 {id:'airtemp', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Air temperature', unit:'°F',
- sub:'Estate weather station', range:'5D',
+ sub:(c)=>getDataSourceLabel('air_temp',c.primary), range:'5D',
  info:"Higher temperatures speed sugar accumulation and phenolic ripening, but above roughly 95°F photosynthesis slows and sunburn risk rises on exposed fruit. Below the 50°F growing threshold the vine is essentially dormant for the day. Read alongside GDD for the season-long picture.",
  render: async (b,c) => {
    const sets = await vSets(c, {metric:'air_temp', scope:'estate'}, METRICS.airTemp.color, 'Air temp');
@@ -1250,7 +1295,7 @@ const PANELS = [
  }},
 
 {id:'gdd', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Growing degree days', unit:'GDD · base 50 °F',
- sub:'Cumulative from 1 April · band shows normal picking range', range:'30D',
+ sub:(c)=>getDataSourceLabel('gdd_cumulative',c.primary), range:'30D',
  info:"The running total of heat banked since April 1st, base 50°F — the best single predictor of where the season sits relative to picking. The shaded band marks the normal harvest window for this site; approaching it means berry sampling should begin.",
  render: async (b,c) => {
    const sets = c.compare
@@ -1262,7 +1307,7 @@ const PANELS = [
      band:HARVEST_BAND, bandColor:'#6E9B72', bandLabel:'Harvest window'});}},
 
 {id:'dtr', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Diurnal range', unit:'°F',
- sub:'Daily max − min · derived', range:'30D',
+ sub:(c)=>getDataSourceLabel('dtr_f',c.primary), range:'30D',
  info:"The gap between daily high and low. A wide swing lets grapes build sugar in daytime heat and retain acid overnight, the hallmark of balanced fruit. A narrow, compressed range flattens that balance and tends to soften acidity faster than desired.",
  render: async (b,c) => {
    const sets = c.compare
@@ -1273,7 +1318,7 @@ const PANELS = [
  }},
 
 {id:'rh', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Relative humidity', unit:'%',
- sub:'Estate weather station', range:'1D',
+ sub:(c)=>getDataSourceLabel('humidity',c.primary), range:'1D',
  info:"Humidity above roughly 85% raises mildew pressure, especially with warm nights. Low humidity accelerates vine water loss and can worsen stress during heat spikes. Read alongside VPD for the fuller picture of vine stress.",
  render: async (b,c) => {
    const sets = await vSets(c, {metric:'humidity', scope:'estate'}, METRICS.humidity.color, 'RH');
@@ -1281,18 +1326,18 @@ const PANELS = [
  }},
 
 {id:'wind', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Wind speed & direction', unit:'mph · degrees',
- sub:'Estate weather station · current reading',
+ sub:(c)=>getDataSourceLabel('wind',c.primary),
  info:"Sustained wind above about 22 mph creates spray drift risk and can damage young shoots and exposed clusters. Below that, moderate airflow is beneficial: it dries the canopy after rain or irrigation and reduces mildew pressure.",
  render:(b,c)=>renderWind(b,c)},
 
 {id:'solar', tab:'vineyard', sect:'climate', span:'s12', minRole:'all', title:'Solar insolation & UV', unit:'W/m² · UV index',
- sub:'Pyranometer + UV sensor · measured against clear-sky expectation', range:'1D',
+ sub:(c)=>getDataSourceLabel('solar',c.primary)+' · measured against clear-sky expectation', range:'1D',
  info:"Higher means more radiation reaching the canopy: faster photosynthesis and sugar accumulation, with more heat load and sunburn risk. Lower means slower ripening, and combined with high humidity, more mildew pressure. Compare against the clear-sky line, not against a fixed number — the ceiling falls through the season.",
  render:(b,c)=>renderSolar(b,c)},
 
 /* ══ VINEYARD · SOIL & WATER ══ */
 {id:'soilmoist', tab:'vineyard', sect:'soil', span:'s8', minRole:'all', title:'Soil moisture', unit:'% VWC',
- sub:'Probes at 18 in · band shows target range for deficit irrigation', range:'30D', perBlock:'soilMoist',
+ sub:(c)=>getDataSourceLabel('soil_moisture',c.primary), range:'30D', perBlock:'soilMoist',
  info:"Percent of soil volume held as water at 18 inches, where most feeder roots sit. The shaded band is the deficit-irrigation target, deliberately kept below field capacity to concentrate flavor and manage canopy vigor — not a sign of stress unless it drops well under the band.",
  render: async (b,c) => {
    const sets = c.compare
@@ -1304,7 +1349,7 @@ const PANELS = [
  }},
 
 {id:'soiltemp', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Soil temperature', unit:'°F',
- sub:'Probes at 18 in', range:'5D', perBlock:'soilTemp',
+ sub:(c)=>getDataSourceLabel('soil_temp',c.primary), range:'5D', perBlock:'soilTemp',
  info:"Warmer soil speeds root activity and nutrient uptake early in the season. Very high soil temperatures late season can push vines toward drought-avoidance behavior even when moisture is adequate. Read alongside soil moisture, not as a standalone number.",
  render: async (b,c) => {
    const sets = c.compare
@@ -1316,7 +1361,7 @@ const PANELS = [
  }},
 
 {id:'vpd', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Vapour pressure deficit', unit:'kPa',
- sub:'Derived from temp + RH · vine stress proxy', range:'5D',
+ sub:(c)=>getDataSourceLabel('vpd_kpa',c.primary), range:'5D',
  info:"Vapour pressure deficit measures how strongly the air pulls moisture from the leaf — a stronger driver of vine water stress than temperature alone. Above roughly 3.1 kPa the vine starts closing stomata to conserve water, which also slows photosynthesis and ripening.",
  render: async (b,c) => {
    const sets = c.compare
@@ -1327,7 +1372,7 @@ const PANELS = [
    lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[0.4,3.1],bandColor:'#6E9B72'});}},
 
 {id:'et0', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Reference ET (ET₀)', unit:'in / day',
- sub:'Derived · irrigation demand', range:'30D',
+ sub:(c)=>getDataSourceLabel('et0_in',c.primary), range:'30D',
  info:"Reference evapotranspiration estimates how much water a well-watered reference crop loses to the atmosphere that day, the baseline irrigation scheduling is built from. Higher ET₀ on hot, dry, windy days means blocks dry out faster and may need an earlier or larger set.",
  render: async (b,c) => {
    const sets = c.compare
@@ -1338,7 +1383,7 @@ const PANELS = [
  }},
 
 {id:'precip', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Precipitation', unit:'inches',
- sub:'Tipping-bucket gauge · total per interval', range:'1Y',
+ sub:(c)=>getDataSourceLabel('precipitation',c.primary), range:'1Y',
  info:"Rain late in the season is a double-edged read: it can relieve vine stress, but also dilutes sugars and raises rot and mildew risk on tight clusters close to harvest. A dry stretch before picking is generally preferred for concentration.",
  render: async (b,c) => {
    if(c.compare){
@@ -1354,7 +1399,7 @@ const PANELS = [
  }},
 
 {id:'irrig', tab:'vineyard', sect:'soil', span:'s8', minRole:'operator', title:'Irrigation volume applied', unit:'gallons',
- sub:'Flow meters · total across selected blocks', range:'30D',
+ sub:(c)=>getDataSourceLabel('irrigation_volume',c.primary), range:'30D',
  render: async (b,c) => {
    if(c.compare){
      const series=await Promise.all(c.vintages.map(async v=>({v,
@@ -1370,7 +1415,7 @@ const PANELS = [
  }},
 
 {id:'irrigblk', tab:'vineyard', sect:'soil', span:'s4', minRole:'operator', title:'Irrigation by block', unit:'gallons · gal/acre · inches',
- sub:'Season to date',
+ sub:(c)=>getDataSourceLabel('irrigation_by_block',c.primary),
  render:(b,c)=>{
    const v=c.primary, end=endOf(v,c.align);
    let tot=0;
@@ -1389,7 +1434,7 @@ const PANELS = [
 
 /* ══ VINEYARD · LABOUR ══ */
 {id:'labhours', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour hours by operation', unit:'hours',
- sub:'Selected blocks · season to date',
+ sub:(c)=>getDataSourceLabel('labour',c.primary)+' · selected blocks, season to date',
  render:(b,c)=>{
    if(c.compare){
      const groups=OPS.map(o=>({lbl:o.op, v:c.vintages.map(v=>
@@ -1403,7 +1448,7 @@ const PANELS = [
        {unit:'hrs',dec:0,name:'Hours',h:206});}}},
 
 {id:'labcost', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour cost by block', unit:'USD · USD/acre',
- sub:'Selected blocks · season to date',
+ sub:(c)=>getDataSourceLabel('labour',c.primary)+' · selected blocks, season to date',
  render:(b,c)=>{
    const v=c.primary; let tc=0, th=0;
    const rows=c.blocks.map(id=>{
@@ -1421,7 +1466,7 @@ const PANELS = [
 
 /* ══ WINERY · CELLAR ══ */
 {id:'cellart', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar temperature', unit:'°F',
- sub:'Barrel room · live sensor · target 55–58 °F', range:'5D',
+ sub:(c)=>getDataSourceLabel('cellar_temp',c.primary)+' · target 55–58 °F', range:'5D',
  rangeOptions:['1D','5D','30D'],
  info:"Barrel room temperature drives the pace of elevage: malolactic activity, oxygen ingress through the barrel, and how fast the wine integrates oak. Sustained drift outside the 55–58°F target shows up later as inconsistency across lots aging side by side.",
  render: async (b,c) => {
@@ -1432,7 +1477,7 @@ const PANELS = [
  }},
 
 {id:'cellarh', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar humidity', unit:'%',
- sub:'Barrel room · live sensor · target 68–78 %', range:'30D',
+ sub:(c)=>getDataSourceLabel('cellar_rh',c.primary)+' · target 68–78 %', range:'30D',
  rangeOptions:['1D','5D','30D'],
  info:"Barrel room humidity controls evaporative loss (the angels share) and barrel integrity. Too dry and barrels lose volume faster, concentrating the wine and increasing topping frequency; too humid and mold risk on barrel exteriors rises.",
  render: async (b,c) => {
@@ -1444,18 +1489,18 @@ const PANELS = [
 
 /* ══ WINERY · FERMENTATION ══ */
 {id:'ferm', tab:'winery', sect:'ferm', span:'s8', minRole:'operator', title:'Lot lab history',
- sub:'Real InnoVint lab analyses · select a lot below · not tied to the vintage/block filters above',
+ sub:(c)=>getDataSourceLabel('lot_analyses',c.primary),
  info:"Brix, pH, and TA track fermentation and ripeness progress for each lot. Falling Brix alongside rising temperature usually signals an active, healthy ferment; a stall across several readings is the first sign of a sluggish or stuck one worth investigating.",
  render:(b,c)=>renderFerm(b,c)},
 
 {id:'tanks', tab:'winery', sect:'ferm', span:'s4', minRole:'operator', title:'Vessel inventory', unit:'gal',
- sub:'InnoVint vessel inventory · no block scoping',
+ sub:(c)=>getDataSourceLabel('vessels',c.primary),
  info:"Current fill volume against capacity for every working vessel. A vessel sitting well under capacity for an extended stretch usually means a lot is due for consolidation or racking; a near-full vessel during active fermentation is worth watching for headspace during peak CO₂ production.",
  render:(b,c)=>renderTanks(b,c)},
 
 /* ══ WINERY · HARVEST ══ */
 {id:'fruit', tab:'winery', sect:'harvest', span:'s12', minRole:'operator', title:'Fruit received by lot', unit:'tons · °Bx · pH',
- sub:'Weigh-tag totals and pick-day lab numbers',
+ sub:(c)=>getDataSourceLabel('fruit',c.primary),
  render:(b,c)=>renderFruit(b,c)}
 ];
 
@@ -2405,8 +2450,9 @@ function unsubscribeOverviewRealtime(){
 function makePanel(p, c){
   const panel=el('div','panel '+(p.span||'s4'));
   const hd=el('div','p-hd');
+  const subText = typeof p.sub==='function' ? p.sub(c) : p.sub;
   hd.innerHTML=`<div class="p-hl"><div class="p-ttl-row"><span class="p-ttl">${p.title}</span>${p.unit?`<span class="p-unit">${p.unit}</span>`:''}</div>
-    ${p.sub?`<div class="p-sub">${p.sub}</div>`:''}</div>`;
+    ${subText?`<div class="p-sub">${subText}</div>`:''}</div>`;
   if(p.info){
     const ic=el('button','info-ic','i');
     ic.setAttribute('aria-label','About this reading');
@@ -2489,7 +2535,7 @@ async function renderTab(tab){
 
     if(isOperator){
       const an=makePanel({id:'anom-w', title:'Anomalies & risks', unit:'rule-based',
-        sub:'Cellar limits and tank ceilings',
+        sub:'Simulated building sensor · cellar limits and tank ceilings',
         render:(b,cc)=>renderAnomalies(b,cc,'winery')}, c);
       right.appendChild(an.panel); pending.push(an.run);
     }

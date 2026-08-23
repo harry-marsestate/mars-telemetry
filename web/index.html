@@ -858,7 +858,16 @@ function gddTo(date,v){
   for(let d=91; d<=dy; d++) s+=gddDay(doyDate(v,d),v);
   return _gddC[k]=Math.round(s);
 }
-const HARVEST_BAND=[3000,3450];   // GDD range in which picking normally falls
+// GDD range in which picking normally falls. Sourced from the Napa Valley
+// Grapegrowers' 2024 Growing Conditions Report (current measured figures:
+// Angwin 3,576-4,128, Deer Park 3,524-3,982, 5-year ranges -- the nearest
+// labeled sub-regions to Howell Mountain, which isn't separately labeled
+// in that report), not the Howell Mountain AVA petition's 1983
+// establishment-baseline figure (2,022.5-3,182 GDD). Both are real
+// numbers, but describe different decades; a live operational dashboard
+// should reflect current measurement. Previously [3000,3450], sourced
+// from the AVA petition.
+const HARVEST_BAND=[3550,4050];
 
 /* Labour */
 const OPS = [
@@ -1308,7 +1317,11 @@ const PANELS = [
          pts: await buildDerivedSeriesReal('gdd_cumulative', v, c.range)})))
      : [{name:'GDD', color:'#C6A961', pts: await buildDerivedSeriesReal('gdd_cumulative', c.primary, c.range)}];
    legendFor(b.parentElement,[...sets,{name:`Harvest window ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD`,color:'#6E9B72',band:true}]);
-   lineChart(b,sets,{unit:'GDD',dec:0,h:186,domain:[0,3700],
+   // domain ceiling must clear both HARVEST_BAND[1] and the real historical
+   // max (2022 reaches 4155.2) -- lineChart only auto-expands domain to fit
+   // band when no explicit domain is given, so these two numbers have to be
+   // kept in sync by hand whenever HARVEST_BAND changes.
+   lineChart(b,sets,{unit:'GDD',dec:0,h:186,domain:[0,4400],
      band:HARVEST_BAND, bandColor:'#6E9B72', bandLabel:'Harvest window'});}},
 
 {id:'dtr', tab:'vineyard', sect:'climate', span:'s4', minRole:'all', title:'Diurnal range', unit:'°F',
@@ -2119,7 +2132,7 @@ const RULES = [
   //   July." Note · next set likely due this week.
   //   (Not threshold-table-shaped: no metric_key, derived from event gaps.)
   // Veraison window (note): cumulative GDD > 1800 AND < HARVEST_BAND[0]
-  //   (3000) -> "Between veraison and the picking band. Block 1 sits
+  //   (3550) -> "Between veraison and the picking band. Block 1 sits
   //   highest and colours first." Note · begin berry sampling in Block 1.
   //   (Uses HARVEST_BAND, an informational range, not a breach threshold
   //   -- doesn't fit anomaly_thresholds' single-operator row shape either.)

@@ -2076,16 +2076,6 @@ const RULES = [
      return warm.length && {t:'Fermentation approaching ceiling',
        d:`${warm.map(x=>x.t.id+' at '+fmt(x.v,1)+' °F').join(', ')} — within 3 °F of the intervention threshold.`,
        m:'Watch · recheck in 2 h'};}},
-  {tab:'winery', sev:'warn', test:c=>{
-     const v=sample('cellar','cellar',new Date(NOW),CURRENT);
-     return (v>58||v<55) && {t:'Cellar outside target band',
-       d:`Barrel room at ${fmt(v,1)} °F against a 55–58 °F target. Sustained drift shows up as inconsistency across lots in élevage.`,
-       m:'Action · check the HVAC set point'};}},
-  {tab:'winery', sev:'warn', test:c=>{
-     const v=sample('cellarRH','cellar',new Date(NOW),CURRENT);
-     return (v>78||v<68) && {t:'Cellar humidity outside band',
-       d:`Barrel room RH at ${fmt(v,0)} % against a 68–78 % target. Dry air accelerates barrel evaporation loss.`,
-       m:'Watch · review the topping schedule'};}},
   {tab:'winery', sev:'note', test:c=>{
      const dry=TANKS.filter(t=>c.blocks.includes(t.blk))
        .map(t=>({t,b:tankBrix(t,c.end,c.primary)})).filter(x=>x.b!=null&&x.b<1.5);
@@ -2116,6 +2106,28 @@ async function renderAnomalies(box, ctx, tab){
         m: row.message
       }
     }));
+  } else if(tab==='winery'){
+    const v=ctx.primary;
+    const { data, error } = await sb.rpc('anomalies_eval', {
+      p_vintage: v,
+      p_as_of: endOfReal(v).toISOString(),
+      p_tab: 'winery'
+    });
+    if(error) throw error;
+    const rpcHits = data.map(row => ({
+      sev: row.severity,
+      out: {
+        t: row.title,
+        d: (row.block_id ? B(row.block_id).label+' · ' : row.tank_id ? row.tank_id+' · ' : '')
+           + row.metric_key + ' ' + fmt(row.observed_value,2),
+        m: row.message
+      }
+    }));
+    const c={...ctx, end:endOf(ctx.primary,ctx.align)};
+    const clientHits=RULES.filter(r=>r.tab===tab).map(r=>{
+      let out=null; try{out=r.test(c);}catch(e){}
+      return {sev:r.sev, out};}).filter(x=>x.out);
+    hits=[...rpcHits, ...clientHits];
   } else {
     const c={...ctx, end:endOf(ctx.primary,ctx.align)};
     hits=RULES.filter(r=>r.tab===tab).map(r=>{

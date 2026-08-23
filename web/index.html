@@ -1911,6 +1911,53 @@ function interpolateThreshold(row, byKey){
   return { ...row, low, high, tooltip_phrase: sub(row.tooltip_phrase), display_label: sub(row.display_label) };
 }
 
+// Real-data source for irrigation-interval-lengthening (RULES, below):
+// last recorded irrigation_volume>0 reading per block, at or before asOf.
+// Small dataset (~20-30 nonzero rows/block/vintage) -- plain select and
+// client-side reduction, same reasoning as fetchChartEligibleTypes.
+// seasonStart bounds a block with NO matching row at all (never irrigated
+// that vintage) to "days since 1 May" rather than an unbounded/infinite
+// gap -- matches the original dead code's walk-back-to-May-1 behavior.
+async function fetchIrrigationGaps(vintage, blockIds, asOf){
+  const { data, error } = await sb.from('sensor_readings')
+    .select('block_id, recorded_at')
+    .eq('metric_key','irrigation_volume')
+    .eq('vintage', vintage)
+    .gt('value', 0)
+    .in('block_id', blockIds)
+    .lte('recorded_at', asOf.toISOString());
+  if(error) throw error;
+  const lastByBlock = new Map();
+  data.forEach(r=>{
+    const t = new Date(r.recorded_at);
+    if(!lastByBlock.has(r.block_id) || t>lastByBlock.get(r.block_id)) lastByBlock.set(r.block_id, t);
+  });
+  const seasonStart = new Date(vintage,4,1);
+  const gaps = new Map();
+  blockIds.forEach(id=>{
+    const last = lastByBlock.get(id);
+    const from = last && last>seasonStart ? last : seasonStart;
+    gaps.set(id, Math.floor((asOf-from)/864e5));
+  });
+  return gaps;
+}
+// Real-data source for veraison-window (RULES, below): cumulative GDD as
+// of asOf, mirroring anomalies_eval()'s own latest_derived_row CTE. Not
+// gddTo() -- that's a synthetic generator (see sample()/noise()), never
+// wired to daily_derived, and would silently evaluate against fake heat
+// accumulation instead of the real derived metric the GDD chart itself
+// reads via buildDerivedSeriesReal.
+async function fetchGddAsOf(vintage, asOf){
+  const { data, error } = await sb.from('daily_derived')
+    .select('gdd_cumulative')
+    .eq('vintage', vintage)
+    .lte('day', asOf.toISOString())
+    .order('day', {ascending:false})
+    .limit(1);
+  if(error) throw error;
+  return data.length ? +data[0].gdd_cumulative : null;
+}
+
 async function fetchAnalysisLots(){
   const data = await fetchAllRows('lot_analyses', 'lot_id, lot_name, lot_code');
   const seen=new Map();
@@ -2107,35 +2154,26 @@ function renderFruit(box, ctx){
 
 /* ── Anomalies & risks ── */
 const RULES = [
-  // The 9 tab:'vineyard' rule entries formerly here were deleted in Phase 12
-  // Step 3 as dead code: renderAnomalies's 'vineyard' branch (below) is
-  // RPC-only with no RULES fallback, and the plain-RULES `else` branch is
-  // unreachable -- no caller ever passes a tab besides 'vineyard'/'winery'.
-  // 5 of the 9 duplicated rules already live via anomalies_eval RPC (soil
-  // moisture, VPD, humidity, wind, DTR) and needed no preservation. The
-  // other 4 have no RPC/DB equivalent and their logic would otherwise be
-  // lost to git archaeology -- kept here for a future revival:
-  //
-  // Heat spike (alert): air_temp@estate > 95°F -> "Sustained temperatures
-  //   above 95°F sunburn exposed fruit on the west-facing rows."
-  //   Action · check Block 3 and the Block 1 margins.
-  //   (Note: superseded in spirit by air_temp_high=92 added this same
-  //   step, but that row is a *different* rule shape -- a soft seasonal-
-  //   norm comparison, not a sunburn alert. Reviving this would need its
-  //   own rule_key/row, not a reuse of air_temp_high.)
-  // Frost risk (warn): air_temp@estate < 34°F AND day-of-year < 130 ->
-  //   "Station reading inside the budbreak window. Cold air pools in the
-  //   lower rows of Block 3." Action · frost watch overnight.
-  // Irrigation interval lengthening (note): per-block, walk back from the
-  //   period end counting days since the last recorded irrigation event;
-  //   flag if the gap >= 7 days. "The cycle here runs 7-10 days through
-  //   July." Note · next set likely due this week.
-  //   (Not threshold-table-shaped: no metric_key, derived from event gaps.)
-  // Veraison window (note): cumulative GDD > 1800 AND < HARVEST_BAND[0]
-  //   (3550) -> "Between veraison and the picking band. Block 1 sits
-  //   highest and colours first." Note · begin berry sampling in Block 1.
-  //   (Uses HARVEST_BAND, an informational range, not a breach threshold
-  //   -- doesn't fit anomaly_thresholds' single-operator row shape either.)
+  // tab:'vineyard' rules below were dead code from Phase 12 Step 3 through
+  // this revival -- renderAnomalies's 'vineyard' branch was RPC-only with
+  // no RULES fallback. heat_spike/frost_risk were revived as real
+  // anomaly_thresholds rows instead (Steps 5-6), since their shape fit the
+  // table. These two don't (event-gap calculation; a compound AND
+  // condition the RPC has no support for -- see chat history) and stay
+  // client-side, reading real data via fetchIrrigationGaps/fetchGddAsOf
+  // rather than the mock irrigDay()/gddTo() generators the original dead
+  // code used.
+  {tab:'vineyard', sev:'note', test:c=>{
+     let worst=null;
+     c.irrigationGaps.forEach((gap,id)=>{ if(!worst||gap>worst.gap) worst={id,gap}; });
+     return worst && worst.gap>=7 && {t:'Irrigation interval lengthening',
+       d:`${B(worst.id).label} has gone ${worst.gap} days since the last recorded set. The cycle here runs 7–10 days through July.`,
+       m:'Note · next set likely due this week'};}},
+  {tab:'vineyard', sev:'note', test:c=>{
+     const g=c.gdd;
+     return g!=null && g>1800 && g<HARVEST_BAND[0] && {t:'Veraison window',
+       d:`At ${fmt(g,0)} GDD the estate is between veraison and the ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD picking band. Block 1 sits highest and colours first.`,
+       m:'Note · begin berry sampling in Block 1'};}},
   {tab:'winery', sev:'alert', test:c=>{
      const hot=TANKS.filter(t=>c.blocks.includes(t.blk)).map(t=>({t,v:tankTemp(t,c.end,c.primary)}))
        .filter(x=>x.v!=null&&x.v>88);
@@ -2164,20 +2202,49 @@ async function renderAnomalies(box, ctx, tab){
   let hits;
   if(tab==='vineyard'){
     const v=ctx.primary;
-    const { data, error } = await sb.rpc('anomalies_eval', {
-      p_vintage: v,
-      p_as_of: endOfReal(v).toISOString()
-    });
-    if(error) throw error;
-    hits = data.map(row => ({
-      sev: row.severity,
-      out: {
-        t: row.title,
-        d: (row.block_id ? B(row.block_id).label+' · ' : row.tank_id ? row.tank_id+' · ' : '')
-           + row.metric_key + ' ' + fmt(row.observed_value,2),
-        m: row.message
-      }
-    }));
+    // endOfReal(v), not endOf(ctx.primary,ctx.align): endOf() anchors
+    // CURRENT to the live-ticking clock (fine for display, wrong for a
+    // real-data query -- would land after the seeded data's actual
+    // range). endOfReal() is the documented real-data mirror, anchored to
+    // MOCK_NOW -- the same value already passed to the RPC below.
+    const asOf = endOfReal(v);
+    // All three real-data calls run concurrently (not RPC-then-fetches) and
+    // degrade independently -- a timeout in any one (seen in practice:
+    // anomalies_eval can hit a statement timeout under the initial
+    // page-load burst, when ~20 panels all fire real-data requests at
+    // once) must not blank the whole panel. Running them together also
+    // shortens the total wall-clock window each one is exposed to that
+    // burst. Matches getSeasonalNorm's existing fail-soft precedent (log,
+    // return an empty/neutral result) rather than letting one throw
+    // propagate out of renderAnomalies and wipe out the other two.
+    const [rpcResult, gapsResult, gddResult] = await Promise.allSettled([
+      sb.rpc('anomalies_eval', { p_vintage: v, p_as_of: asOf.toISOString() }),
+      fetchIrrigationGaps(v, ctx.blocks, asOf),
+      fetchGddAsOf(v, asOf)
+    ]);
+    let rpcHits = [];
+    if(rpcResult.status==='fulfilled' && !rpcResult.value.error){
+      rpcHits = rpcResult.value.data.map(row => ({
+        sev: row.severity,
+        out: {
+          t: row.title,
+          d: (row.block_id ? B(row.block_id).label+' · ' : row.tank_id ? row.tank_id+' · ' : '')
+             + row.metric_key + ' ' + fmt(row.observed_value,2),
+          m: row.message
+        }
+      }));
+    } else {
+      console.error('vineyard anomalies_eval failed:', rpcResult.status==='rejected' ? rpcResult.reason : rpcResult.value.error);
+    }
+    const irrigationGaps = gapsResult.status==='fulfilled' ? gapsResult.value : new Map();
+    const gdd = gddResult.status==='fulfilled' ? gddResult.value : null;
+    if(gapsResult.status==='rejected') console.error('irrigation gap fetch failed:', gapsResult.reason);
+    if(gddResult.status==='rejected') console.error('gdd fetch failed:', gddResult.reason);
+    const c = {...ctx, end:endOf(ctx.primary,ctx.align), irrigationGaps, gdd};
+    const clientHits = RULES.filter(r=>r.tab===tab).map(r=>{
+      let out=null; try{out=r.test(c);}catch(e){}
+      return {sev:r.sev, out};}).filter(x=>x.out);
+    hits=[...rpcHits, ...clientHits];
   } else if(tab==='winery'){
     const v=ctx.primary;
     const { data, error } = await sb.rpc('anomalies_eval', {

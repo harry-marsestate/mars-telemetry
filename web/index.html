@@ -1281,9 +1281,26 @@ const DATA_SOURCES = {
   labour:            {kind:'procedural', detail:'Simulated labor record'},
   fruit:             {kind:'procedural', detail:'Simulated weigh-tag record'},
 };
+
+// Vintages backed by real Open-Meteo/ERA5 data for air_temp/soil_moisture/
+// soil_temp/gdd_cumulative/dtr_f (real-climate-data project, Phase 1-3,
+// 2026-08-25). Deliberately explicit, not inferred from `vintage!==CURRENT`
+// -- 2026 will eventually become archived too, but stays mock until its
+// own backfill happens (no same-year Grapegrowers report exists for it
+// yet, per that project's own scoping decision). Update this set by hand
+// if/when that changes -- don't let the check drift back to an implicit
+// archived-means-real assumption, which would silently start claiming
+// real data the day 2026 stops being CURRENT.
+const REAL_CLIMATE_VINTAGES = new Set([2022,2023,2024,2025]);
+
 function getDataSourceLabel(metricKey, vintage){
   const s = DATA_SOURCES[metricKey];
   if(!s) return '';
+  if(REAL_CLIMATE_VINTAGES.has(vintage)){
+    if(metricKey==='air_temp') return 'Open-Meteo (ERA5)';
+    if(metricKey==='soil_moisture' || metricKey==='soil_temp') return 'Open-Meteo (ERA5-Land), surface 0-7cm';
+    if(metricKey==='gdd_cumulative' || metricKey==='dtr_f') return 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports';
+  }
   if(s.kind==='weather') return vintage===CURRENT
     ? `Regional weather data (Howell Mountain) · on-site sensors pending${s.detail?' · '+s.detail:''}`
     : `Regional weather data (Howell Mountain)${s.detail?' · '+s.detail:''}`;

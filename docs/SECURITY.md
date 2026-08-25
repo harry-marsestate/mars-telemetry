@@ -207,3 +207,40 @@ the seed data's regular cadence. A distinct `sensor_id` alone is not
 enough. A "0 rows" / "doesn't fire" result during such a test should be
 treated as ambiguous until this is checked, not taken as proof the code
 path was actually exercised.
+
+## Two independent panel repeat-render mechanisms - checking one doesn't confirm the other is safe
+
+`web/index.html` has two separate ways a panel's `render()` can be
+re-invoked against its existing, already-populated `body` element without
+a full `renderTab()` rebuild in between: `SCOPED_RERENDER_SAFE` (a range-
+button click on certain panels skips the full-tab rebuild and calls
+`rerenderPanel()` directly) and `POLL_5MIN_PANEL_IDS` (a 5-minute
+`setInterval` that calls `panelRuns[id]()` for a fixed list of panels,
+regardless of `SCOPED_RERENDER_SAFE` membership). Both ultimately call the
+same `panelRuns[p.id]` closure from `makePanel`, which reuses the `body`
+element captured when the panel was first created - neither mechanism
+gets a fresh container the way a full `renderTab()` does.
+
+`lineChart`/`barChart` are safe under either mechanism - both replace
+their container's content wholesale (`box.innerHTML=g`). The older,
+hand-rolled `table()`/`strip()` helpers are not - both only
+`box.appendChild(...)`, so a second invocation on the same body stacks a
+duplicate underneath the first rather than replacing it.
+
+This bit us twice, with the second incident specifically caused by
+checking only one of the two mechanisms: the Solar/UV duplication fix
+audited every `SCOPED_RERENDER_SAFE` panel and concluded (correctly, for
+that mechanism) that no other panel shared the append-only pattern. But
+`irrigblk` uses `table()`/`strip()` too, isn't in `SCOPED_RERENDER_SAFE`
+(it has no `range` option, so that mechanism never applied to it) - and
+*is* in `POLL_5MIN_PANEL_IDS`, which the earlier audit never checked.
+Every 5 minutes it silently stacked a duplicate strip+table underneath
+the last, invisible until enough polling cycles passed for it to be
+visually obvious.
+
+RULE: before trusting any panel using `table()`/`strip()` (or any other
+append-only, non-self-clearing render path) as safe against duplication,
+check it against BOTH `SCOPED_RERENDER_SAFE` and `POLL_5MIN_PANEL_IDS` -
+not just the one that happens to be top of mind. A panel needs to clear
+its container (`box.innerHTML=''`, matching the `lineChart`/`barChart`
+convention) if it's a member of *either* set, not just one.

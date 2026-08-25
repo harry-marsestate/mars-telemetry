@@ -1456,6 +1456,7 @@ const PANELS = [
 {id:'irrigblk', tab:'vineyard', sect:'soil', span:'s4', minRole:'operator', title:'Irrigation by block', unit:'gallons · gal/acre · inches',
  sub:(c)=>getDataSourceLabel('irrigation_by_block',c.primary),
  render:(b,c)=>{
+   b.innerHTML='';
    const v=c.primary, end=endOf(v,c.align);
    let tot=0;
    const rows=c.blocks.map(id=>{

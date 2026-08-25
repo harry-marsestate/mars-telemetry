@@ -350,11 +350,68 @@ same pass:
    is intentionally stored estate-level (`block_id=null` - see the
    climate-calibration schema migration's reasoning: ERA5-Land's grid
    cell cannot distinguish three blocks spanning well under a mile).
-   Confirmed directly (Phase 2 browser check, 2023 vintage): as a result,
-   real soil rows are currently invisible to this chart - the per-block
-   filter simply never matches a null block_id, so the panel silently
-   keeps showing only mock data even after the real rows exist in
-   `sensor_readings`. Not a rendering bug, but a real gap between what's
-   in the database and what the chart can currently query - needs a
-   frontend change (collapse to a single estate-level line, or an
-   equivalent) before real soil data becomes visible at all.
+   Confirmed directly (Phase 2 browser check, 2023 vintage, mock still
+   present at the time): the per-block filter simply never matches a
+   null block_id, so real soil rows are invisible to this chart. Status
+   update post-Phase-3 (mock now deleted, confirmed via the Phase 3
+   browser check): the panel no longer silently falls back to mock - it
+   renders genuinely empty for 2022-2025, since nothing in
+   `sensor_readings` matches its per-block query anymore. Not a
+   rendering bug, but a real, now-visible gap between what's in the
+   database and what the chart can currently query - needs a frontend
+   change (collapse to a single estate-level line, or an equivalent)
+   before real soil data becomes visible at all.
+
+## Milestone: real-climate-data project, 2022-2025 mock replacement complete
+
+No code diff accompanies this entry - the work it records was almost
+entirely live-database operations (DELETE, dbt refresh, restoration SQL),
+not file changes, so this note is the durable record of what happened.
+`git log` covers the schema/ingestion-code side; this covers the rest.
+
+**What was replaced.** For vintages 2022-2025, `air_temp`, `soil_moisture`,
+and `soil_temp` mock rows (71,904 total: `source_system in
+('weather_station','soil_probe')`, scoped precisely by `metric_key` too,
+since `weather_station` is shared with six other still-mock metrics) were
+deleted and replaced with real Open-Meteo/ERA5 data at the estate's
+confirmed coordinates and elevation (38.603091360858635,
+-122.45867651725105, 670m/2200ft). GDD and DTR are calibrated per-vintage
+against real, same-year Napa Valley Grapegrowers Growing Conditions
+Report figures for Angwin where one exists (2023: 3576, 2024: 4058;
+verified against the production `daily_derived` view post-deletion, not
+just an ad-hoc query: 3576.0006/4058.0007); 2022 and 2025 borrow the
+2023/2024 average scalar, flagged `confidence='borrowed'` in
+`vintage_climate_calibration`. Air temp itself, VPD, ET0, and soil stay
+uncorrected, per the approved design - only GDD/DTR carry the
+Grapegrowers calibration. 2026 deliberately stays on the existing
+mock/live pipeline (still an active season, no report exists yet).
+Humidity/wind/solar/uv/precipitation deliberately stay mock too - never
+validated, out of scope for this pass.
+
+**Two real bugs found and fixed along the way, not routed around:**
+
+1. `daily_weather.sql` bucketed days by UTC (`date_trunc('day',
+   recorded_at)`) in a UTC-session database, silently misattributing 7
+   hours of genuine Pacific-evening data to the wrong calendar day every
+   day, for any real (timezone-aware) data. Harmless for mock only by
+   coincidence - mock's own UTC-aligned convention never claimed real
+   timezone semantics. Full writeup and the generalizable rule above.
+2. Real `soil_moisture` was stored as ERA5's native 0-1 volumetric-water-
+   content fraction against an app-wide 0-100 percentage convention -
+   would have read as permanently, catastrophically dry. Found during
+   Phase 2 validation, not after the fact. Corrected in place (20,544
+   rows, precisely scoped, verified) and fixed in the ingestion script
+   itself so a rerun can't reintroduce it.
+
+**One known, tracked, now-visible consequence:** the Soil Moisture/Soil
+Temperature panels render empty for 2022-2025 (see the block_id-mismatch
+entry directly above) - expected, already tracked before Phase 3 ran, not
+a surprise this milestone is discovering for the first time.
+
+**Verification discipline this milestone leaned on:** every step checked
+against a real, independent reference before being trusted - CSV-vs-DB
+row reconciliation before the DELETE, the DELETE's own count pre-checked
+against that reconciliation, the production view (not a scoped query)
+re-checked against the original calibration targets after the dbt
+refresh, and a live browser check with a throwaway account after
+everything else passed. Nothing here was accepted on "looks right" alone.

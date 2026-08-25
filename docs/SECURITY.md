@@ -325,16 +325,36 @@ RULE: any `dbt run --full-refresh` (or equivalent drop+recreate) on
 and grant statements (or an equivalent) after any such refresh - don't
 assume dbt's post-hook covers everything a plain migration would have.
 
-## Real soil data changes what the "18 in" panel subtitle can honestly claim
+## Real soil data: two tracked frontend consequences, likely fixable together
 
-Tracked here so it isn't lost before the frontend phase of the real-climate-data
-project: the mock Soil moisture/Soil temperature panels' subtitle says
-"Probes at 18 in." ERA5-Land's four fixed depth bands (0-7/7-28/28-100/
-100-255cm) don't include anything at 18in (~46cm), and the real-data
-backfill deliberately uses `0_to_7cm` specifically because that's the
-only band actually validated during reconnaissance (confirmed non-null at
-this site's coordinates) - using a deeper, unvalidated band just to
-preserve the old "18 in" framing would have reintroduced an unvalidated
-metric. Once the frontend switches these panels to real data, the
-subtitle needs to change to reflect the real depth (surface, 0-7cm), not
-keep claiming a depth this data was never actually sourced from.
+Tracked here so neither is lost before the frontend phase of the
+real-climate-data project. Both stem from the same root cause (ERA5-Land's
+~11km grid can't distinguish this estate's three blocks, or resolve a
+depth matching the mock's framing) and are likely worth fixing in the
+same pass:
+
+1. **Subtitle depth claim.** The mock Soil moisture/Soil temperature
+   panels' subtitle says "Probes at 18 in." ERA5-Land's four fixed depth
+   bands (0-7/7-28/28-100/100-255cm) don't include anything at 18in
+   (~46cm), and the real-data backfill deliberately uses `0_to_7cm`
+   specifically because that's the only band actually validated during
+   reconnaissance (confirmed non-null at this site's coordinates) -
+   using a deeper, unvalidated band just to preserve the old "18 in"
+   framing would have reintroduced an unvalidated metric. Once the
+   frontend switches these panels to real data, the subtitle needs to
+   change to reflect the real depth (surface, 0-7cm), not keep claiming
+   a depth this data was never actually sourced from.
+
+2. **block_id mismatch.** The Soil Moisture panel queries per-block
+   (`block_id in ('B1','B2','B3')`, three separate lines). Real soil data
+   is intentionally stored estate-level (`block_id=null` - see the
+   climate-calibration schema migration's reasoning: ERA5-Land's grid
+   cell cannot distinguish three blocks spanning well under a mile).
+   Confirmed directly (Phase 2 browser check, 2023 vintage): as a result,
+   real soil rows are currently invisible to this chart - the per-block
+   filter simply never matches a null block_id, so the panel silently
+   keeps showing only mock data even after the real rows exist in
+   `sensor_readings`. Not a rendering bug, but a real gap between what's
+   in the database and what the chart can currently query - needs a
+   frontend change (collapse to a single estate-level line, or an
+   equivalent) before real soil data becomes visible at all.

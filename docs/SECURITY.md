@@ -244,3 +244,97 @@ check it against BOTH `SCOPED_RERENDER_SAFE` and `POLL_5MIN_PANEL_IDS` -
 not just the one that happens to be top of mind. A panel needs to clear
 its container (`box.innerHTML=''`, matching the `lineChart`/`barChart`
 convention) if it's a member of *either* set, not just one.
+
+## daily_weather's date_trunc('day', ...) silently bucketed real sensor data into the wrong calendar day
+
+`ingestion/mars_dbt/models/curated/daily_weather.sql` bucketed hourly
+`sensor_readings` into days with `date_trunc('day', recorded_at)`. The
+database session runs in UTC (confirmed via `show timezone`). Real
+sensor timestamps (Open-Meteo, confirmed directly) represent genuine
+Pacific local hours - `date_trunc` in a UTC session buckets by *UTC*
+calendar day, so every day's 17:00-23:59 PDT (7 hours of true
+Pacific-evening data, including some of the day's highest readings) was
+silently landing in the *next* day's bucket. This corrupted
+`tmax_f`/`tmin_f`/`dtr_f` and everything downstream of them
+(`gdd_day`/`gdd_cumulative`/`vpd_kpa`/`et0_in` in `daily_derived`) for
+any vintage backed by real, timezone-aware data.
+
+Confirmed harmless for mock data only by coincidence, not by correctness:
+mock's `recorded_at` values are generated on UTC-aligned hours as an
+arbitrary internal day-numbering convention - they never claimed genuine
+Pacific-local semantics in the first place, so UTC-day bucketing happened
+to reproduce mock's own intended day boundaries. The same code that was
+harmless for mock silently broke the instant real, genuinely
+local-time-labeled data arrived - discovered only because a calibration
+scalar, solved independently in Python against correctly-bucketed daily
+min/max, failed to reproduce its target total when checked against the
+database's own aggregation (off by ~120-140 GDD out of ~3000, not
+obviously wrong at a glance).
+
+Checked exhaustively before treating this as isolated, not assumed: grepped
+every migration and dbt model for `date_trunc`, and every live Postgres
+function body (`pg_proc.prosrc`) for the same pattern - found in exactly
+one place. `series_bucketed()` (the other day/bucket mechanism, used by
+charts) takes explicit caller-provided `generate_series` boundaries, not
+`date_trunc` - a structurally different, unaffected approach. InnoVint's
+`lot_analyses`/`vessels` (the only other real, timezone-aware data this
+project ingests) have no day-bucketing logic anywhere in the SQL layer at
+all - their timestamps are read directly, never truncated.
+
+Fix: `(recorded_at at time zone 'America/Los_Angeles')::date::timestamptz`
+instead of `date_trunc('day', recorded_at)` - correctly resolves the
+Pacific calendar day, then re-represents it as a timestamptz at UTC
+midnight, preserving `daily_weather.day`'s existing type/storage
+convention so nothing downstream needs to change.
+
+RULE: `date_trunc('day', ...)` (or any bare day/date truncation) on a
+timestamptz column is only correct if the session timezone matches the
+data's real-world timezone, or the data has no genuine timezone meaning
+in the first place (as mock's didn't). Confirm which case applies before
+trusting it - "worked fine on the data we had" is not evidence it's
+timezone-correct if that data never actually exercised the distinction.
+
+## dbt full-refresh on an incremental model drops dependent views AND their grants, silently
+
+Running `dbt run --full-refresh` on `daily_weather` (an incremental
+model) to pick up the date_trunc fix above did a real `DROP` + `CREATE`
+of the underlying table, not an in-place update. Two consequences,
+neither obvious in advance:
+
+1. `daily_derived` (a plain view layered on top of `daily_weather` by
+   migration, not a dbt-managed relation itself) was CASCADE-dropped
+   along with the table it depends on. `to_regclass('daily_derived')`
+   returned null after the refresh - the view was simply gone.
+2. `grant select on daily_weather to authenticated` did not survive
+   either, confirmed via `information_schema.role_table_grants`. This
+   project's dbt setup has a post-hook
+   (`models/macros/apply_security.sql`, `apply_security_invoker`) that
+   re-applies RLS enable+policy on every model run - confirmed the
+   `daily_weather_read` policy *did* survive - but that macro only
+   handles RLS, not the separate table-level GRANT. Exactly the two-gates
+   principle already on record above (anomaly_thresholds/
+   customer_block_access), just triggered by a dbt refresh instead of a
+   new-table creation, and landing on the opposite gate: the policy alone
+   surviving without the grant is a hard `permission denied for table
+   daily_weather` for every authenticated user, not a silent empty-rows
+   result.
+
+RULE: any `dbt run --full-refresh` (or equivalent drop+recreate) on
+`daily_weather` will reproduce both of these. Re-run
+`20260824000001_restore_daily_derived_post_refresh.sql`'s view-recreation
+and grant statements (or an equivalent) after any such refresh - don't
+assume dbt's post-hook covers everything a plain migration would have.
+
+## Real soil data changes what the "18 in" panel subtitle can honestly claim
+
+Tracked here so it isn't lost before the frontend phase of the real-climate-data
+project: the mock Soil moisture/Soil temperature panels' subtitle says
+"Probes at 18 in." ERA5-Land's four fixed depth bands (0-7/7-28/28-100/
+100-255cm) don't include anything at 18in (~46cm), and the real-data
+backfill deliberately uses `0_to_7cm` specifically because that's the
+only band actually validated during reconnaissance (confirmed non-null at
+this site's coordinates) - using a deeper, unvalidated band just to
+preserve the old "18 in" framing would have reintroduced an unvalidated
+metric. Once the frontend switches these panels to real data, the
+subtitle needs to change to reflect the real depth (surface, 0-7cm), not
+keep claiming a depth this data was never actually sourced from.

@@ -48,8 +48,19 @@ _PDT_OFFSET = "-07:00"
 
 
 def _rows_from_series(
-    data: dict, variable: str, metric_key: str, vintage: int
+    data: dict, variable: str, metric_key: str, vintage: int, *, scale: float = 1
 ) -> tuple[list[dict], int]:
+    """scale=100 for soil_moisture_0_to_7cm only: Open-Meteo/ERA5-Land
+    reports soil moisture as volumetric water content, a 0-1 fraction
+    (confirmed directly: raw values landed 0.137-0.435). Every other
+    consumer of this metric in this project -- the mock data, the
+    soil_below_refill threshold (15), the "% VWC" display unit -- expects
+    a 0-100 percentage. Applying the conversion at read time here (not as
+    a one-off corrective UPDATE) means a rerun of this script never
+    reintroduces the mismatch. temperature_2m and soil_temperature_0_to_7cm
+    are already Fahrenheit (via &temperature_unit=fahrenheit) and need no
+    scaling -- scale defaults to 1 (no-op) for those.
+    """
     rows = []
     skipped_null = 0
     for iso_time, value in client.hourly_series(data, variable):
@@ -60,7 +71,7 @@ def _rows_from_series(
             {
                 "metric_key": metric_key,
                 "recorded_at": iso_time + _PDT_OFFSET,
-                "value": value,
+                "value": value * scale,
                 "vintage": vintage,
             }
         )
@@ -92,7 +103,7 @@ def run() -> None:
                 models="era5_land",
             )
             moist_rows, moist_nulls = _rows_from_series(
-                soil_data, "soil_moisture_0_to_7cm", "soil_moisture", vintage
+                soil_data, "soil_moisture_0_to_7cm", "soil_moisture", vintage, scale=100
             )
             temp_soil_rows, temp_soil_nulls = _rows_from_series(
                 soil_data, "soil_temperature_0_to_7cm", "soil_temp", vintage

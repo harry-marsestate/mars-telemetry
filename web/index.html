@@ -933,9 +933,21 @@ function pickInfo(t,v){
 }
 
 /* §2b ── SERIES BUILDER ────────────────────────────── */
+// 1D/5D's fmt takes an optional vintage `v` -- for the live CURRENT
+// vintage there's a real "now" to read a bare hour or weekday relative
+// to, but an archived vintage has no such anchor, so "Fri 14h" doesn't
+// say which Friday. Archived vintages get an explicit calendar date
+// instead, matching 30D's existing date format. 30D/1Y already show a
+// real date/month and don't have this problem.
 const RANGES = {
-  '1D': {label:'1D', n:24, stepH:1,  fmt:d=>String(d.getHours()).padStart(2,'0')+':00'},
-  '5D': {label:'5D', n:40, stepH:3,  fmt:d=>['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()]+' '+String(d.getHours()).padStart(2,'0')+'h'},
+  '1D': {label:'1D', n:24, stepH:1,
+    fmt:(d,v)=> (v!==undefined && v!==CURRENT)
+      ? d.getDate()+' '+MON[d.getMonth()]+' '+String(d.getHours()).padStart(2,'0')+':00'
+      : String(d.getHours()).padStart(2,'0')+':00'},
+  '5D': {label:'5D', n:40, stepH:3,
+    fmt:(d,v)=> (v!==undefined && v!==CURRENT)
+      ? d.getDate()+' '+MON[d.getMonth()]+' '+String(d.getHours()).padStart(2,'0')+'h'
+      : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()]+' '+String(d.getHours()).padStart(2,'0')+'h'},
   '30D':{label:'30D',n:30, stepH:24, fmt:d=>d.getDate()+' '+MON[d.getMonth()]},
   '1Y': {label:'1Y', n:12, stepH:730,fmt:d=>MON[d.getMonth()]}
 };
@@ -977,7 +989,7 @@ function buildSeries(getter, v, range, opts={}){
         val = c ? s/c : null;
       }
     } else val=getter(d,v);
-    pts.push({t:new Date(d), v: val==null?null:+val.toFixed(3), lbl:r.fmt(d)});
+    pts.push({t:new Date(d), v: val==null?null:+val.toFixed(3), lbl:r.fmt(d,v)});
   }
   return pts;
 }
@@ -988,7 +1000,7 @@ async function buildSeriesReal(metric, scope, v, range, opts={}){
   const result = await getSeries({ metric, scope, vintage: v, range, agg: opts.agg });
   const pts = result.points.map(p => {
     const d = new Date(p.t);
-    return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d) };
+    return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d,v) };
   });
   return pts;
 }
@@ -999,7 +1011,7 @@ async function buildDerivedSeriesReal(field, v, range, opts={}){
   const result = await getDerivedSeries({ field, vintage: v, range, end: opts.end });
   return result.points.map(p => {
     const d = new Date(p.t);
-    return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d) };
+    return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d,v) };
   });
 }
 /* Real, async — fetches a per-block metric for each id in `ids` and averages

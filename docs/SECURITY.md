@@ -532,3 +532,22 @@ against that reconciliation, the production view (not a scoped query)
 re-checked against the original calibration targets after the dbt
 refresh, and a live browser check with a throwaway account after
 everything else passed. Nothing here was accepted on "looks right" alone.
+
+## Browser-check methodology: hard reload before trusting the result
+
+Verifying the `soilSets()` fix (block_id mismatch, above), the first
+browser pass showed the panels still rendering pre-fix behavior - three
+per-block lines and "No readings in this period" for a real vintage -
+even though the underlying `series_bucketed()`/query logic was already
+correct. Chrome had cached the pre-fix `index.html`/JS from an earlier
+check earlier in the same session; a hard reload (not a normal
+navigation) resolved it immediately, and the correct post-fix behavior
+was there all along.
+
+Standing step for any future browser check of a JS/frontend change: hard
+reload before taking a rendered result as evidence, not just on the first
+load of a session. A normal navigation to the same URL can silently serve
+a stale cached script, and the resulting "still broken" observation is
+indistinguishable at a glance from a real regression - it cost a false
+start here before the cache was identified as the cause rather than the
+fix being wrong.

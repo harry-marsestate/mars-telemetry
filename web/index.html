@@ -1386,10 +1386,7 @@ const PANELS = [
    const row = interpolateThreshold(th.byKey.get('soil_below_refill'), th.byKey);
    const lo = row?.threshold ?? 15, hi = 25; // hi: no DB row -- field-capacity gap, Step 1
    const label = row?.display_label ?? `Target ${lo}–${hi} % VWC`;
-   const sets = c.compare
-     ? await vSets(c, {metric:'soil_moisture', blocks:c.blocks}, null, 'mean of selection')
-     : await Promise.all(c.blocks.map(async id=>({name:B(id).label,color:B(id).color,
-         pts: await buildSeriesReal('soil_moisture', id, c.primary, c.range)})));
+   const sets = await soilSets(c, 'soil_moisture');
    legendFor(b.parentElement,[...sets,{name:label,color:'#6E9B72',band:true}]);
    lineChart(b,sets,{unit:'% VWC',dec:1,h:196,band:[lo,hi],bandColor:'#6E9B72',bandLabel:'Target band'});
  }},
@@ -1398,10 +1395,7 @@ const PANELS = [
  sub:(c)=>getDataSourceLabel('soil_temp',c.primary), range:'5D', perBlock:'soilTemp',
  info:"Warmer soil speeds root activity and nutrient uptake early in the season. Very high soil temperatures late season can push vines toward drought-avoidance behavior even when moisture is adequate. Read alongside soil moisture, not as a standalone number.",
  render: async (b,c) => {
-   const sets = c.compare
-     ? await vSets(c, {metric:'soil_temp', blocks:c.blocks}, null, 'mean of selection')
-     : await Promise.all(c.blocks.map(async id=>({name:B(id).label,color:B(id).color,
-         pts: await buildSeriesReal('soil_temp', id, c.primary, c.range)})));
+   const sets = await soilSets(c, 'soil_temp');
    legendFor(b.parentElement,sets);
    lineChart(b,sets,{unit:'°F',dec:1,h:196});
  }},
@@ -1590,6 +1584,30 @@ async function vSets(c, getterOrMetric, color, name, opts={}){
     return out;
   }
   return [{name:name||'Value', color:color||'#C6A961', pts: await fetchOne(c.primary)}];
+}
+
+/* Soil moisture/temperature: real data is estate-level (block_id=null)
+   for 2022-2025 -- ERA5-Land's ~11km grid can't distinguish the estate's
+   three blocks. Mock data stays genuinely per-block (SP-01/02/03) for
+   2026. vSets can't express this: it takes one getter shape per call,
+   but compare mode can mix a real and a mock vintage in the same chart,
+   each needing a different query shape. This picks the right shape per
+   vintage, matching compare mode's existing one-line-per-vintage
+   convention rather than vSets's single-shape-per-call one. */
+async function soilSets(c, metric){
+  if(c.compare){
+    return Promise.all(c.vintages.map(async v => ({
+      name: String(v), color: VCOLOR[v],
+      pts: REAL_CLIMATE_VINTAGES.has(v)
+        ? await buildSeriesReal(metric, 'estate', v, c.range)
+        : await meanSeriesReal(metric, c.blocks, v, c.range)
+    })));
+  }
+  if(REAL_CLIMATE_VINTAGES.has(c.primary)){
+    return [{name:'Estate', color:'#C6A961', pts: await buildSeriesReal(metric, 'estate', c.primary, c.range)}];
+  }
+  return Promise.all(c.blocks.map(async id=>({name:B(id).label, color:B(id).color,
+    pts: await buildSeriesReal(metric, id, c.primary, c.range)})));
 }
 </script>
 

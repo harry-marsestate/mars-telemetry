@@ -1313,6 +1313,14 @@ const DATA_SOURCES = {
 // real data the day 2026 stops being CURRENT.
 const REAL_CLIMATE_VINTAGES = new Set([2022,2023,2024,2025]);
 
+// Vintages backed by real Mars Vineyard Farming irrigation records
+// (Track 2, event-level data from Mars Irrigation 2023/2024.xlsx,
+// source_system 'farm_irrigation_log'). Deliberately its own set, not
+// REAL_CLIMATE_VINTAGES -- irrigation's real coverage is narrower: 2022
+// has no source file at all, and 2025 is annual-totals-only (its own
+// summary tile, not this daily-series metric), so both stay mock here.
+const IRRIGATION_REAL_VINTAGES = new Set([2023,2024]);
+
 function getDataSourceLabel(metricKey, vintage){
   const s = DATA_SOURCES[metricKey];
   if(!s) return '';
@@ -1322,6 +1330,7 @@ function getDataSourceLabel(metricKey, vintage){
     if(metricKey==='gdd_cumulative' || metricKey==='dtr_f') return 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports';
     if(metricKey==='vpd_kpa') return 'Derived metric · from Open-Meteo (ERA5) air temperature and humidity';
   }
+  if(metricKey==='irrigation_volume' && IRRIGATION_REAL_VINTAGES.has(vintage)) return 'Mars Vineyard Farming records';
   if(s.kind==='weather') return vintage===CURRENT
     ? `Regional weather data (Howell Mountain) · on-site sensors pending${s.detail?' · '+s.detail:''}`
     : `Regional weather data (Howell Mountain)${s.detail?' · '+s.detail:''}`;

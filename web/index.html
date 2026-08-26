@@ -1313,6 +1313,21 @@ function getDataSourceLabel(metricKey, vintage){
   return s.detail; // 'real' and 'procedural' are static, vintage-independent strings
 }
 
+// 2025 irrigation: real data from Mars Irrigation 2025.xlsx is annual
+// totals only (no dated events, 5 rows: MRS-2S/MRS-2/MRS-3S/MRS-3/MRS-1)
+// -- a closed, one-time real dataset, not something a future script will
+// re-ingest, so a hardcoded constant is proportionate: no migration, no
+// table, for three numbers that will never change. MRS-1's rate
+// (2285.85 gal/hr) matches MRS-01's Primera rate from 2023/2024 almost
+// exactly, not a P+S blend, and no "MRS-1S" row exists anywhere in the
+// file -- Block 1's Secundaria irrigation is genuinely unreported for
+// this year, not merged in. See docs/SECURITY.md.
+const IRRIGATION_2025_TOTALS = {
+  B1: 320019,            // MRS-1 (Primera only)
+  B2: 19012 + 202918.56, // MRS-2S + MRS-2
+  B3: 11842 + 166483.2,  // MRS-3S + MRS-3
+};
+
 const PANELS = [
 /* ══ VINEYARD · CLIMATE ══ */
 {id:'airtemp', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Air temperature', unit:'°F',
@@ -1483,6 +1498,21 @@ const PANELS = [
             {l:'Depth',v:fmt(tot/ac/27154,2),u:'in'}]);
    table(b,[{h:'Block'},{h:'Gallons',num:1},{h:'Gal/ac',num:1},{h:'Inches',num:1}],rows,
      ['Total',fmt(tot,0),fmt(tot/ac,0),fmt(tot/ac/27154,2)]);}},
+
+{id:'irrig2025', tab:'vineyard', sect:'soil', span:'s12', minRole:'operator',
+ title:'2025 irrigation (year-end totals)', unit:'gallons',
+ sub:(c)=>'Mars Vineyard Farming records — annual totals only, no dated events',
+ render:(b,c)=>{
+   b.innerHTML='';
+   const show = !c.compare && c.primary===2025;
+   b.parentElement.style.display = show ? '' : 'none';
+   if(!show) return;
+   strip(b,[
+     {l:B('B1').label, v:fmt(IRRIGATION_2025_TOTALS.B1,0), u:'gal · Primera only'},
+     {l:B('B2').label, v:fmt(IRRIGATION_2025_TOTALS.B2,0), u:'gal'},
+     {l:B('B3').label, v:fmt(IRRIGATION_2025_TOTALS.B3,0), u:'gal'},
+   ]);
+ }},
 
 /* ══ VINEYARD · LABOUR ══ */
 {id:'labhours', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour hours by operation', unit:'hours',

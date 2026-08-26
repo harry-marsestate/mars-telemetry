@@ -1,6 +1,6 @@
 {{ config(materialized='incremental', unique_key=['vintage','day']) }}
 
-with hourly as (
+with hourly_raw as (
   -- (recorded_at at time zone 'America/Los_Angeles')::date::timestamptz,
   -- not date_trunc('day', recorded_at): the database session runs in
   -- UTC, so date_trunc('day', ...) buckets by UTC calendar day. Real
@@ -16,12 +16,32 @@ with hourly as (
   -- midnight (::date::timestamptz), matching this table's existing `day`
   -- column type/convention -- only which calendar day each hour is
   -- attributed to changes, not the storage shape downstream code expects.
-  select vintage, (recorded_at at time zone 'America/Los_Angeles')::date::timestamptz as day, metric_key, value
+  select vintage, source_system,
+    (recorded_at at time zone 'America/Los_Angeles')::date::timestamptz as day,
+    metric_key, value
   from {{ source('raw','sensor_readings') }}
   where metric_key in ('air_temp','humidity','solar','wind_speed')
   {% if is_incremental() %}
     and recorded_at > (select coalesce(max(day), '1900-01-01') from {{ this }})
   {% endif %}
+),
+-- Same precedence rule as series_bucketed() (see
+-- supabase/migrations/20260826000000_series_bucketed_source_aware.sql):
+-- real data, when present for a (vintage, metric_key), fully supersedes
+-- mock for that combination rather than being averaged with it. No block
+-- dimension here by construction -- daily_weather never carries soil, the
+-- one metric where block_id has mattered -- so unlike series_bucketed()
+-- this scoping needs no block-level fallback; vintage+metric_key alone is
+-- and stays correct here regardless of any future per-block real source.
+real_scope as (
+  select distinct vintage, metric_key
+  from hourly_raw where source_system = 'open_meteo_era5'
+),
+hourly as (
+  select h.vintage, h.day, h.metric_key, h.value
+  from hourly_raw h
+  left join real_scope rs on rs.vintage = h.vintage and rs.metric_key = h.metric_key
+  where rs.vintage is null or h.source_system = 'open_meteo_era5'
 )
 select
   vintage, day,

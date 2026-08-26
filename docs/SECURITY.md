@@ -333,6 +333,10 @@ real-climate-data project. Both stem from the same root cause (ERA5-Land's
 depth matching the mock's framing) and are likely worth fixing in the
 same pass:
 
+(A third, related item - the VPD/ET0 subtitle - is tracked separately
+below, since its trigger is the humidity/precipitation/solar round, not
+the soil round.)
+
 1. **Subtitle depth claim.** The mock Soil moisture/Soil temperature
    panels' subtitle says "Probes at 18 in." ERA5-Land's four fixed depth
    bands (0-7/7-28/28-100/100-255cm) don't include anything at 18in
@@ -361,6 +365,119 @@ same pass:
    database and what the chart can currently query - needs a frontend
    change (collapse to a single estate-level line, or an equivalent)
    before real soil data becomes visible at all.
+
+## Real humidity data (pending): VPD/ET0 subtitle will go stale once it lands
+
+Tracked now, before it becomes relevant, per the same discipline as the
+two soil items above - recorded ahead of the change that triggers it,
+not discovered as a surprise afterward.
+
+`getDataSourceLabel()`'s `derived` branch (VPD, ET0) currently reads
+"Derived metric - from air temperature and humidity" / "...temperature,
+humidity, wind, and solar radiation" regardless of vintage - deliberately
+not given a `REAL_CLIMATE_VINTAGES` branch during the air_temp/soil round,
+because at that point only one of VPD's two inputs (air_temp) was real;
+humidity was still mock, so labeling VPD as real would have overclaimed.
+
+Once the humidity backfill in progress now (this round: precipitation,
+humidity, solar) completes Phase 3, that reasoning inverts: air_temp and
+humidity will both be real for 2022-2025, so VPD becomes a derived metric
+with two real inputs, and its subtitle should say so. ET0 is not fully
+resolved by this round - it also depends on wind and solar; solar is in
+this round, but wind stays mock indefinitely (no usable real-world
+reference found for this site or nearby - see the wind investigation
+below), so ET0 will remain a mixed real/mock derivation even after this
+round closes, and its subtitle should reflect that honestly rather than
+flipping to a fully-real claim it hasn't earned. (Wind stays mock
+indefinitely: three real sources checked directly - Angwin-Parrett Field
+airport K2O3, confirmed absent from Iowa Mesonet's monitored CA ASOS
+network with zero historical archive; CIMIS Angwin #79, elevation-matched
+but disconnected since 1996, decades before this project's 2022-2025
+window; CIMIS's only currently-active Napa County station, Oakville #77,
+at 190ft valley-floor elevation versus this site's 2200ft - no usable
+reference found, treated the same as UV's unfixable gap.)
+
+## series_bucketed() and daily_weather.sql silently averaged mock and real readings together
+
+**The bug.** Neither `series_bucketed()` (the live Postgres function every
+chart calls) nor `daily_weather.sql`'s `hourly` CTE filtered by
+`source_system`. Both simply aggregated (`avg`/`sum`/`max`/`min`) every
+`sensor_readings` row matching a given metric/vintage/bucket, regardless
+of which source produced it. This was harmless while air_temp and soil
+were the only real metrics, because their mock rows had already been
+deleted in Phase 3 of that round - there was nothing left to blend with.
+It became live and active the moment this round's Phase 1 (precipitation/
+humidity/solar) inserted real rows alongside mock rows that were still
+present, waiting for their own Phase 3.
+
+**How it was found.** During this round's Phase 2 browser check, the
+2023 Relative Humidity chart rendered a visibly jagged, inconsistent
+shape rather than a clean diurnal curve - the tell that two differently-
+sampled datasets (mock's 3-hourly grid for 2022-2024, real's hourly ERA5
+data) were being pooled into the same buckets. A direct query confirmed
+it wasn't a rare edge case: 1,709 of 5,139 hourly humidity readings for
+2023 collided at the identical timestamp, and even non-colliding hours
+were pooled together at wider (5D/30D) bucket widths. `daily_weather.sql`
+had the same defect but was dormant rather than active - its incremental
+materialization strategy only recomputes days after its stored max, so
+already-materialized 2022-2025 rows wouldn't blend until some future
+`--full-refresh` (for any reason) recomputed them.
+
+**The fix.** Real data, when present for a given (metric, vintage[,
+block]), now fully supersedes mock for that combination rather than being
+merged with it - matching the mental model Phase 3 deletion already
+assumes, effectively behaving as if Phase 3 had already run. Baked into
+both functions directly rather than passed as a caller parameter: every
+call site across the app wants the same policy (best available real
+signal, never mock specifically), so centralizing it removes the
+recurrence risk of a future call site forgetting to ask for it. This is
+the same shared-infrastructure precedent already set by `daily_derived`'s
+calibration scalar (`coalesce(c.scalar,1)` applied via LEFT JOIN, not
+supplied per caller).
+
+Two separate implementations were required, not one, because the two
+code paths differ structurally:
+- `series_bucketed()` is a live SQL function, re-evaluated per request -
+  its fix is a WHERE-clause EXISTS check, scoped to the specific
+  `p_block` being queried (falling back to estate-level real rows via
+  `block_id is null`) rather than to metric+vintage alone. This matters
+  for a hypothetical future per-block real source rolled out unevenly
+  across blocks - a metric-vintage-only check would incorrectly suppress
+  still-valid mock data for a block that hasn't received real data yet.
+  Today it collapses to the same result as a block-agnostic check, since
+  every authoritative row today is estate-level (`block_id is null`) and
+  matches every `p_block` via that fallback branch.
+- `daily_weather.sql` is a dbt-materialized incremental table, only
+  recomputed on `dbt run`/`--full-refresh` - its fix is a `real_scope`
+  CTE pre-filtering `hourly` before aggregation. It does NOT need the
+  block-fallback logic: this model has no block dimension at all, by
+  construction (it never carries soil, the one metric where block_id has
+  mattered), so vintage+metric_key scoping is correct today and stays
+  correct under any future per-block real source.
+
+`'open_meteo_era5'` is hardcoded as the one authoritative source in both
+places today; a future second real source would need adding to both,
+kept in sync manually since the two implementations can't share code.
+
+**Verification performed.**
+1. Checksummed `series_bucketed()` output for every metric with no real
+   counterpart (wind_speed, uv, cellar_temp, cellar_rh, irrigation_volume,
+   ferment_brix, ferment_temp) before and after the fix - all seven
+   matched byte-for-byte (7,129 total rows), confirming zero behavior
+   change for anything the fix wasn't meant to touch.
+2. Compared `series_bucketed()`'s humidity/solar 2023 output against a
+   manual real-only aggregate, hourly buckets across the full season - 0
+   mismatches out of 5,113 buckets for each metric.
+3. After `dbt run --full-refresh --select daily_weather` (which, as
+   documented above, cascade-dropped `daily_derived` and its grant again
+   - restored via the existing restoration migration's SQL), compared
+   `rh_avg`/`solar_avg` for all 214 days of 2023 against a manual
+   real-only daily aggregate - 0 mismatches; `tmax_f`/`tmin_f`
+   (already real-only pre-fix) also showed 0 mismatches, confirming the
+   refresh didn't regress anything already correct.
+4. Browser re-check: the 2023 Relative Humidity chart now renders a
+   clean, single diurnal curve, visibly different from the jagged shape
+   that first surfaced the bug.
 
 ## Milestone: real-climate-data project, 2022-2025 mock replacement complete
 

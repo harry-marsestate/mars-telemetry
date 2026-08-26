@@ -1300,6 +1300,7 @@ function getDataSourceLabel(metricKey, vintage){
     if(metricKey==='air_temp') return 'Open-Meteo (ERA5)';
     if(metricKey==='soil_moisture' || metricKey==='soil_temp') return 'Open-Meteo (ERA5-Land), surface 0-7cm';
     if(metricKey==='gdd_cumulative' || metricKey==='dtr_f') return 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports';
+    if(metricKey==='vpd_kpa') return 'Derived metric · from Open-Meteo (ERA5) air temperature and humidity';
   }
   if(s.kind==='weather') return vintage===CURRENT
     ? `Regional weather data (Howell Mountain) · on-site sensors pending${s.detail?' · '+s.detail:''}`

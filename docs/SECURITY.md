@@ -551,3 +551,57 @@ a stale cached script, and the resulting "still broken" observation is
 indistinguishable at a glance from a real regression - it cost a false
 start here before the cache was identified as the cause rather than the
 fix being wrong.
+
+## Track 2 (irrigation) Phase 3: a DELETE scoped too broadly, caught, and the reasoning that led to permanent deletion over a display-only fix
+
+**The mistake.** Phase 3 for Track 2 (irrigation) deleted mock
+`flow_meter` rows for `vintage IN (2023,2024)` with no `block_id` filter.
+That was wrong for one cell: B1/2024 has no real replacement (Block 1
+was replanting that year, absent from the source files entirely - see
+the Phase 1 commit), so its mock row should have stayed as the block-aware
+fallback `series_bucketed()` was built to prefer, per the soil fix
+above. The delete briefly left B1/2024 with zero `irrigation_volume`
+rows of any kind.
+
+**Caught immediately**, before moving on to the next step: a post-delete
+query grouped by vintage/block/source_system, expecting to see B1/2024
+still present as `flow_meter`, and it was missing entirely. Restored the
+214 rows from `seed-data/sensor_readings_2024.csv` via `\copy`, verified
+byte-identical to the original.
+
+**Then deliberately deleted again, permanently - this was not reverting
+the fix.** The restore made B1/2024 render correctly in the vineyard
+panels (mock fallback, exactly as designed), but that's not the whole
+system: the chat feature answers questions from the data directly, and
+there was no guarantee it reads through `series_bucketed()`'s block-aware
+mock/real precedence logic the same way the charts do. If it queries
+`sensor_readings` some other way, a restored mock row for B1/2024 could
+surface as an unqualified irrigation figure - stale and wrong - while the
+chart correctly showed the same block as a deliberate fallback. Two
+surfaces disagreeing about whether B1/2024 has real data is worse than
+one surface having no data at all. So the resolution was: precisely
+re-verify the scope (`block_id='B1' AND vintage=2024 AND
+metric_key='irrigation_volume' AND source_system='flow_meter'` - checked
+directly before running anything, given the near-miss was specifically a
+scoping error), then delete those exact 214 rows permanently.
+
+**Verified after the final delete:**
+1. B1/2024: 0 `irrigation_volume` rows, any source.
+2. B2/B3/2024 and all of 2023 unaffected (`farm_irrigation_log`, correct
+   row counts).
+3. 2022/2025/2026 unaffected (`flow_meter` only, correct counts).
+4. Browser check: the "Irrigation Volume Applied" panel for B1/2024 now
+   shows a genuine empty state (unit badge "0/ac", zeroed axis, no bars)
+   - not mock, not real.
+5. Chat check, the specific thing this was protecting against: asked
+   "How much irrigation was applied to Block 1 in 2024?" directly.
+   Response: "No irrigation data returned for Block 1 in 2024 - all
+   buckets are null... I don't have grounds to report a figure here." No
+   stale mock number surfaced.
+
+General lesson, not specific to irrigation: a block-aware mock fallback
+is only safe to leave in place if *every* consumer of the data goes
+through the same precedence logic. Where a second consumer (here, the
+chat) reads the underlying table more directly, the fallback needs to be
+an active decision confirmed for that consumer too, not assumed to
+inherit correctness from the chart's own query path.

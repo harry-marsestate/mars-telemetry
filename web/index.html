@@ -953,18 +953,36 @@ const RANGES = {
 };
 const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
+/* Growing-season boundary (Apr 1 - Oct 31) that every real backfill and
+   the mock generator cover -- see docs/SECURITY.md's tracked full-
+   calendar-year project. align:true maps real-world "today" into each
+   compared vintage's year; without clamping, that would land outside
+   Apr-Oct for five months of the year (Nov-Mar), silently leaving every
+   archived vintage's real-data compare chart blank with no explanation.
+   Clamping to the nearest in-season boundary keeps the chart meaningful
+   instead. Applies equally to the mock path (endOf) and the real path
+   (endOfReal) -- same latent gap, same fix, not two different problems. */
+function clampToSeason(d){
+  const apr1=new Date(d.getFullYear(),3,1,0,0,0,0);
+  const oct31=new Date(d.getFullYear(),9,31,23,59,59,999);
+  if(d<apr1) return apr1;
+  if(d>oct31) return oct31;
+  return d;
+}
 function endOf(v, align){
   if(v===CURRENT) return new Date(NOW);
-  if(align) return new Date(v, NOW.getMonth(), NOW.getDate(), NOW.getHours(), NOW.getMinutes());
+  if(align){ const c=clampToSeason(NOW); return new Date(v, c.getMonth(), c.getDate(), c.getHours(), c.getMinutes()); }
   const fs=fermSeason(v);                    // archive snapshot = peak of harvest
   const d=doyDate(v, Math.round((fs.sd+fs.ed)/2)); d.setHours(14,0,0,0); return d;
 }
 /* Real-data mirror of endOf(v) — same archived-vintage snapshot logic (peak
    of harvest within that vintage's own season), but anchors the current
    vintage to MOCK_NOW instead of the live-ticking NOW, since real queries
-   must land inside the seeded data's actual date range. */
-function endOfReal(v){
+   must land inside the seeded data's actual date range. align:true now
+   matches endOf(v,true) -- see clampToSeason above for why it's clamped. */
+function endOfReal(v, align){
   if(v===CURRENT) return MOCK_NOW;
+  if(align){ const c=clampToSeason(NOW); return new Date(v, c.getMonth(), c.getDate(), c.getHours(), c.getMinutes()); }
   const fs=fermSeason(v);
   const d=doyDate(v, Math.round((fs.sd+fs.ed)/2)); d.setHours(14,0,0,0); return d;
 }
@@ -997,7 +1015,8 @@ function buildSeries(getter, v, range, opts={}){
    simulating. metric/scope match your METRICS keys and block IDs. */
 async function buildSeriesReal(metric, scope, v, range, opts={}){
   const r = RANGES[range];
-  const result = await getSeries({ metric, scope, vintage: v, range, agg: opts.agg });
+  const end = opts.end || endOfReal(v, opts.align);
+  const result = await getSeries({ metric, scope, vintage: v, range, end, agg: opts.agg });
   const pts = result.points.map(p => {
     const d = new Date(p.t);
     return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d,v) };
@@ -1008,7 +1027,8 @@ async function buildSeriesReal(metric, scope, v, range, opts={}){
    dbt view directly (gdd/dtr/vpd/et0 aren't in sensor_readings). */
 async function buildDerivedSeriesReal(field, v, range, opts={}){
   const r = RANGES[range];
-  const result = await getDerivedSeries({ field, vintage: v, range, end: opts.end });
+  const end = opts.end || endOfReal(v, opts.align);
+  const result = await getDerivedSeries({ field, vintage: v, range, end });
   return result.points.map(p => {
     const d = new Date(p.t);
     return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d,v) };
@@ -1158,17 +1178,13 @@ function lineChart(box, sets, opts={}){
     let i=Math.round((rel-P.l)/((W-P.l-P.r)/(n-1||1)));
     i=Math.max(0,Math.min(n-1,i));
     cross.setAttribute('x1',X(i)); cross.setAttribute('x2',X(i)); cross.setAttribute('opacity','.5');
-    // Compare mode: each series can be anchored to a different calendar
-    // date (real-data series each use their own vintage's harvest-peak
-    // snapshot, not a shared aligned date -- see the "aligned to" fix in
-    // docs/SECURITY.md). A single shared tip-t title would silently claim
-    // every row's value happened on that one date, which isn't true --
-    // each row carries its own date instead. Single-series mode is
-    // unaffected: one series, one true date, the shared title stays.
-    let h = sets.length>1 ? '' : `<div class="tip-t">${sets[0].pts[i].lbl}</div>`;
+    // Compare mode now genuinely aligns every series to the same
+    // real-world calendar date mapped into each vintage's year (see
+    // clampToSeason/endOf/endOfReal) -- sets[0]'s date is accurate for
+    // every row, so one shared title is correct again, not an overclaim.
+    let h=`<div class="tip-t">${sets[0].pts[i].lbl}</div>`;
     sets.forEach(s=>{const p=s.pts[i];
-      const dateSuffix = sets.length>1 ? ` · ${p.lbl}` : '';
-      h+=`<div class="tip-r" style="color:${s.color}"><i></i><b>${s.name}</b> ${p.v==null?'—':fmt(p.v,opts.dec??1)+(opts.unit?' '+opts.unit:'')}${dateSuffix}</div>`;});
+      h+=`<div class="tip-r" style="color:${s.color}"><i></i><b>${s.name}</b> ${p.v==null?'—':fmt(p.v,opts.dec??1)+(opts.unit?' '+opts.unit:'')}</div>`;});
     showTip(e.clientX,e.clientY,h);
   });
   svg.addEventListener('mouseleave',()=>{cross.setAttribute('opacity','0'); hideTip();});
@@ -1376,7 +1392,7 @@ const PANELS = [
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('gdd_cumulative', v, c.range)})))
+         pts: await buildDerivedSeriesReal('gdd_cumulative', v, c.range, {align:c.align})})))
      : [{name:'GDD', color:'#C6A961', pts: await buildDerivedSeriesReal('gdd_cumulative', c.primary, c.range)}];
    legendFor(b.parentElement,[...sets,{name:`Harvest window ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD`,color:'#6E9B72',band:true}]);
    // domain ceiling must clear both HARVEST_BAND[1] and the real historical
@@ -1392,7 +1408,7 @@ const PANELS = [
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('dtr_f', v, c.range)})))
+         pts: await buildDerivedSeriesReal('dtr_f', v, c.range, {align:c.align})})))
      : [{name:'Range', color:'#BE9C6A', pts: await buildDerivedSeriesReal('dtr_f', c.primary, c.range)}];
    lineChart(b, sets, {unit:'°F',dec:1,h:172});
  }},
@@ -1457,7 +1473,7 @@ const PANELS = [
    const label = row?.display_label ?? `Productive band ${lo}–${hi} kPa`;
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('vpd_kpa', v, c.range)})))
+         pts: await buildDerivedSeriesReal('vpd_kpa', v, c.range, {align:c.align})})))
      : [{name:'VPD', color:'#C9603F', pts: await buildDerivedSeriesReal('vpd_kpa', c.primary, c.range)}];
    legendFor(b.parentElement,[...sets,{name:label,color:'#6E9B72',band:true}]);
    lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[lo,hi],bandColor:'#6E9B72'});}},
@@ -1468,7 +1484,7 @@ const PANELS = [
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('et0_in', v, c.range)})))
+         pts: await buildDerivedSeriesReal('et0_in', v, c.range, {align:c.align})})))
      : [{name:'ET₀', color:'#7FA3D4', pts: await buildDerivedSeriesReal('et0_in', c.primary, c.range)}];
    lineChart(b, sets, {unit:'in/day',dec:3,h:172});
  }},
@@ -1480,7 +1496,7 @@ const PANELS = [
    if(c.compare){
      if(unitEl) unitEl.textContent='inches'; // one figure can't honestly summarize several vintages at once
      const series=await Promise.all(c.vintages.map(async v=>({v,
-       s: await buildSeriesReal('precipitation','estate',v,c.range,{agg:'sum'})})));
+       s: await buildSeriesReal('precipitation','estate',v,c.range,{agg:'sum',align:c.align})})));
      const groups=series[0].s.map((p,i)=>({lbl:p.lbl, v:series.map(x=>x.s[i].v||0)}));
      legendFor(b.parentElement,series.map(x=>({name:String(x.v),color:VCOLOR[x.v]})));
      groupedBars(b,groups,series.map(x=>String(x.v)),series.map(x=>VCOLOR[x.v]),{unit:'in',dec:2,h:172});
@@ -1497,7 +1513,7 @@ const PANELS = [
    if(c.compare){
      if(unitEl) unitEl.textContent='gallons'; // one figure can't honestly summarize several vintages at once
      const series=await Promise.all(c.vintages.map(async v=>({v,
-       s: await sumSeriesReal('irrigation_volume', c.blocks, v, c.range, {agg:'sum'})})));
+       s: await sumSeriesReal('irrigation_volume', c.blocks, v, c.range, {agg:'sum',align:c.align})})));
      const groups=series[0].s.map((p,i)=>({lbl:p.lbl, v:series.map(x=>x.s[i].v||0)}));
      legendFor(b.parentElement,series.map(x=>({name:String(x.v),color:VCOLOR[x.v]})));
      groupedBars(b, groups, series.map(x=>String(x.v)),
@@ -1627,15 +1643,19 @@ const PANELS = [
  render:(b,c)=>renderFruit(b,c)}
 ];
 
-/* Build the series list for an estate-level metric, honouring compare mode */
+/* Build the series list for an estate-level metric, honouring compare mode.
+   Merges align:c.align into opts (caller's explicit opts.align wins if
+   given) so every vSets-based panel gets compare-mode calendar alignment
+   for free, real or mock, without each caller having to remember it. */
 async function vSets(c, getterOrMetric, color, name, opts={}){
   const isReal     = typeof getterOrMetric === 'object' && getterOrMetric.metric && getterOrMetric.scope;
   const isRealMean = typeof getterOrMetric === 'object' && getterOrMetric.metric && getterOrMetric.blocks;
+  const opts2 = {...opts, align: opts.align ?? c.align};
   const fetchOne = async (v) => isRealMean
-    ? meanSeriesReal(getterOrMetric.metric, getterOrMetric.blocks, v, c.range, opts)
+    ? meanSeriesReal(getterOrMetric.metric, getterOrMetric.blocks, v, c.range, opts2)
     : isReal
-    ? buildSeriesReal(getterOrMetric.metric, getterOrMetric.scope, v, c.range, opts)
-    : buildSeries(getterOrMetric, v, c.range, opts);
+    ? buildSeriesReal(getterOrMetric.metric, getterOrMetric.scope, v, c.range, opts2)
+    : buildSeries(getterOrMetric, v, c.range, opts2);
 
   if(c.compare){
     const out=[];
@@ -1658,8 +1678,8 @@ async function soilSets(c, metric){
     return Promise.all(c.vintages.map(async v => ({
       name: String(v), color: VCOLOR[v],
       pts: REAL_CLIMATE_VINTAGES.has(v)
-        ? await buildSeriesReal(metric, 'estate', v, c.range)
-        : await meanSeriesReal(metric, c.blocks, v, c.range)
+        ? await buildSeriesReal(metric, 'estate', v, c.range, {align:c.align})
+        : await meanSeriesReal(metric, c.blocks, v, c.range, {align:c.align})
     })));
   }
   if(REAL_CLIMATE_VINTAGES.has(c.primary)){
@@ -2439,7 +2459,7 @@ function renderFilters(tab){
   wrap.appendChild(trigger); wrap.appendChild(menu);
   gV.appendChild(wrap);
   if(st.vintages.length>1){
-    gV.appendChild(el('div','fhint','Comparing '+selV(tab).join(', ')+' — each vintage shown at its own harvest-peak window'));
+    gV.appendChild(el('div','fhint','Comparing '+selV(tab).join(', ')+' — aligned to the same calendar date'));
   }
   host.appendChild(gV);
 
@@ -2775,7 +2795,7 @@ async function renderTab(tab){
 
     const ov=el('div','panel');
     ov.innerHTML=`<div class="ov-hd"><div class="ov-ttl">Estate at a glance</div>
-      <div class="ov-note">${c.compare?'Comparing '+c.vintages.join(', ')+'<br>each at its own harvest-peak window'
+      <div class="ov-note">${c.compare?'Comparing '+c.vintages.join(', ')+'<br>aligned to '+dstr(NOW)
         : (c.primary===CURRENT?'Live · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
            :'Vintage '+c.primary+' archive · static')}<br>${c.blocks.length} of 3 blocks in view</div></div>
       <div class="ov-grid" id="ovg-vineyard"></div>`;

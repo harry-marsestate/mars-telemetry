@@ -24,13 +24,14 @@ def get_connection():
 
 def upsert_sensor_readings(conn, rows: list[dict]) -> int:
     """rows: dicts with metric_key, recorded_at, value, vintage.
-    block_id is always None here -- both metrics this backfill covers
-    (air_temp, soil_moisture/soil_temp) are stored estate-level. air_temp
-    already was (matches the existing WS-01 convention); soil is a
-    deliberate scope change from the mock's per-block SP-01/02/03 rows,
-    since ERA5-Land's ~11km grid cannot distinguish our three blocks --
-    see the schema migration's reasoning. tank_id is always None (neither
-    metric is fermentation data).
+    block_id is always None here -- every metric across both backfill
+    rounds (air_temp, soil_moisture/soil_temp, and now humidity/
+    precipitation/solar) is stored estate-level. air_temp/humidity/
+    precipitation/solar already were (matches the existing WS-01
+    convention); soil is a deliberate scope change from the mock's
+    per-block SP-01/02/03 rows, since ERA5-Land's ~11km grid cannot
+    distinguish our three blocks -- see the schema migration's reasoning.
+    tank_id is always None (none of these metrics are fermentation data).
 
     ON CONFLICT target matches the table's real unique constraint
     (metric_key, sensor_id, recorded_at) -- reusing SENSOR_ID/SOURCE_SYSTEM

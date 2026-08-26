@@ -42,6 +42,7 @@ def fetch_hourly(
     hourly_vars: list[str],
     *,
     models: str | None = None,
+    precipitation_unit: str | None = None,
 ) -> dict:
     """One growing-season pull (1 Apr - 31 Oct), elevation-downscaled to
     our confirmed site elevation. `models=era5_land` is required for
@@ -49,6 +50,12 @@ def fetch_hourly(
     -- confirmed directly (the default blended archive endpoint does not
     reliably return ERA5-Land soil variables here); air_temp does not
     need it.
+
+    `precipitation_unit="inch"` matches the app's existing convention
+    (mock precipitation is stored in inches) -- Open-Meteo defaults to mm
+    otherwise. relative_humidity_2m (%) and shortwave_radiation (W/m^2)
+    need no unit override -- their defaults already match this project's
+    conventions (confirmed directly against the existing mock ranges).
     """
     params = {
         "latitude": LATITUDE,
@@ -62,6 +69,8 @@ def fetch_hourly(
     }
     if models:
         params["models"] = models
+    if precipitation_unit:
+        params["precipitation_unit"] = precipitation_unit
 
     resp = httpx.get(ARCHIVE_URL, params=params, timeout=60.0)
     resp.raise_for_status()

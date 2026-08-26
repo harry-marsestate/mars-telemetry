@@ -1290,9 +1290,15 @@ const SECTIONS = [
      above (MOCK_NOW) -- a real pipeline swap will make these real with
      no panel-level changes needed.
    - 'procedural': pure client-side hash/noise formulas with no table
-     at all (solar, wind, irrigation-by-block, labour, fruit) -- there
-     is no pending pipeline for these; becoming real means new
-     instrumentation or a new integration, not a data-source flip.
+     at all (wind, irrigation-by-block, labour, fruit) -- there is no
+     pending pipeline for these; becoming real means new instrumentation
+     or a new integration, not a data-source flip. solar was in this
+     category too until its "Measured" line (shortwave_radiation) did
+     flip real for 2022-2025 -- its kind stays 'procedural' since 2026's
+     mock generator is still a genuine client-side formula, but
+     getDataSourceLabel's REAL_CLIMATE_VINTAGES branch intercepts it
+     before this comment's claim would otherwise apply. UV stays mock
+     indefinitely (confirmed unfixable, no real source exists).
    Flipping any metric from mock to real later (or narrowing which
    vintages count as "sensors pending") means editing this table, not
    hunting through every panel's sub: string. */
@@ -1341,10 +1347,16 @@ function getDataSourceLabel(metricKey, vintage){
   const s = DATA_SOURCES[metricKey];
   if(!s) return '';
   if(REAL_CLIMATE_VINTAGES.has(vintage)){
-    if(metricKey==='air_temp') return 'Open-Meteo (ERA5)';
+    if(metricKey==='air_temp' || metricKey==='humidity' || metricKey==='precipitation') return 'Open-Meteo (ERA5)';
     if(metricKey==='soil_moisture' || metricKey==='soil_temp') return 'Open-Meteo (ERA5-Land), surface 0-7cm';
     if(metricKey==='gdd_cumulative' || metricKey==='dtr_f') return 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports';
     if(metricKey==='vpd_kpa') return 'Derived metric · from Open-Meteo (ERA5) air temperature and humidity';
+    // Solar's own real coverage is partial, unlike the metrics above: only
+    // shortwave_radiation (the "Measured" line) is real -- UV stays a hard,
+    // unfixable gap (Open-Meteo's uv_index returns all-null historically),
+    // confirmed and accepted as permanent mock. A bare "Open-Meteo (ERA5)"
+    // here would overclaim the UV portion is real too; says so explicitly.
+    if(metricKey==='solar') return 'Open-Meteo (ERA5) · UV stays simulated';
   }
   if(metricKey==='irrigation_volume' && IRRIGATION_REAL_VINTAGES.has(vintage)) return 'Mars Vineyard Farming records';
   if(s.kind==='weather') return vintage===CURRENT

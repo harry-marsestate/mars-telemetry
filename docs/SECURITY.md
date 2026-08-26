@@ -605,3 +605,31 @@ through the same precedence logic. Where a second consumer (here, the
 chat) reads the underlying table more directly, the fallback needs to be
 an active decision confirmed for that consumer too, not assumed to
 inherit correctness from the chart's own query path.
+
+## Tracked future project (scoped, not started): full calendar year coverage
+
+Everything real and mock in this project covers the growing season only
+(Apr 1 - Oct 31). Expanding to Jan-Dec would involve:
+
+- Re-running the Open-Meteo backfill for Nov-Mar across every
+  already-backfilled metric (air_temp, GDD/DTR, soil_moisture/soil_temp,
+  precipitation, humidity, solar) at the same confirmed
+  coordinates/elevation - same phased structure (schema check,
+  insert-alongside, validate, delete) as every prior round.
+- Reconsidering whether the GDD/DTR calibration scalars - solved against
+  Apr-Oct Napa Valley Grapegrowers season totals - extend cleanly to a
+  full year, or whether off-season GDD/DTR needs its own reference (very
+  likely near-zero GDD accumulation Nov-Mar at this elevation, but that's
+  a claim to verify against a real source, not assume).
+- Confirming, not assuming, whether irrigation genuinely has zero real
+  off-season activity - plausible, since vineyards don't typically
+  irrigate outside the growing season, but the Mars Irrigation source
+  files should be checked for any Nov-Mar rows before treating the
+  off-season as a real, confirmed gap rather than something to fill.
+- Extending mock generation consistently for whatever stays mock (wind,
+  UV, and anything not re-backfilled), using the same noise()-based
+  logic already used for Apr-Oct rather than a different generator.
+
+Not started. Flagging now so scope is on record before anyone assumes
+Apr-Oct is the permanent boundary rather than a deliberate, revisitable
+one.

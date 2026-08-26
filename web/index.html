@@ -1158,9 +1158,17 @@ function lineChart(box, sets, opts={}){
     let i=Math.round((rel-P.l)/((W-P.l-P.r)/(n-1||1)));
     i=Math.max(0,Math.min(n-1,i));
     cross.setAttribute('x1',X(i)); cross.setAttribute('x2',X(i)); cross.setAttribute('opacity','.5');
-    let h=`<div class="tip-t">${sets[0].pts[i].lbl}</div>`;
+    // Compare mode: each series can be anchored to a different calendar
+    // date (real-data series each use their own vintage's harvest-peak
+    // snapshot, not a shared aligned date -- see the "aligned to" fix in
+    // docs/SECURITY.md). A single shared tip-t title would silently claim
+    // every row's value happened on that one date, which isn't true --
+    // each row carries its own date instead. Single-series mode is
+    // unaffected: one series, one true date, the shared title stays.
+    let h = sets.length>1 ? '' : `<div class="tip-t">${sets[0].pts[i].lbl}</div>`;
     sets.forEach(s=>{const p=s.pts[i];
-      h+=`<div class="tip-r" style="color:${s.color}"><i></i><b>${s.name}</b> ${p.v==null?'—':fmt(p.v,opts.dec??1)+(opts.unit?' '+opts.unit:'')}</div>`;});
+      const dateSuffix = sets.length>1 ? ` · ${p.lbl}` : '';
+      h+=`<div class="tip-r" style="color:${s.color}"><i></i><b>${s.name}</b> ${p.v==null?'—':fmt(p.v,opts.dec??1)+(opts.unit?' '+opts.unit:'')}${dateSuffix}</div>`;});
     showTip(e.clientX,e.clientY,h);
   });
   svg.addEventListener('mouseleave',()=>{cross.setAttribute('opacity','0'); hideTip();});
@@ -2422,7 +2430,7 @@ function renderFilters(tab){
   wrap.appendChild(trigger); wrap.appendChild(menu);
   gV.appendChild(wrap);
   if(st.vintages.length>1){
-    gV.appendChild(el('div','fhint','Comparing '+selV(tab).join(', ')+' — aligned to the same calendar date'));
+    gV.appendChild(el('div','fhint','Comparing '+selV(tab).join(', ')+' — each vintage shown at its own harvest-peak window'));
   }
   host.appendChild(gV);
 
@@ -2758,7 +2766,7 @@ async function renderTab(tab){
 
     const ov=el('div','panel');
     ov.innerHTML=`<div class="ov-hd"><div class="ov-ttl">Estate at a glance</div>
-      <div class="ov-note">${c.compare?'Comparing '+c.vintages.join(', ')+'<br>aligned to '+dstr(NOW)
+      <div class="ov-note">${c.compare?'Comparing '+c.vintages.join(', ')+'<br>each at its own harvest-peak window'
         : (c.primary===CURRENT?'Live · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
            :'Vintage '+c.primary+' archive · static')}<br>${c.blocks.length} of 3 blocks in view</div></div>
       <div class="ov-grid" id="ovg-vineyard"></div>`;

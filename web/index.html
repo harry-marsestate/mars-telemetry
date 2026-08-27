@@ -119,6 +119,8 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   background:var(--c,var(--muted-2)); margin-right:7px; vertical-align:middle;
 }
 .chip.on.vc{background:color-mix(in srgb, var(--c) 16%, transparent); border-color:var(--c); color:var(--c)}
+.chip.disabled{opacity:.3; pointer-events:none; cursor:default}
+.fhint-inline{font-family:var(--mono); font-size:10px; color:var(--muted-2); display:flex; align-items:center; padding:0 4px}
 
 /* ── Vintage multi-select dropdown ─────────────── */
 .vdd{position:relative}
@@ -986,9 +988,21 @@ function endOfReal(v, align){
   const fs=fermSeason(v);
   const d=doyDate(v, Math.round((fs.sd+fs.ed)/2)); d.setHours(14,0,0,0); return d;
 }
+// Shared tab-level scroll offset for 30D/1Y-range panels -- 1D/5D always
+// show the fixed recent window, no scroll UI, this is a no-op for them.
+// Wraps whatever anchor endOf/endOfReal already computed, so it composes
+// with compare-mode alignment for free rather than being a separate
+// anchor concept. Clamped so scrolling can't page past Apr 1 of the
+// vintage's own season -- no data exists earlier, real or mock.
+function applyScroll(anchor, v, range, scrollDays){
+  if(!scrollDays || (range!=='30D' && range!=='1Y')) return anchor;
+  const d=new Date(anchor); d.setDate(d.getDate()-scrollDays);
+  const apr1=new Date(v,3,1);
+  return d<apr1 ? apr1 : d;
+}
 /* getter(date, vintage) -> number | null ; agg: 'mean' | 'sum' | 'last' */
 function buildSeries(getter, v, range, opts={}){
-  const r=RANGES[range], end=opts.end||endOf(v,opts.align), pts=[], agg=opts.agg||'mean';
+  const r=RANGES[range], end=opts.end||applyScroll(endOf(v,opts.align),v,range,opts.scrollDays), pts=[], agg=opts.agg||'mean';
   for(let i=r.n-1;i>=0;i--){
     const d=new Date(end.getTime()-i*r.stepH*36e5);
     let val;
@@ -1015,7 +1029,7 @@ function buildSeries(getter, v, range, opts={}){
    simulating. metric/scope match your METRICS keys and block IDs. */
 async function buildSeriesReal(metric, scope, v, range, opts={}){
   const r = RANGES[range];
-  const end = opts.end || endOfReal(v, opts.align);
+  const end = opts.end || applyScroll(endOfReal(v, opts.align), v, range, opts.scrollDays);
   const result = await getSeries({ metric, scope, vintage: v, range, end, agg: opts.agg });
   const pts = result.points.map(p => {
     const d = new Date(p.t);
@@ -1027,7 +1041,7 @@ async function buildSeriesReal(metric, scope, v, range, opts={}){
    dbt view directly (gdd/dtr/vpd/et0 aren't in sensor_readings). */
 async function buildDerivedSeriesReal(field, v, range, opts={}){
   const r = RANGES[range];
-  const end = opts.end || endOfReal(v, opts.align);
+  const end = opts.end || applyScroll(endOfReal(v, opts.align), v, range, opts.scrollDays);
   const result = await getDerivedSeries({ field, vintage: v, range, end });
   return result.points.map(p => {
     const d = new Date(p.t);
@@ -1069,8 +1083,8 @@ async function getLatestDerivedValue({ field, vintage }){
 /* §3 ── STATE ──────────────────────────────────────── */
 const state = {
   tab:'vineyard',
-  vineyard:{vintages:[CURRENT], blocks:[...ALL_IDS]},
-  winery:  {vintages:[CURRENT], blocks:[...ALL_IDS]},
+  vineyard:{vintages:[CURRENT], blocks:[...ALL_IDS], scrollDays:0},
+  winery:  {vintages:[CURRENT], blocks:[...ALL_IDS], scrollDays:0},
   range:{},
   lotSelect:{},      // per-panel-id selected InnoVint lot (ferm panel)
   vesselsArchived:{} // per-panel-id archived-toggle (tanks panel)
@@ -1404,8 +1418,8 @@ const PANELS = [
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('gdd_cumulative', v, c.range, {align:c.align})})))
-     : [{name:'GDD', color:'#C6A961', pts: await buildDerivedSeriesReal('gdd_cumulative', c.primary, c.range)}];
+         pts: await buildDerivedSeriesReal('gdd_cumulative', v, c.range, {align:c.align, scrollDays:c.scrollDays})})))
+     : [{name:'GDD', color:'#C6A961', pts: await buildDerivedSeriesReal('gdd_cumulative', c.primary, c.range, {scrollDays:c.scrollDays})}];
    legendFor(b.parentElement,[...sets,{name:`Harvest window ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD`,color:'#6E9B72',band:true}]);
    // domain ceiling must clear both HARVEST_BAND[1] and the real historical
    // max (2022 reaches 4155.2) -- lineChart only auto-expands domain to fit
@@ -1420,8 +1434,8 @@ const PANELS = [
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('dtr_f', v, c.range, {align:c.align})})))
-     : [{name:'Range', color:'#BE9C6A', pts: await buildDerivedSeriesReal('dtr_f', c.primary, c.range)}];
+         pts: await buildDerivedSeriesReal('dtr_f', v, c.range, {align:c.align, scrollDays:c.scrollDays})})))
+     : [{name:'Range', color:'#BE9C6A', pts: await buildDerivedSeriesReal('dtr_f', c.primary, c.range, {scrollDays:c.scrollDays})}];
    lineChart(b, sets, {unit:'°F',dec:1,h:172});
  }},
 
@@ -1486,8 +1500,8 @@ const PANELS = [
    const label = row?.display_label ?? `Productive band ${lo}–${hi} kPa`;
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('vpd_kpa', v, c.range, {align:c.align})})))
-     : [{name:'VPD', color:'#C9603F', pts: await buildDerivedSeriesReal('vpd_kpa', c.primary, c.range)}];
+         pts: await buildDerivedSeriesReal('vpd_kpa', v, c.range, {align:c.align, scrollDays:c.scrollDays})})))
+     : [{name:'VPD', color:'#C9603F', pts: await buildDerivedSeriesReal('vpd_kpa', c.primary, c.range, {scrollDays:c.scrollDays})}];
    legendFor(b.parentElement,[...sets,{name:label,color:'#6E9B72',band:true}]);
    lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[lo,hi],bandColor:'#6E9B72'});}},
 
@@ -1497,8 +1511,8 @@ const PANELS = [
  render: async (b,c) => {
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('et0_in', v, c.range, {align:c.align})})))
-     : [{name:'ET₀', color:'#7FA3D4', pts: await buildDerivedSeriesReal('et0_in', c.primary, c.range)}];
+         pts: await buildDerivedSeriesReal('et0_in', v, c.range, {align:c.align, scrollDays:c.scrollDays})})))
+     : [{name:'ET₀', color:'#7FA3D4', pts: await buildDerivedSeriesReal('et0_in', c.primary, c.range, {scrollDays:c.scrollDays})}];
    lineChart(b, sets, {unit:'in/day',dec:3,h:172});
  }},
 
@@ -1509,12 +1523,12 @@ const PANELS = [
    if(c.compare){
      if(unitEl) unitEl.textContent='inches'; // one figure can't honestly summarize several vintages at once
      const series=await Promise.all(c.vintages.map(async v=>({v,
-       s: await buildSeriesReal('precipitation','estate',v,c.range,{agg:'sum',align:c.align})})));
+       s: await buildSeriesReal('precipitation','estate',v,c.range,{agg:'sum',align:c.align,scrollDays:c.scrollDays})})));
      const groups=series[0].s.map((p,i)=>({lbl:p.lbl, v:series.map(x=>x.s[i].v||0)}));
      legendFor(b.parentElement,series.map(x=>({name:String(x.v),color:VCOLOR[x.v]})));
      groupedBars(b,groups,series.map(x=>String(x.v)),series.map(x=>VCOLOR[x.v]),{unit:'in',dec:2,h:172});
    } else {
-     const sets = await buildSeriesReal('precipitation','estate',c.primary,c.range,{agg:'sum'});
+     const sets = await buildSeriesReal('precipitation','estate',c.primary,c.range,{agg:'sum',scrollDays:c.scrollDays});
      if(unitEl) unitEl.textContent='in · '+fmt(sets.reduce((s,p)=>s+(p.v||0),0),2)+' total';
      barChart(b, sets, {unit:'in',dec:2,color:'#7FA3D4',name:'Rain',h:172});
    }
@@ -1526,13 +1540,13 @@ const PANELS = [
    if(c.compare){
      if(unitEl) unitEl.textContent='gallons'; // one figure can't honestly summarize several vintages at once
      const series=await Promise.all(c.vintages.map(async v=>({v,
-       s: await sumSeriesReal('irrigation_volume', c.blocks, v, c.range, {agg:'sum',align:c.align})})));
+       s: await sumSeriesReal('irrigation_volume', c.blocks, v, c.range, {agg:'sum',align:c.align,scrollDays:c.scrollDays})})));
      const groups=series[0].s.map((p,i)=>({lbl:p.lbl, v:series.map(x=>x.s[i].v||0)}));
      legendFor(b.parentElement,series.map(x=>({name:String(x.v),color:VCOLOR[x.v]})));
      groupedBars(b, groups, series.map(x=>String(x.v)),
        series.map(x=>VCOLOR[x.v]),{unit:'gal',dec:0,h:190});
    } else {
-     const sets = await sumSeriesReal('irrigation_volume', c.blocks, c.primary, c.range, {agg:'sum'});
+     const sets = await sumSeriesReal('irrigation_volume', c.blocks, c.primary, c.range, {agg:'sum', scrollDays:c.scrollDays});
      if(unitEl) unitEl.textContent='gal · '+fmt(sets.reduce((s,p)=>s+(p.v||0),0)/acresOf(c.blocks),0)+'/ac';
      barChart(b, sets, {unit:'gal',dec:0,color:'#7FA3D4',name:'Applied',h:190});
    }
@@ -1663,7 +1677,7 @@ const PANELS = [
 async function vSets(c, getterOrMetric, color, name, opts={}){
   const isReal     = typeof getterOrMetric === 'object' && getterOrMetric.metric && getterOrMetric.scope;
   const isRealMean = typeof getterOrMetric === 'object' && getterOrMetric.metric && getterOrMetric.blocks;
-  const opts2 = {...opts, align: opts.align ?? c.align};
+  const opts2 = {...opts, align: opts.align ?? c.align, scrollDays: opts.scrollDays ?? c.scrollDays};
   const fetchOne = async (v) => isRealMean
     ? meanSeriesReal(getterOrMetric.metric, getterOrMetric.blocks, v, c.range, opts2)
     : isReal
@@ -1691,15 +1705,15 @@ async function soilSets(c, metric){
     return Promise.all(c.vintages.map(async v => ({
       name: String(v), color: VCOLOR[v],
       pts: REAL_CLIMATE_VINTAGES.has(v)
-        ? await buildSeriesReal(metric, 'estate', v, c.range, {align:c.align})
-        : await meanSeriesReal(metric, c.blocks, v, c.range, {align:c.align})
+        ? await buildSeriesReal(metric, 'estate', v, c.range, {align:c.align, scrollDays:c.scrollDays})
+        : await meanSeriesReal(metric, c.blocks, v, c.range, {align:c.align, scrollDays:c.scrollDays})
     })));
   }
   if(REAL_CLIMATE_VINTAGES.has(c.primary)){
-    return [{name:'Estate', color:'#C6A961', pts: await buildSeriesReal(metric, 'estate', c.primary, c.range)}];
+    return [{name:'Estate', color:'#C6A961', pts: await buildSeriesReal(metric, 'estate', c.primary, c.range, {scrollDays:c.scrollDays})}];
   }
   return Promise.all(c.blocks.map(async id=>({name:B(id).label, color:B(id).color,
-    pts: await buildSeriesReal(metric, id, c.primary, c.range)})));
+    pts: await buildSeriesReal(metric, id, c.primary, c.range, {scrollDays:c.scrollDays})})));
 }
 </script>
 
@@ -2424,7 +2438,7 @@ async function renderAnomalies(box, ctx, tab){
 function ctxFor(tab){
   const vs=selV(tab);
   return {tab, vintages:vs, primary:primV(tab), compare:vs.length>1, align:vs.length>1,
-          blocks:selB(tab)};
+          blocks:selB(tab), scrollDays:state[tab].scrollDays||0};
 }
 
 function renderFilters(tab){
@@ -2461,7 +2475,7 @@ function renderFilters(tab){
         let v=[...st.vintages];
         if(on){ if(v.length>1) v=v.filter(x=>x!==y); }
         else if(v.length<VINTAGE_SELECT_CAP){ v.push(y); }
-        st.vintages=v; renderTab(tab);
+        st.vintages=v; st.scrollDays=0; renderTab(tab);
       };
     }
     menu.appendChild(opt);
@@ -2494,6 +2508,29 @@ function renderFilters(tab){
   gB.appendChild(cB);
   gB.appendChild(el('div','fhint', BLOCKS.map(b=>b.label+' = '+b.sub).join('  ·  ')));
   host.appendChild(gB);
+
+  // Shared browsing control -- only affects panels currently on 30D/1Y;
+  // 1D/5D panels ignore scrollDays entirely (applyScroll's no-op path).
+  // Shown on both tabs for consistency with the other filter groups,
+  // even though winery's panels don't currently have range buttons at
+  // all -- harmless no-op there, same as the block filter already is
+  // for estate-only metrics.
+  const gH=el('div','fgroup');
+  gH.appendChild(el('div','flabel','History'));
+  const histAnchor = endOf(primV(tab), st.vintages.length>1);
+  const browsingDate = applyScroll(histAnchor, primV(tab), '30D', st.scrollDays);
+  const apr1 = new Date(primV(tab),3,1);
+  const atStart = browsingDate<=apr1;
+  const hist=el('div','chips');
+  const back=el('button','chip'+(atStart?' disabled':''),'‹');
+  const fwd=el('button','chip'+(st.scrollDays?'':' disabled'),'›');
+  back.onclick=()=>{ if(!atStart){ st.scrollDays=(st.scrollDays||0)+30; renderTab(tab); } };
+  fwd.onclick=()=>{ if(st.scrollDays){ st.scrollDays=Math.max(0,st.scrollDays-30); renderTab(tab); } };
+  hist.appendChild(back);
+  hist.appendChild(el('div','fhint-inline', 'as of '+dstr(browsingDate)));
+  hist.appendChild(fwd);
+  gH.appendChild(hist);
+  host.appendChild(gH);
 
   host.appendChild(el('div','fspacer'));
   const live=st.vintages.includes(CURRENT);

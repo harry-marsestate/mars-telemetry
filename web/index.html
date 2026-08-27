@@ -274,6 +274,9 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .strip-l{font-size:8px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted-2); margin-bottom:6px}
 .strip-v{font-family:var(--mono); font-size:16px; font-weight:300; color:var(--cream)}
 .strip-v .u{font-size:10px; color:var(--muted); margin-left:2px}
+.irrigblk-vyr{margin-bottom:18px}
+.irrigblk-vyr:last-child{margin-bottom:0}
+.irrigblk-vyr-hd{font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:var(--gold); margin-bottom:8px}
 
 /* table */
 .tbl{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:10.5px}
@@ -836,12 +839,61 @@ function rainDay(date,v){
   if(n<thr) return 0;
   return +Math.max(0,((n-thr)/(1-thr))*(wet?1.55:.35)*(1+VCHAR[v].w)).toFixed(2);
 }
-function irrigDay(id,date,v){
-  const dy=doy(date);
-  if(dy<125||dy>288) return 0;
-  const n=noise('irr|'+id+'|'+v, date.getTime()/864e5);
-  if(n<.80) return 0;
-  return Math.round(B(id).acres*(2400+n*1500)*(1-VCHAR[v].w*.55));
+// irrigblk's per-vintage subtitle -- four genuinely different states,
+// too many for getDataSourceLabel's simple real/mock gate. 2022 has no
+// source file at all -- unlike the mock generator this used to fall
+// back to (irrigDay(), removed with this redesign), there's no
+// illustrative number to show for it anymore, honesty over invention.
+// 2026 has no per-block real pipeline and none is planned -- deliberately
+// not "on-site sensors pending", which would imply a sensor rollout that
+// doesn't exist; irrigation's real path has only ever been one-time
+// farm-log files, not telemetry, unlike the climate metrics that phrase
+// is accurate for.
+function irrigBlkSubtitleFor(v){
+  if(v===2022) return 'No farm irrigation records for this vintage';
+  if(v===CURRENT) return 'Mars Vineyard Farming records · data collection in progress';
+  if(v===2025) return 'Mars Vineyard Farming records — annual totals only, no dated events';
+  return 'Mars Vineyard Farming records'; // 2023, 2024
+}
+async function renderIrrigBlkVintage(box, v, c){
+  if(v===2022){
+    box.appendChild(el('div','empty','Data unavailable — no farm irrigation records exist for 2022.'));
+    return;
+  }
+  if(v===CURRENT){
+    box.appendChild(el('div','empty','Data collection in progress — per-block records for the current vintage are not yet available.'));
+    return;
+  }
+  if(v===2025){
+    strip(box,[
+      {l:B('B1').label, v:fmt(IRRIGATION_2025_TOTALS.B1,0), u:'gal · Primera only'},
+      {l:B('B2').label, v:fmt(IRRIGATION_2025_TOTALS.B2,0), u:'gal'},
+      {l:B('B3').label, v:fmt(IRRIGATION_2025_TOTALS.B3,0), u:'gal'},
+    ]);
+    return;
+  }
+  // 2023/2024: real per-block cumulative-to-date, sourced from
+  // farm_irrigation_log. No range/scroll UI on this panel (it's a
+  // snapshot, not a time series), so "as of" is just this vintage's own
+  // (possibly compare-aligned) endOfReal -- the shared scroll offset
+  // doesn't apply here, there's nothing for it to act on.
+  const end = endOfReal(v, c.align);
+  const perBlock = await Promise.all(c.blocks.map(async id=>{
+    const pts = await buildSeriesReal('irrigation_volume', id, v, '1Y', {agg:'sum', end});
+    return {id, gal: pts.reduce((s,p)=>s+(p.v||0),0)};
+  }));
+  let tot=0;
+  const rows = perBlock.map(({id,gal})=>{
+    tot+=gal;
+    return [`<span class="vdot" style="background:${B(id).color}"></span>${B(id).label}`,
+            fmt(gal,0), fmt(gal/B(id).acres,0), fmt(gal/B(id).acres/27154,2)];
+  });
+  const ac=acresOf(c.blocks);
+  strip(box,[{l:'Total applied',v:fmt(tot/1000,1),u:'k gal'},
+             {l:'Per acre',v:fmt(tot/ac,0),u:'gal'},
+             {l:'Depth',v:fmt(tot/ac/27154,2),u:'in'}]);
+  table(box,[{h:'Block'},{h:'Gallons',num:1},{h:'Gal/ac',num:1},{h:'Inches',num:1}],rows,
+    ['Total',fmt(tot,0),fmt(tot/ac,0),fmt(tot/ac/27154,2)]);
 }
 /* GDD, base 50 °F, cumulative from 1 April — memoised */
 const _gddD={}, _gddC={};
@@ -1333,7 +1385,6 @@ const DATA_SOURCES = {
   vessels:           {kind:'real', detail:'InnoVint vessel inventory'},
   solar:             {kind:'procedural', detail:'Simulated pyranometer + UV reading'},
   wind:              {kind:'procedural', detail:'Simulated weather-station reading'},
-  irrigation_by_block:{kind:'procedural', detail:'Simulated flow-meter reading'},
   labour:            {kind:'procedural', detail:'Simulated labor record'},
   fruit:             {kind:'procedural', detail:'Simulated weigh-tag record'},
 };
@@ -1545,6 +1596,18 @@ const PANELS = [
      legendFor(b.parentElement,series.map(x=>({name:String(x.v),color:VCOLOR[x.v]})));
      groupedBars(b, groups, series.map(x=>String(x.v)),
        series.map(x=>VCOLOR[x.v]),{unit:'gal',dec:0,h:190});
+   } else if(IRRIGATION_REAL_VINTAGES.has(c.primary)){
+     // Real per-block data exists for this vintage -- show each block's
+     // own bars, colored to match the block-color convention used
+     // everywhere else, instead of one merged total that hides the split.
+     const perBlock = await Promise.all(c.blocks.map(async id=>({
+       id, s: await buildSeriesReal('irrigation_volume', id, c.primary, c.range, {agg:'sum', scrollDays:c.scrollDays})
+     })));
+     const totalGal = perBlock.reduce((s,x)=>s+x.s.reduce((s2,p)=>s2+(p.v||0),0),0);
+     if(unitEl) unitEl.textContent='gal · '+fmt(totalGal/acresOf(c.blocks),0)+'/ac';
+     const groups = perBlock[0].s.map((p,i)=>({lbl:p.lbl, v:perBlock.map(x=>x.s[i].v||0)}));
+     legendFor(b.parentElement, perBlock.map(x=>({name:B(x.id).label,color:B(x.id).color})));
+     groupedBars(b, groups, perBlock.map(x=>B(x.id).label), perBlock.map(x=>B(x.id).color), {unit:'gal',dec:0,h:190});
    } else {
      const sets = await sumSeriesReal('irrigation_volume', c.blocks, c.primary, c.range, {agg:'sum', scrollDays:c.scrollDays});
      if(unitEl) unitEl.textContent='gal · '+fmt(sets.reduce((s,p)=>s+(p.v||0),0)/acresOf(c.blocks),0)+'/ac';
@@ -1553,37 +1616,18 @@ const PANELS = [
  }},
 
 {id:'irrigblk', tab:'vineyard', sect:'soil', span:'s4', minRole:'operator', title:'Irrigation by block', unit:'gallons · gal/acre · inches',
- sub:(c)=>getDataSourceLabel('irrigation_by_block',c.primary),
- render:(b,c)=>{
+ sub:(c)=> c.compare
+   ? 'Mars Vineyard Farming records — status varies by vintage shown below'
+   : irrigBlkSubtitleFor(c.primary),
+ render: async (b,c) => {
    b.innerHTML='';
-   const v=c.primary, end=endOf(v,c.align);
-   let tot=0;
-   const rows=c.blocks.map(id=>{
-     let gal=0;
-     for(let d=new Date(v,4,1); d<=end; d.setDate(d.getDate()+1)) gal+=irrigDay(id,new Date(d),v);
-     tot+=gal;
-     return [`<span class="vdot" style="background:${B(id).color}"></span>${B(id).label}`,
-             fmt(gal,0), fmt(gal/B(id).acres,0), fmt(gal/B(id).acres/27154,2)];});
-   const ac=acresOf(c.blocks);
-   strip(b,[{l:'Total applied',v:fmt(tot/1000,1),u:'k gal'},
-            {l:'Per acre',v:fmt(tot/ac,0),u:'gal'},
-            {l:'Depth',v:fmt(tot/ac/27154,2),u:'in'}]);
-   table(b,[{h:'Block'},{h:'Gallons',num:1},{h:'Gal/ac',num:1},{h:'Inches',num:1}],rows,
-     ['Total',fmt(tot,0),fmt(tot/ac,0),fmt(tot/ac/27154,2)]);}},
-
-{id:'irrig2025', tab:'vineyard', sect:'soil', span:'s12', minRole:'operator',
- title:'2025 irrigation (year-end totals)', unit:'gallons',
- sub:(c)=>'Mars Vineyard Farming records — annual totals only, no dated events',
- render:(b,c)=>{
-   b.innerHTML='';
-   const show = !c.compare && c.primary===2025;
-   b.parentElement.style.display = show ? '' : 'none';
-   if(!show) return;
-   strip(b,[
-     {l:B('B1').label, v:fmt(IRRIGATION_2025_TOTALS.B1,0), u:'gal · Primera only'},
-     {l:B('B2').label, v:fmt(IRRIGATION_2025_TOTALS.B2,0), u:'gal'},
-     {l:B('B3').label, v:fmt(IRRIGATION_2025_TOTALS.B3,0), u:'gal'},
-   ]);
+   const vintagesDesc = [...c.vintages].sort((x,y)=>y-x); // most-recent-first
+   for(const v of vintagesDesc){
+     const section = el('div','irrigblk-vyr');
+     if(c.compare) section.appendChild(el('div','irrigblk-vyr-hd', String(v)));
+     await renderIrrigBlkVintage(section, v, c);
+     b.appendChild(section);
+   }
  }},
 
 /* ══ VINEYARD · LABOUR ══ */

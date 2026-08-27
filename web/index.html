@@ -1452,7 +1452,7 @@ const PANELS = [
 /* ══ VINEYARD · SOIL & WATER ══ */
 {id:'soilmoist', tab:'vineyard', sect:'soil', span:'s8', minRole:'all', title:'Soil moisture', unit:'% VWC',
  sub:(c)=>getDataSourceLabel('soil_moisture',c.primary), range:'30D', perBlock:'soilMoist',
- info:"Percent of soil volume held as water at 18 inches, where most feeder roots sit. The shaded band is the deficit-irrigation target, deliberately kept below field capacity to concentrate flavor and manage canopy vigor — not a sign of stress unless it drops well under the band.",
+ info:"Percent of soil volume held as water in the active root zone. The shaded band is the deficit-irrigation target, deliberately kept below field capacity to concentrate flavor and manage canopy vigor — not a sign of stress unless it drops well under the band.",
  render: async (b,c) => {
    const th = await getThresholds();
    const row = interpolateThreshold(th.byKey.get('soil_below_refill'), th.byKey);
@@ -1476,7 +1476,8 @@ const PANELS = [
  sub:(c)=>getDataSourceLabel('vpd_kpa',c.primary), range:'5D',
  info:(th)=>{
    const t = interpolateThreshold(th?.byKey.get('vpd_high'), th?.byKey)?.threshold ?? 3.1;
-   return `Vapour pressure deficit measures how strongly the air pulls moisture from the leaf — a stronger driver of vine water stress than temperature alone. Above roughly ${t} kPa the vine starts closing stomata to conserve water, which also slows photosynthesis and ripening.`;
+   const lo = 0.4; // same hardcoded low bound as the render function below -- no DB row for it yet
+   return `Vapour pressure deficit measures how strongly the air pulls moisture from the leaf — a stronger driver of vine water stress than temperature alone. Above roughly ${t} kPa the vine starts closing stomata to conserve water, which also slows photosynthesis and ripening. Below roughly ${lo} kPa, evaporative demand is low — the vine faces little water stress, but transpiration also slows, and in humid, still conditions this is when disease pressure (powdery mildew) tends to rise, echoing the RH panel's mildew guidance from the other direction.`;
  },
  render: async (b,c) => {
    const th = await getThresholds();

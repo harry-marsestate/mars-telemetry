@@ -119,8 +119,6 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   background:var(--c,var(--muted-2)); margin-right:7px; vertical-align:middle;
 }
 .chip.on.vc{background:color-mix(in srgb, var(--c) 16%, transparent); border-color:var(--c); color:var(--c)}
-.chip.disabled{opacity:.3; pointer-events:none; cursor:default}
-.fhint-inline{font-family:var(--mono); font-size:10px; color:var(--muted-2); display:flex; align-items:center; padding:0 4px}
 
 /* ── Vintage multi-select dropdown ─────────────── */
 .vdd{position:relative}
@@ -200,10 +198,16 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   border:1px solid var(--line-2); border-radius:2px; padding:1px 6px; white-space:nowrap;
 }
 .p-sub{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); margin-top:5px; letter-spacing:.02em}
+.p-hd-actions{display:flex; align-items:center; gap:8px; flex:none}
 .rng{display:flex; gap:1px; background:var(--ink); border:1px solid var(--line); border-radius:2px; padding:2px; flex:none}
 .rng button{font-family:var(--mono); font-size:9.5px; padding:3px 8px; color:var(--muted-2); border-radius:1px; transition:all .15s}
 .rng button:hover{color:var(--cream)}
 .rng button.on{background:var(--ink-4); color:var(--gold)}
+.pscroll{display:flex; align-items:center; gap:2px; background:var(--ink); border:1px solid var(--line); border-radius:2px; padding:2px 3px; flex:none}
+.pscroll button{font-family:var(--mono); font-size:9.5px; padding:3px 6px; color:var(--muted-2); border-radius:1px; transition:all .15s}
+.pscroll button:hover{color:var(--cream)}
+.pscroll button.disabled{opacity:.3; pointer-events:none; cursor:default}
+.pscroll .pscroll-lbl{font-family:var(--mono); font-size:9px; color:var(--muted-2); padding:0 3px; white-space:nowrap}
 .p-body{padding:2px 16px 15px; flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center}
 .p-body:has(table){justify-content:flex-start}
 .p-body:has(.anom){justify-content:flex-start}
@@ -1135,9 +1139,10 @@ async function getLatestDerivedValue({ field, vintage }){
 /* §3 ── STATE ──────────────────────────────────────── */
 const state = {
   tab:'vineyard',
-  vineyard:{vintages:[CURRENT], blocks:[...ALL_IDS], scrollDays:0},
-  winery:  {vintages:[CURRENT], blocks:[...ALL_IDS], scrollDays:0},
+  vineyard:{vintages:[CURRENT], blocks:[...ALL_IDS]},
+  winery:  {vintages:[CURRENT], blocks:[...ALL_IDS]},
   range:{},
+  scrollDays:{},     // per-panel-id 30D/1Y history offset, same convention as `range`
   lotSelect:{},      // per-panel-id selected InnoVint lot (ferm panel)
   vesselsArchived:{} // per-panel-id archived-toggle (tanks panel)
 };
@@ -2482,7 +2487,7 @@ async function renderAnomalies(box, ctx, tab){
 function ctxFor(tab){
   const vs=selV(tab);
   return {tab, vintages:vs, primary:primV(tab), compare:vs.length>1, align:vs.length>1,
-          blocks:selB(tab), scrollDays:state[tab].scrollDays||0};
+          blocks:selB(tab)};
 }
 
 function renderFilters(tab){
@@ -2519,7 +2524,9 @@ function renderFilters(tab){
         let v=[...st.vintages];
         if(on){ if(v.length>1) v=v.filter(x=>x!==y); }
         else if(v.length<VINTAGE_SELECT_CAP){ v.push(y); }
-        st.vintages=v; st.scrollDays=0; renderTab(tab);
+        st.vintages=v;
+        PANELS.filter(p=>p.tab===tab).forEach(p=>delete state.scrollDays[p.id]);
+        renderTab(tab);
       };
     }
     menu.appendChild(opt);
@@ -2552,29 +2559,6 @@ function renderFilters(tab){
   gB.appendChild(cB);
   gB.appendChild(el('div','fhint', BLOCKS.map(b=>b.label+' = '+b.sub).join('  ·  ')));
   host.appendChild(gB);
-
-  // Shared browsing control -- only affects panels currently on 30D/1Y;
-  // 1D/5D panels ignore scrollDays entirely (applyScroll's no-op path).
-  // Shown on both tabs for consistency with the other filter groups,
-  // even though winery's panels don't currently have range buttons at
-  // all -- harmless no-op there, same as the block filter already is
-  // for estate-only metrics.
-  const gH=el('div','fgroup');
-  gH.appendChild(el('div','flabel','History'));
-  const histAnchor = endOf(primV(tab), st.vintages.length>1);
-  const browsingDate = applyScroll(histAnchor, primV(tab), '30D', st.scrollDays);
-  const apr1 = new Date(primV(tab),3,1);
-  const atStart = browsingDate<=apr1;
-  const hist=el('div','chips');
-  const back=el('button','chip'+(atStart?' disabled':''),'‹');
-  const fwd=el('button','chip'+(st.scrollDays?'':' disabled'),'›');
-  back.onclick=()=>{ if(!atStart){ st.scrollDays=(st.scrollDays||0)+30; renderTab(tab); } };
-  fwd.onclick=()=>{ if(st.scrollDays){ st.scrollDays=Math.max(0,st.scrollDays-30); renderTab(tab); } };
-  hist.appendChild(back);
-  hist.appendChild(el('div','fhint-inline', 'as of '+dstr(browsingDate)));
-  hist.appendChild(fwd);
-  gH.appendChild(hist);
-  host.appendChild(gH);
 
   host.appendChild(el('div','fspacer'));
   const live=st.vintages.includes(CURRENT);
@@ -2838,14 +2822,23 @@ function makePanel(p, c){
   }
   if(p.range){
     if(!state.range[p.id]) state.range[p.id]=p.range;
+    const rangeOpts = p.rangeOptions||Object.keys(RANGES);
+    const actions=el('div','p-hd-actions');
     const r=el('div','rng');
-    (p.rangeOptions||Object.keys(RANGES)).forEach(k=>{
+    let updateScrollUI=()=>{};
+    rangeOpts.forEach(k=>{
       const val=RANGES[k];
       const b=el('button', state.range[p.id]===k?'on':'', val.label);
       b.onclick=()=>{
         state.range[p.id]=k;
+        // Deliberately does NOT reset state.scrollDays[p.id] -- scroll offset
+        // is independent of range, same as the shared tab-level scrollDays it
+        // replaced was independent of which panel's range was active. A panel
+        // scrolled 60 days back on 30D, switched to 5D (where applyScroll's
+        // no-op path ignores the offset) and back to 30D resumes at -60, not 0.
         if(SCOPED_RERENDER_SAFE.has(p.id)){
           r.querySelectorAll('button').forEach(x=>x.classList.toggle('on', x===b));
+          updateScrollUI();
           rerenderPanel(p.id);
         } else {
           renderTab(c.tab);
@@ -2853,7 +2846,47 @@ function makePanel(p, c){
       };
       r.appendChild(b);
     });
-    hd.appendChild(r);
+    actions.appendChild(r);
+
+    // Per-panel history scroll -- only meaningful for panels that can reach
+    // 30D/1Y; applyScroll no-ops for 1D/5D, mirrored here by disabling the
+    // buttons rather than hiding them (keeps header width stable across a
+    // range switch, which scoped rerenders can't otherwise account for since
+    // they never rebuild hd). Always present when scrollable, matching the
+    // "always render, disable when N/A" choice made for this redesign.
+    if(rangeOpts.includes('30D') || rangeOpts.includes('1Y')){
+      const sc=el('div','pscroll');
+      const back=el('button','','‹');
+      const lbl=el('div','pscroll-lbl');
+      const fwd=el('button','','›');
+      updateScrollUI=()=>{
+        const rng=state.range[p.id];
+        const scrollable = rng==='30D' || rng==='1Y';
+        const sd=state.scrollDays[p.id]||0;
+        const anchor=applyScroll(endOf(c.primary,c.compare), c.primary, rng, sd);
+        const apr1=new Date(c.primary,3,1);
+        const atStart=anchor<=apr1;
+        back.classList.toggle('disabled', !scrollable||atStart);
+        fwd.classList.toggle('disabled', !scrollable||!sd);
+        lbl.textContent = scrollable ? 'as of '+dstr(anchor) : '—';
+      };
+      back.onclick=()=>{
+        if(back.classList.contains('disabled')) return;
+        state.scrollDays[p.id]=(state.scrollDays[p.id]||0)+30;
+        updateScrollUI();
+        if(SCOPED_RERENDER_SAFE.has(p.id)) rerenderPanel(p.id); else renderTab(c.tab);
+      };
+      fwd.onclick=()=>{
+        if(fwd.classList.contains('disabled')) return;
+        state.scrollDays[p.id]=Math.max(0,(state.scrollDays[p.id]||0)-30);
+        updateScrollUI();
+        if(SCOPED_RERENDER_SAFE.has(p.id)) rerenderPanel(p.id); else renderTab(c.tab);
+      };
+      sc.appendChild(back); sc.appendChild(lbl); sc.appendChild(fwd);
+      actions.appendChild(sc);
+      updateScrollUI();
+    }
+    hd.appendChild(actions);
   }
   panel.appendChild(hd);
   const body=el('div','p-body'+(p.id==='map'?' mapbody':''));
@@ -2861,7 +2894,7 @@ function makePanel(p, c){
   const unitEl=hd.querySelector('.p-unit'); // passed to render() so a panel can
     // show a computed figure (e.g. "gal · 1,234/ac") instead of a static unit
   return {panel, body, run: async ()=>{
-    try{ await p.render(body,{...c, range:state.range[p.id]||'5D'}, unitEl); }
+    try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); }
     catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); }
   }};
 }

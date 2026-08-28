@@ -2074,7 +2074,17 @@ async function fetchThresholds(){
 }
 let thresholdsPromise = null;
 function getThresholds(){
-  if(!thresholdsPromise) thresholdsPromise = fetchThresholds();
+  if(!thresholdsPromise){
+    // A failed attempt must NOT be memoized permanently -- fetchThresholds()
+    // fires eagerly at parse time (below), before Supabase JS is guaranteed
+    // to have restored the session from localStorage. Losing that race once
+    // (observed live: request goes out as anon, which correctly lacks
+    // SELECT, producing "permission denied for table anomaly_thresholds")
+    // must not poison every later caller for the rest of the page's life --
+    // clear the memo on failure so the next call retries fresh instead of
+    // requiring a hard reload.
+    thresholdsPromise = fetchThresholds().catch(err => { thresholdsPromise = null; throw err; });
+  }
   return thresholdsPromise;
 }
 // Synchronous mirror for call sites that can't await (info-tooltip hover
@@ -2439,21 +2449,31 @@ async function renderAnomalies(box, ctx, tab){
     hits=[...rpcHits, ...clientHits];
   } else if(tab==='winery'){
     const v=ctx.primary;
+    // Fail-soft to match the vineyard branch above: anomalies_eval can hit
+    // the same initial-page-load-burst statement timeout here as it does for
+    // vineyard (confirmed live -- concurrent calls under load return 57014).
+    // Letting `error` propagate blanks the whole panel instead of just
+    // skipping the RPC-derived hits, the same class of bug the vineyard
+    // branch already avoids.
     const { data, error } = await sb.rpc('anomalies_eval', {
       p_vintage: v,
       p_as_of: endOfReal(v).toISOString(),
       p_tab: 'winery'
     });
-    if(error) throw error;
-    const rpcHits = data.map(row => ({
-      sev: row.severity,
-      out: {
-        t: row.title,
-        d: (row.block_id ? B(row.block_id).label+' · ' : row.tank_id ? row.tank_id+' · ' : '')
-           + row.metric_key + ' ' + fmt(row.observed_value,2),
-        m: row.message
-      }
-    }));
+    let rpcHits = [];
+    if(!error){
+      rpcHits = data.map(row => ({
+        sev: row.severity,
+        out: {
+          t: row.title,
+          d: (row.block_id ? B(row.block_id).label+' · ' : row.tank_id ? row.tank_id+' · ' : '')
+             + row.metric_key + ' ' + fmt(row.observed_value,2),
+          m: row.message
+        }
+      }));
+    } else {
+      console.error('winery anomalies_eval failed:', error);
+    }
     const c={...ctx, end:endOf(ctx.primary,ctx.align)};
     const clientHits=RULES.filter(r=>r.tab===tab).map(r=>{
       let out=null; try{out=r.test(c);}catch(e){}

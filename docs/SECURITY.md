@@ -633,3 +633,82 @@ Everything real and mock in this project covers the growing season only
 Not started. Flagging now so scope is on record before anyone assumes
 Apr-Oct is the permanent boundary rather than a deliberate, revisitable
 one.
+
+## anomaly_thresholds "permission denied" for operators: looked like the grant/policy pattern above, wasn't - checked and ruled out RLS, root cause was two client-side resilience gaps
+
+An operator session hit `permission denied for table anomaly_thresholds`
+on the winery tab (cellar temperature/humidity panels showing "Panel
+unavailable", winery Insights and Anomalies blank) - on its face the same
+shape as the `anomaly_thresholds`/`customer_block_access` two-gates
+incidents already on record above. It was not. Before touching anything,
+checked for exactly that regression and ruled it out directly against the
+live database, not migration files:
+
+- `pg_policies`: `anomaly_thresholds_read` present, `using (true)`, role
+  `{public}`.
+- `information_schema.role_table_grants`: `authenticated` has `SELECT`.
+- `information_schema.column_privileges`: all columns granted to
+  `authenticated`.
+- `set role authenticated; select * from anomaly_thresholds` succeeds
+  directly in Postgres.
+- 20 concurrent authenticated REST calls to `anomaly_thresholds` (real
+  session JWT, real `apikey` header, not a superuser simulation): 20/20
+  succeeded.
+- `anomalies_eval()`: exactly one overload live (the 3-arg
+  `p_tab default 'vineyard'` version from the consolidation migration),
+  `EXECUTE` granted to both `PUBLIC` and `authenticated`.
+
+Both gates from the original incident are intact and correctly paired.
+This was never a grant/policy regression.
+
+**What it actually was - two separate application-layer bugs, each
+reproduced live:**
+
+1. **`getThresholds()` (web/index.html) had a startup race with no
+   retry.** `fetchThresholds()` fires eagerly at script-parse time,
+   before Supabase JS is guaranteed to have restored the session from
+   `localStorage`. Losing that race once - most likely right after a
+   fresh interactive sign-in - sends the request as `anon`, which
+   correctly lacks `SELECT` (anon is not meant to read this table
+   unauthenticated), producing exactly `permission denied for table
+   anomaly_thresholds`. `thresholdsPromise` memoized that failure
+   permanently with no catch/reset, so the one race loss broke `cellart`/
+   `cellarh` for the rest of the page's life - only a hard reload
+   recovered. Reproduced deterministically (not inferred): monkey-patched
+   `sb.from` to fail exactly once with this error, called the real
+   `getThresholds()` twice - first call failed as expected, second call
+   (unpatched, real table) retried fresh and succeeded, confirming the
+   fix (`.catch(err => { thresholdsPromise = null; throw err; })`)
+   resolves it without needing a reload.
+2. **Winery's anomalies branch (`renderAnomalies`, the `tab==='winery'`
+   case) had no fail-soft handling, unlike the vineyard branch right
+   above it.** `anomalies_eval()` can genuinely hit a Postgres statement
+   timeout under the concurrent request burst of a page load - already
+   documented and already defended against in the vineyard branch via
+   `Promise.allSettled` + log-and-continue. Confirmed live: a 10-way
+   concurrent burst against `anomalies_eval` returned `57014 canceling
+   statement due to statement timeout` on 8 of 10 calls; one real page
+   load's vineyard call hit exactly this and degraded silently as
+   designed, a different load's winery call hit it and blanked the whole
+   panel (`if(error) throw error;`, no fallback). Verified the fix by
+   intercepting `sb.rpc` to return a synthetic `57014` error for just the
+   winery call and running the real `renderAnomalies('winery')` against
+   it: no throw, client-side `RULES` hits still rendered, matching
+   vineyard's existing behavior.
+
+Deliberately left untouched: the `57014` timeout itself. It's an already
+-accepted characteristic of the initial page-load burst (the vineyard
+code comment predicted this before winery ever hit it), not something to
+eliminate here - the fix makes both call sites survive it the same way,
+not stop it from happening.
+
+RULE: an `anomaly_thresholds`-shaped "permission denied" is not
+automatically a repeat of the grant-without-policy/policy-without-grant
+incidents above. Check `pg_policies` and
+`information_schema.role_table_grants` directly against the live database
+first - if both are clean, the bug is very likely a client-side
+resilience gap (an eager/memoized fetch racing session restore, or a
+call site missing the fail-soft handling a sibling call site already has
+for the same known burst-timeout), not an RLS regression. Don't
+re-investigate the RLS hypothesis a second time on this table without
+first re-running these exact checks.

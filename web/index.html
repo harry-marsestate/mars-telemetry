@@ -1592,6 +1592,7 @@ const PANELS = [
 
 {id:'irrig', tab:'vineyard', sect:'soil', span:'s8', minRole:'operator', title:'Irrigation volume applied', unit:'gallons',
  sub:(c)=>getDataSourceLabel('irrigation_volume',c.primary), range:'30D',
+ rangeOptions:['30D','1Y'],
  render: async (b,c,unitEl) => {
    if(c.compare){
      if(unitEl) unitEl.textContent='gallons'; // one figure can't honestly summarize several vintages at once

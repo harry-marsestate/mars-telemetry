@@ -1412,7 +1412,6 @@ const DATA_SOURCES = {
   gdd_cumulative:    {kind:'derived', detail:'from air temperature (base 50°F)'},
   dtr_f:             {kind:'derived', detail:'from air temperature (daily max − min)'},
   vpd_kpa:           {kind:'derived', detail:'from air temperature and humidity'},
-  vpd_peak_kpa:      {kind:'derived', detail:'from hourly air temperature and humidity, daily max'},
   et0_in:            {kind:'derived', detail:'from temperature, humidity, wind, and solar radiation'},
   lot_analyses:      {kind:'real', detail:'InnoVint lab analyses'},
   vessels:           {kind:'real', detail:'InnoVint vessel inventory'},
@@ -1471,13 +1470,13 @@ function getDataSourceLabel(metricKey, vintage){
     if(metricKey==='air_temp' || metricKey==='humidity' || metricKey==='precipitation') return 'Open-Meteo (ERA5)';
     if(metricKey==='soil_moisture' || metricKey==='soil_temp') return 'Open-Meteo (ERA5-Land), surface 0-7cm';
     if(metricKey==='gdd_cumulative' || metricKey==='dtr_f') return 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports';
-    // Disambiguates from vpd_peak_kpa below now that both exist on the same
-    // tab -- "daily average" wasn't said anywhere before this, which was a
-    // real gap independent of the peak metric (a user had no way to know
-    // this line under-represents afternoon stress). Same 'solar' pattern
-    // just below already does exactly this kind of disambiguating suffix.
+    // "daily average" wasn't said anywhere before this, which was a real
+    // gap independent of the (now-removed) peak chart panel -- a user had
+    // no way to know this line under-represents afternoon stress. Same
+    // 'solar' pattern just below already does exactly this kind of
+    // disambiguating suffix. This wording stands on its own, unrelated to
+    // the vpdpeak panel removal -- see docs/SECURITY.md.
     if(metricKey==='vpd_kpa') return 'Derived metric · from Open-Meteo (ERA5) air temperature and humidity, daily average';
-    if(metricKey==='vpd_peak_kpa') return 'Derived metric · from Open-Meteo (ERA5) hourly air temperature and humidity, daily peak';
     // Solar's own real coverage is partial, unlike the metrics above: only
     // shortwave_radiation (the "Measured" line) is real -- UV stays a hard,
     // unfixable gap (Open-Meteo's uv_index returns all-null historically),
@@ -1633,34 +1632,6 @@ const PANELS = [
      : [{name:'VPD', color:'#C9603F', pts: await buildDerivedSeriesReal('vpd_kpa', c.primary, c.range, {scrollDays:c.scrollDays})}];
    legendFor(b.parentElement,[...sets,{name:label,color:'#6E9B72',band:true}]);
    lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[lo,hi],bandColor:'#6E9B72'});}},
-
-{id:'vpdpeak', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'VPD, afternoon peak', unit:'kPa',
- sub:(c)=>getDataSourceLabel('vpd_peak_kpa',c.primary), range:'5D',
- info:(th)=>{
-   const w = interpolateThreshold(th?.byKey.get('vpd_peak_warn'), th?.byKey)?.threshold ?? 5.0;
-   const a = interpolateThreshold(th?.byKey.get('vpd_peak_alert'), th?.byKey)?.threshold ?? 6.5;
-   return `The highest VPD reached during the day, not the daily average — this is the number that actually corresponds to vine stress research, which measures afternoon peaks. A daily average smooths away exactly the hours that matter: real data here shows the average line rarely exceeds 3 kPa even on days the true afternoon peak clears 6. Above roughly ${w} kPa vines are under rising stress; above roughly ${a} kPa conditions are among this site's most severe on record.`;
- },
- render: async (b,c) => {
-   const th = await getThresholds();
-   const warn = interpolateThreshold(th.byKey.get('vpd_peak_warn'), th.byKey)?.threshold ?? 5.0;
-   const alert = interpolateThreshold(th.byKey.get('vpd_peak_alert'), th.byKey)?.threshold ?? 6.5;
-   const label = `Elevated ≥${warn} · severe ≥${alert} kPa`;
-   const sets = c.compare
-     ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('vpd_peak_kpa', v, c.range, {align:c.align, scrollDays:c.scrollDays})})))
-     : [{name:'VPD peak', color:'#C9603F', pts: await buildDerivedSeriesReal('vpd_peak_kpa', c.primary, c.range, {scrollDays:c.scrollDays})}];
-   // Reuses the SAME single-band mechanism the existing vpd panel already
-   // uses (band:[lo,hi] -> two dashed threshold lines + one shaded rect
-   // between them, all in lineChart already, no new option or primitive).
-   // Two gt-only tiers map onto it directly: band:[warn,alert] draws a
-   // dashed line at each threshold and shades the "elevated" zone between
-   // them. Below warn and above alert are both left unshaded -- reads
-   // correctly as normal/severe without a third region lineChart has no
-   // mechanism for. --warn (#C9A23F) is this app's own existing color
-   // token for exactly this severity, not a new pick.
-   legendFor(b.parentElement,[...sets,{name:label,color:'#C9A23F',band:true}]);
-   lineChart(b,sets,{unit:'kPa',dec:2,h:172,band:[warn,alert],bandColor:'#C9A23F',bandLabel:label});}},
 
 {id:'et0', tab:'vineyard', sect:'soil', span:'s4', minRole:'all', title:'Reference ET (ET₀)', unit:'in / day',
  sub:(c)=>getDataSourceLabel('et0_in',c.primary), range:'30D',

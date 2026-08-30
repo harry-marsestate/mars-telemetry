@@ -48,21 +48,62 @@ def _dedupe_by_key(rows: list[dict], key_fields: tuple[str, ...]) -> list[dict]:
     return list(deduped.values())
 
 
-def load_innovint_block_map(conn) -> dict[str, str]:
-    """InnoVint block id -> local block_id, resolved subset only.
+def load_innovint_block_map(conn) -> dict[str, list[tuple]]:
+    """InnoVint block id -> [(valid_from, valid_to, local block_id), ...].
 
-    Loaded once per asset run rather than queried per lot: this mapping
-    is small (2 rows today -- B2, B3) and changes rarely, by hand, per
-    the blocks.innovint_block_id migration and docs/SECURITY.md. B1 is
-    expected to be absent from this dict -- that's the documented,
-    correct state (no confident InnoVint block match exists), not an
-    error to handle specially.
+    Reads block_innovint_map, NOT the superseded blocks.innovint_block_id
+    column. Time-scoped because a local block can map to different InnoVint
+    block objects across vintages: B1 is xxV1 for vintages <=2023 (the
+    pre-replant Zinfandel parcel) and has no mapping for 2024+ until InnoVint
+    gains a post-replant block object.
+
+    Loaded once per run: 3 rows today, hand-edited, changes ~never.
+
+    BEHAVIOR CHANGE, deliberate: B1 was previously absent from this map
+    entirely, so lots resolving to xxV1 landed block_id NULL. With the B1
+    mapping present, 8 single-component lots (the 2022/2023 Zinfandel and
+    lees lots) now resolve to 'B1' in lot_analyses and vessels. That data was
+    always Block 1's; it is newly visible, not newly correct.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "select innovint_block_id, block_id from blocks where innovint_block_id is not null"
+            """
+            select innovint_block_id, valid_from_vintage, valid_to_vintage, block_id
+            from block_innovint_map
+            """
         )
-        return dict(cur.fetchall())
+        out: dict[str, list[tuple]] = {}
+        for iv_block, v_from, v_to, block_id in cur.fetchall():
+            out.setdefault(iv_block, []).append((v_from, v_to, block_id))
+        return out
+
+
+class AmbiguousBlockMapping(RuntimeError):
+    pass
+
+
+def resolve_block_id(
+    block_map: dict[str, list[tuple]], innovint_block_id: str, vintage: int
+) -> str | None:
+    """Local block_id for an InnoVint block in a given vintage, or None.
+
+    Raises rather than picking a winner when two windows overlap. The partial
+    unique indexes on block_innovint_map prevent the likely case (two open
+    windows); this catches overlapping CLOSED windows, which they cannot. A
+    silent wrong answer here would attribute another block's history to a
+    local block with no error -- the exact failure docs/SECURITY.md warns of.
+    """
+    hits = [
+        block_id
+        for v_from, v_to, block_id in block_map.get(innovint_block_id, [])
+        if (v_from is None or vintage >= v_from) and (v_to is None or vintage <= v_to)
+    ]
+    if len(hits) > 1:
+        raise AmbiguousBlockMapping(
+            f"{innovint_block_id} maps to {sorted(hits)} for vintage {vintage}; "
+            f"fix the overlapping windows in block_innovint_map"
+        )
+    return hits[0] if hits else None
 
 
 def upsert_lot_analyses(conn, rows: list[dict]) -> int:
@@ -156,3 +197,80 @@ def upsert_vessels(conn, rows: list[dict]) -> int:
         )
     conn.commit()
     return len(rows)
+
+
+def upsert_harvest_receipts(conn, rows: list[dict], vintages: list[int]) -> tuple[int, int]:
+    """Upsert receipts, then delete stale rows for the vintages just fetched.
+
+    Deliberately NOT pure-upsert, unlike upsert_lot_analyses/upsert_vessels
+    above. Those sources expose a deleted/archived flag, so a removed record
+    arrives as data. /growerReceipts exposes neither a `deleted` field nor a
+    `state` filter -- a deleted receipt simply vanishes from the response, and
+    reconciling the full per-vintage payload is the only way to notice.
+
+    Scoping is the entire safety of this, per the Track 2 irrigation scoping
+    mistake in docs/SECURITY.md: the delete is bounded to source_system
+    'innovint' AND the specific vintages fetched this run. `vintages` is passed
+    explicitly by the caller rather than derived from `rows`, so a vintage that
+    legitimately returned zero receipts is still reconciled -- while a failed
+    fetch raises before reaching here and deletes nothing.
+    """
+    if not vintages:
+        return (0, 0)
+    rows = _dedupe_by_key(rows, ("innovint_receipt_id",))
+    with conn.cursor() as cur:
+        if rows:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                insert into harvest_receipts
+                    (innovint_receipt_id, innovint_action_id, innovint_lot_id,
+                     innovint_block_id, block_id, vintage, weight_value,
+                     weight_unit, weight_tons, receipt_date, weigh_tag_number,
+                     varietal_name, lot_code, lot_name, grower_id, vineyard_id,
+                     appellation_id, source_system, synced_at)
+                values %s
+                on conflict (innovint_receipt_id) do update set
+                    innovint_action_id = excluded.innovint_action_id,
+                    innovint_lot_id    = excluded.innovint_lot_id,
+                    innovint_block_id  = excluded.innovint_block_id,
+                    block_id           = excluded.block_id,
+                    vintage            = excluded.vintage,
+                    weight_value       = excluded.weight_value,
+                    weight_unit        = excluded.weight_unit,
+                    weight_tons        = excluded.weight_tons,
+                    receipt_date       = excluded.receipt_date,
+                    weigh_tag_number   = excluded.weigh_tag_number,
+                    varietal_name      = excluded.varietal_name,
+                    lot_code           = excluded.lot_code,
+                    lot_name           = excluded.lot_name,
+                    grower_id          = excluded.grower_id,
+                    vineyard_id        = excluded.vineyard_id,
+                    appellation_id     = excluded.appellation_id,
+                    synced_at          = excluded.synced_at
+                """,
+                [
+                    (
+                        r["innovint_receipt_id"], r["innovint_action_id"],
+                        r["innovint_lot_id"], r["innovint_block_id"], r["block_id"],
+                        r["vintage"], r["weight_value"], r["weight_unit"],
+                        r["weight_tons"], r["receipt_date"], r["weigh_tag_number"],
+                        r["varietal_name"], r["lot_code"], r["lot_name"],
+                        r["grower_id"], r["vineyard_id"], r["appellation_id"],
+                        r["source_system"], r["synced_at"],
+                    )
+                    for r in rows
+                ],
+            )
+        cur.execute(
+            """
+            delete from harvest_receipts
+            where source_system = 'innovint'
+              and vintage = any(%s)
+              and not (innovint_receipt_id = any(%s))
+            """,
+            (vintages, [r["innovint_receipt_id"] for r in rows]),
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return (len(rows), deleted)

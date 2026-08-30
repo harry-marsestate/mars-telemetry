@@ -118,30 +118,174 @@ customer." Prefer an explicit allowlist (`current_role_name() in
 'pending'`), so a future fourth status value (e.g. `'suspended'`) fails
 closed by default instead of silently falling through as granted.
 
-## blocks.innovint_block_id - partial mapping, deliberately left incomplete
+## block_innovint_map - time-scoped mapping (supersedes blocks.innovint_block_id)
 
-`blocks.innovint_block_id` (nullable, no default) cross-references local
-`block_id`s against InnoVint's own block records, for future use pulling
-real lot/vessel/component data from the InnoVint API. It is NOT a complete
-mapping and should not be assumed to be:
+**The RULE below still stands unchanged. What changed is that B1 now meets
+its bar** - this entry is superseded, not deleted, so the reasoning that
+kept B1 unmapped for months stays on record.
 
-- `B2` -> `block_LZ4E0PWYDM82N6OMX6R92JK5` (InnoVint "V2") and
-  `B3` -> `block_W48YXVQJ1MK0PDLM30PRENL2` (InnoVint "V3") were set after
-  checking acreage and other attributes lined up plausibly.
-- `B1` was deliberately left `null`. Neither InnoVint candidate held up:
-  `xxV1` (4.0 acres) is a closer acreage match than `Lower Block` (1.5
-  acres), but its rootstock/trellising/clone data reads as an older
-  heritage block with no recorded planting year, not a match for B1's
-  2009-2014 planting. A third candidate (`06`) couldn't even be evaluated -
-  no acreage or planted-year recorded on the InnoVint side at all.
+RULE: do not map a local block to an InnoVint block on a coincidental
+acreage/name match alone. A wrong mapping is worse than no mapping - it
+silently pulls another block's real InnoVint history (lot records, vessel
+assignments, component makeup) onto that block's dashboard data with no
+error. Only map from a confirmed source (e.g. someone at the winery
+confirming the InnoVint block id directly).
 
-RULE: do not backfill `B1`'s `innovint_block_id` on a coincidental
-acreage/name match alone. A wrong mapping here is worse than no mapping -
-it would silently pull another block's real InnoVint history (lot
-records, vessel assignments, component makeup) onto B1's dashboard data
-with no error or indication anything was mismatched. Only set it from a
-confirmed source (e.g. someone at the winery confirming the InnoVint block
-id directly).
+**B1 -> `xxV1` is now mapped, for vintages <=2023 only.** This is not the
+coincidental backfill the rule forbids:
+
+1. Winery-confirmed directly - `xxV1` IS Block 1, as it existed before the
+   Zinfandel was pulled and replanted to Cab Sauv/Cab Franc/Petit Verdot.
+2. Independently corroborated by data the original investigation didn't
+   have: Zinfandel grower receipts exist for 2022 (4.802t) and 2023
+   (10.469t, FL-23-ZI-ME-V1, 2023-09-27) and then stop entirely. The 2024
+   harvest is Cabernet from V2/V3 only, and there are no 2025+ receipts at
+   all - consistent with young replanted vines not yet cropping.
+3. `xxV1` is `archived: true` in InnoVint while V2/V3 are not.
+
+**Correcting the original reasoning:** this entry previously rejected `xxV1`
+partly because its heritage attributes didn't match "B1's 2009-2014
+planting." Planting year was never a reliable discriminator in this dataset
+- the *confirmed* B2/V2 mapping disagrees by 4 years (local 2006 vs InnoVint
+2002) and B3/V3 by 6 (2006 vs 2012). Acreage was similarly weak: B1/xxV1
+differ by 8.1%, but confirmed B2/V2 differ by 29.5%. Do not resurrect either
+signal as evidence for or against a future mapping.
+
+**The <=2023 cutover is PROVISIONAL.** The exact replant year is not fully
+confirmed. It lives in exactly one place - `valid_to_vintage` on B1's row -
+and revising it is a one-row UPDATE. No code, migration, or frontend
+constant encodes a B1 cutover year. Keep it that way.
+
+**2024+ B1 is deliberately unmapped**, which is the whole point of the time
+scoping: an unbounded mapping would attribute the pre-replant Zinfandel
+parcel to today's Cabernet block - precisely the failure the RULE describes.
+When InnoVint gains a post-replant B1 block object, add a SECOND row with
+`valid_from_vintage` set; do not edit the existing one.
+
+**Known consequence, expected not accidental:** adding B1 to the mapping
+makes 8 single-component lots (the 2022/2023 Zinfandel and lees lots) newly
+resolve to `block_id='B1'` in `lot_analyses` and `vessels`, where they
+previously landed NULL. That data was always Block 1's - it is newly
+visible, not newly correct - but it will appear in the ferm panel's lot
+dropdown the next time `analyses_sync` runs.
+
+Still unmapped and still unevaluable: InnoVint's `06` (no acreage or
+planted year recorded at all) and `Lower Block` (1.5 acres).
+
+## Block acreage: the Silverado Farming Company survey is the golden source
+
+The winery confirmed the Silverado Farming Company parcel survey as
+authoritative for block acreage. It supersedes BOTH prior sources, which
+disagreed with it and with each other:
+
+                 old local seed    InnoVint    survey (authoritative)
+    B1               3.7             4.0              2.99
+    B2               2.2             2.85             2.91
+    B3               1.4             1.4              1.45
+    estate           7.3             8.25             7.35
+
+B1's variety split comes from the survey's sub-block breakdown: MRS-1A 1.12
++ MRS-1B 0.98 = 2.10 Cab Sauv, MRS-1C 0.60 Cab Franc, MRS-1D 0.29 Petit
+Verdot, summing to 2.99.
+
+Applied to every source of truth together, since three existed: `BLOCKS[]`
+in `web/index.html`, `seed-data/blocks.csv` + `seed-data/block_lots.csv`,
+and the live `blocks`/`block_lots` tables (migration
+`20260830000001_survey_acreage_correction`). `labour_summary` is a VIEW over
+`blocks.acres` (confirmed `pg_class.relkind='v'`), so its `cost_per_acre`
+reflected the change immediately with no dbt run - unlike `daily_weather`,
+it carries no refresh hazard.
+
+**Note InnoVint's acreage was not merely imprecise - for B1 it was stale.**
+`xxV1`'s 4.0 acres describes the pre-replant Zinfandel parcel, not today's
+2.99-acre Cab Sauv/Cab Franc/Petit Verdot planting. This is why the fruit
+panel briefly carried its own `FRUIT_YIELD_ACRES` constant (InnoVint acreage
+for a panel sourced from InnoVint). That constant is now REMOVED: the right
+fix was correcting the source of truth, not giving one panel a private
+basis. Every panel uses `B(id).acres` again.
+
+**Second independent confirmation that `xxV1` is pre-replant B1.** The entry
+above rests on the winery's word plus the receipt timeline (Zinfandel
+receipts stopping after 2023). The survey adds a third, structural check -
+vine spacing and rootstock, against InnoVint's `rowWidth`/
+`spaceBetweenVines`/`rootStock`:
+
+- B2 -> `V2`: survey 8x5, rootstock 101-14; InnoVint rowWidth 5.0ft,
+  spaceBetweenVines 8.0ft, rootStock `101-14`. AGREES.
+- B3 -> `V3`: survey 8x3, rootstock 110R; InnoVint rowWidth 3.0ft,
+  spaceBetweenVines 8.0ft, rootStock `110R`. AGREES.
+- B1 -> `xxV1`: survey 7x4, rootstock 110R; InnoVint rowWidth 6.0ft,
+  spaceBetweenVines 8.0ft, rootStock `St George, 101-14`. DISAGREES.
+
+The disagreement is corroboration, not a contradiction: the survey describes
+the post-replant B1 while `xxV1` records the parcel as it was before. Both
+confirmed mappings agree on spacing and rootstock; the one block that was
+replanted is the one that doesn't - exactly the pattern the replant predicts.
+Contrast with planting year and acreage, which the entry above establishes
+were never reliable discriminators in this dataset. Spacing and rootstock
+ARE reliable where both sides describe the same planting - a genuinely
+better signal than the two that misled the original investigation.
+
+### Still open, deliberately not fixed with this correction
+
+- **Row counts.** The survey shows MRS-1A rows 1-27 and MRS-1B rows 5-27 -
+  overlapping on 23 of 27 rather than partitioning. Likely a transcription
+  artifact in the source document. `BLOCKS[].rows` (B1 = 60) and
+  `blocks.row_count` are UNTOUCHED. Do not propagate the survey's row
+  numbering into any row-count field until it is confirmed.
+- **No local spacing/rootstock fields exist.** Grepped `web/index.html`,
+  `seed-data/`, `supabase/migrations/`, `ingestion/mars_dbt/`: the only hits
+  are CSS `letter-spacing`. Live `blocks` is `block_id, label, designation,
+  acres, row_count, planted, aspect, elev_ft, color, innovint_block_id`.
+  Storing the survey's spacing/rootstock would need a new column AND a new
+  `BLOCKS[]` key - not added speculatively, and the cross-check above was
+  done against InnoVint's copy of those fields, not a local one.
+- **B1 `planted: '2009-2014'` is still wrong** (see the entry above),
+  pending the winery's real replant year. The acreage correction does not
+  touch it.
+- **`blocks.innovint_block_id` still exists**, superseded by
+  `block_innovint_map` but not dropped: `lot_analyses.block_id` carries a
+  `comment on column` naming it (migration `20260811215238`), which needs
+  re-issuing in the drop migration.
+
+## fmt(7.35, 1) is "7.4", not "7.3" - don't hardcode a header to match a computed value you haven't run
+
+The survey's own cover figure displays "7.3 acres". The obvious move was to
+hardcode the estate header to match. That would have been wrong, and the
+reason is subtler than plain float error:
+
+    2.99 + 2.91 + 1.45   = 7.3500000000000005   (not exactly 7.35)
+    fmt(sum, 1)          = "7.4"
+    fmt(7.35, 1)         = "7.4"     <- even the EXACT literal rounds up
+    (7.35).toFixed(1)    = "7.3"     <- and toFixed disagrees with fmt
+
+Two independent effects stack. The float sum lands just above 7.35, and
+`fmt` uses `toLocaleString`, which rounds half-UP on the decimal value - so
+even a mathematically exact 7.35 renders "7.4". `toFixed` rounds the binary
+value and gives "7.3", so the two rounding paths in this codebase disagree
+with each other on the same number.
+
+Had the header been hardcoded to "7.3" to match the survey, it would have
+sat next to a computed legend reading "7.4 acres" - two figures for the same
+estate on the same screen, with no error anywhere.
+
+Fixed by raising precision rather than by matching a rounded value:
+`acresOf()` now uses `.toFixed(2)` and all 8 acreage display sites use
+`fmt(..., 2)` (legend chips + total, map tooltip, filter meta, labour table
+row + total, and "Acres in view" in BOTH the real and mock fruit panels).
+Both hardcoded header strings read "7.35 acres". At 2dp the displayed
+per-block values visibly sum to the displayed total (2.99 + 2.91 + 1.45 =
+7.35), which they did not at 1dp (3.0 + 2.9 + 1.5 = 7.4). `.toFixed(2)` also
+collapses the float artifact before `fmt` ever sees it, so `acresOf(['B1',
+'B2','B3']) === 7.35` is exactly true.
+
+RULE: don't assume a "clean" decimal like X.Y5 rounds the way you expect at
+1dp. Check actual `fmt()` output before hardcoding any header string to
+match a computed one - and be aware `fmt`/`toLocaleString` and `toFixed`
+round X.Y5 differently in this codebase. When a source document's own
+rounding conflicts with the app's, raise the app's precision to match the
+source's underlying numbers rather than hardcoding the source's rounded
+display.
 
 ## PostgREST's default 1000-row cap - silent truncation, not an error
 
@@ -712,3 +856,197 @@ call site missing the fail-soft handling a sibling call site already has
 for the same known burst-timeout), not an RLS regression. Don't
 re-investigate the RLS hypothesis a second time on this table without
 first re-running these exact checks.
+
+
+## InnoVint publishes an OpenAPI spec - it IS discoverable
+
+`contracts.py` claimed for months that "InnoVint's own API docs for this
+resource set were not discoverable," and every contract was transcribed from
+observed responses instead. That claim was wrong. Three endpoints serve
+documentation to the ordinary access token:
+
+- `GET /api/v1/schema` - full OpenAPI 3.1 YAML, ~350KB, 60 documented paths
+- `GET /api/v1/docs` - rendered docs UI
+- `GET /openapi.json` - a separate "MAKE Internal APIs" spec
+
+This had a real cost. An investigation into fruit intake data concluded no
+harvest resource existed, having probed ten guessed LOT-scoped paths
+(`/lots/{id}/harvests`, `/intakes`, `/weighTags`, ...) which all 404. The
+real resources are WINERY-scoped - `/wineries/{id}/actions/receiveFruitActions`
+and `/wineries/{id}/growerReceipts/{vintage}` - and are both plainly listed
+in the spec. The wrong conclusion ("InnoVint's fruit data is structurally
+fake") survived for months on the strength of guessed endpoint names.
+
+RULE: check `/api/v1/schema` before concluding a resource doesn't exist, and
+derive new contracts from the spec's declared nullability rather than from
+observed samples. Sample-derived nullability is weak evidence - all 6
+growerReceipts rows have every field populated, which says nothing about
+whether any field CAN be null.
+
+## harvest_receipts reconciles deletions; lot_analyses/vessels don't
+
+A deliberate divergence between sibling ingestion paths, recorded so the
+inconsistency isn't read later as an oversight.
+
+`upsert_lot_analyses`/`upsert_vessels` are pure `on conflict do update`, with
+no delete anywhere in `db.py`. That is correct for them: their sources expose
+`deleted`/`archived` flags, so a removed record still arrives as data.
+
+`/growerReceipts` exposes NEITHER a `deleted` field nor a `state` filter -
+unlike `/actions/receiveFruitActions`, which has `ACTIVE`/`DELETED`/`EDITED`.
+A deleted receipt simply vanishes from the response. Pure upsert would leave
+a phantom harvest in a panel that claims to be real, with no error - so
+`upsert_harvest_receipts` reconciles the full per-vintage payload instead.
+
+The scoping is the entire safety of this, per the Track 2 irrigation scoping
+mistake above: the delete is bounded to `source_system='innovint'` AND the
+specific vintages fetched that run. Two properties make it safe, and both
+must survive any refactor: (1) every fetch completes before any write, so a
+failed fetch raises with nothing deleted; (2) the vintage list is passed
+explicitly rather than derived from the fetched rows, so a vintage that
+legitimately returned zero receipts is still reconciled - while an empty
+response from a broken run never reaches the delete at all.
+
+RULE: never widen this delete's scope to "all innovint rows" or derive its
+vintage list from the payload. An empty API response must never be
+interpretable as "delete everything."
+
+## The winery vintage/block filter bar was written but never wired - real fruit data was unreachable through the UI
+
+`renderFilters()` had a complete, correctly-written `tab==='winery'` branch
+from the moment it was authored - its own meta text even said "Vintage
+scopes fermentation and harvest panels only," describing behavior for a
+control that didn't exist yet. Two things were missing:
+
+1. No host element. `web/index.html` only ever had `<div class="filters"
+   id="f-vineyard">` - there was no `#f-winery` for the branch to render
+   into.
+2. No call site. `renderTab()` called `renderFilters(tab)` only `if(tab===
+   'vineyard')`.
+
+The result: `state.winery.vintages` was permanently pinned to `[CURRENT]`,
+with no UI path to ever change it. Every piece of real InnoVint fruit
+intake work in this project - `harvest_receipts`, `REAL_FRUIT_VINTAGES`,
+the real/mock branch in `renderFruit()` - was correctly built and correctly
+verified at the database and Node level, and was STILL completely
+unreachable by an actual user, because nothing in the UI could ever select
+2022, 2023, or 2024 on the winery tab. This was found by an
+approved-operator BROWSER walkthrough, not by code review or any DB/node-
+level check - the code read as complete on inspection, since the missing
+pieces (a host div, one call-site condition) are easy to overlook as
+"obviously must be wired up already" when the function itself is fully
+implemented.
+
+**Both tabs render at boot** (`renderTab('vineyard'); renderTab('winery');`,
+unconditionally, before either is switched to) - a fact that surfaced two
+further, contained bugs while fixing the gap above, both from the same root
+cause: code written assuming only one tab's filter bar would ever exist in
+the DOM at a time.
+
+- `id="vdd-wrap"` was a single hardcoded id. Adding winery's control would
+  have created a duplicate id, and the outside-click-closes handler's
+  `$('#vdd-wrap')` returns only the first DOM match - winery's dropdown
+  would never have closed on an outside click. Fixed with per-tab ids
+  (`vdd-wrap-vineyard` / `vdd-wrap-winery`).
+- `vintageDDOpen` was a single shared boolean. Opening one tab's dropdown
+  would leave the flag `true` for both, so the other tab's dropdown would
+  render pre-opened on its next `renderTab()`. Fixed by keying it per tab.
+
+**The control was then relocated from a page-wide bar into the Harvest
+section specifically** (a control strip between the section's `.sect`
+header and its `.grid`, not the top-of-tab bar vineyard uses) - vintage was
+found to scope exactly one section (`fruit`) plus one panel that lived
+outside any section (`anom-w`, the winery insights panel, built directly in
+the hero). Moving the control into Harvest while leaving `anom-w`
+vintage-scoped would have meant a control that visually lives in one place
+still silently driving a panel elsewhere on the page.
+
+Three options were considered for `anom-w`: pin it to `CURRENT` (making the
+whole winery hero uniformly live, matching `paintOverviewW` and both cellar
+panels, which were already `CURRENT`-only); leave it vintage-scoped but add
+a visible "Vintage: X" indicator to the panel; or don't move the control at
+all, since a page-wide control was an accurate representation of its true
+reach. **Pinning to `CURRENT` was chosen** (Option A) -
+`anomCtx={...c, primary:CURRENT, vintages:[CURRENT], compare:false,
+align:false}` passed into `renderAnomalies`, blocks left live from `c`.
+
+**Recorded plainly as a deliberate capability removal, not a side effect:**
+winery insights no longer reflect a selected historical vintage. Before
+this, a user could ask "what would the rules have said in 2023?" by
+selecting that vintage; after, `anom-w` always describes `CURRENT`
+regardless of what's selected in Harvest. This was a real tradeoff, decided
+in favor of not leaving one page-wide-looking control with one
+section-scoped and one hero-scoped effect.
+
+RULE: a written-but-unwired UI branch - real code, with no host element and
+no call site - passes code review easily, because the branch itself looks
+complete. It only surfaces by actually using the feature end to end. This
+is the first of two instances in this project where a browser pass found
+something no amount of DB- or Node-level verification could have (the
+second: the `renderTab()` entry directly below).
+
+## renderTab()'s returned promise resolved before panels actually finished rendering - broke a scroll-restore fix silently
+
+Found while verifying the winery filter bar relocation above: selecting a
+new vintage in the Harvest strip made the page visibly jump to the top and
+stay there - discovered only by actually scrolling partway down, clicking a
+vintage, and watching, not by reading the code, which looked correct.
+
+The scroll-restore code read `const sy=window.scrollY;
+renderTab(tab).then(()=>requestAnimationFrame(()=>window.scrollTo(0,sy)));`
+- reasonable-looking, and wrong, because `renderTab()`'s own last line was
+`requestAnimationFrame(()=>{ pending.forEach(f=>f()); });` - fire-and-
+forget. The `async function renderTab`'s promise resolves right after
+SCHEDULING that frame, not after any panel actually finishes rendering. So
+`.then()` fired almost immediately, while the DOM was still just-rebuilt
+skeletons (`docH` ~1000px) - `window.scrollTo(0,sy)` got silently clamped to
+0 by the browser (nothing to scroll to yet), and nothing ever retried once
+the page grew back to its real height over the following several seconds of
+async panel fetches. Confirmed via instrumentation, not a visual glance:
+wrapping `window.scrollTo` to log every call's arguments,
+`document.body.scrollHeight` at call time, and a sampled timeline showed
+exactly this - one clamped call at `docH=1093`, then `docH` climbing to
+2162 with `scrollY` stuck at 0 for the next six seconds.
+
+**Fix, in `renderTab()` itself:** replaced the fire-and-forget
+`requestAnimationFrame` dispatch with `await new
+Promise(res=>requestAnimationFrame(res)); await
+Promise.allSettled(pending.map(f=>f()));`. Same rAF timing as before
+(panels still start only after one layout tick, preserving the existing
+"render bodies after layout so clientWidth is correct" behavior) - the only
+change is that `renderTab()`'s promise now waits for every panel to finish
+before resolving.
+
+**Blast-radius check performed before taking this, not assumed safe:**
+every one of the 12 `renderTab(...)` call sites in the file (map block
+toggle, ferm lot select, vessels-archived toggle, block chip clicks, range
+button clicks, both history scroll buttons, tab switch, window resize, and
+the two boot calls) is a bare fire-and-forget statement - none `.then()`s
+or `await`s the result, and none has code after the call that assumed
+fast/synchronous completion. The scroll-restore code was the only caller
+anywhere that observed the promise at all, so widening what "resolved"
+means could not break an existing caller.
+
+**Incidental fix included:** two `pending` entries (`()=>paintOverviewV(...)`,
+`()=>paintOverviewW()`) are pushed raw, outside `makePanel`'s internal
+try/catch - a throw in either previously became a silent
+unhandled-promise-rejection console warning. `Promise.allSettled` (chosen
+over `Promise.all`) absorbs that for free, without changing any
+user-visible behavior.
+
+Re-verified with the same instrumentation after the fix, not just a visual
+check: `scrollTo()` now fires only once `docH` has reached its final
+settled value, and `scrollY` lands exactly on the saved position and
+holds. (One trial correctly did NOT restore to the saved value - a
+transition into the much-shorter 2026 "no fruit yet" mock page, where the
+browser's own clamp to the new shorter max is the correct behavior, not a
+failure.)
+
+RULE: when a promise-returning function is called fire-and-forget
+everywhere except one new caller that needs to `await` it, check whether
+the function actually resolves at the moment callers would assume it
+does - don't take "it returns a promise" as proof it resolves at the
+semantically correct time. This is the second of two instances in this
+project where only an actual browser pass (not a DB or Node-level check)
+could have found the bug - the first: the winery filter bar entry directly
+above.

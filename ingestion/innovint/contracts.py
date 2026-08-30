@@ -2,13 +2,19 @@
 
 Every model uses extra="forbid": a field InnoVint adds, renames, or removes
 should raise a validation error during ingestion, not silently pass through
-or get dropped. Shapes below are transcribed directly from the real
-responses pulled during the InnoVint data inventory (GET
-/wineries/{wineryId}/lots/{lotId}/analyses and GET
-/wineries/{wineryId}/vessels against wnry_2PW0KJ93L726WKKG54OQE1RY), not
-guessed from a spec -- InnoVint's own API docs for this resource set were
-not discoverable (see docs/SECURITY.md and the InnoVint data inventory
-findings).
+or get dropped.
+
+InnoVint publishes a full OpenAPI 3.1 spec, contrary to what this docstring
+claimed until 2026-08-30: GET /api/v1/schema (YAML), /api/v1/docs (rendered),
+and /openapi.json (a separate "MAKE Internal APIs" spec). All three are
+readable with the ordinary access token.
+
+The Lot/Analysis/Vessel models below predate that discovery and were
+transcribed from observed responses; the GrowerReceipt/Varietal models were
+derived from the spec's DECLARED nullability. Prefer the spec for anything
+new -- sample-derived nullability is weak evidence (the `component: Any`
+workaround below exists precisely because a sample-derived guess had nothing
+to go on).
 """
 
 from __future__ import annotations
@@ -45,6 +51,10 @@ class Access(StrictModel):
 
 class Measurement(StrictModel):
     """{value, unit} pairs used for capacity/volume/weight/fruitWeight etc.
+
+    NOT interchangeable with FloatUnit below: the spec declares FloatUnit's
+    value non-nullable, while this model's Optional reflects genuine
+    uncertainty about vessel types never sampled. Do not merge them.
 
     value is optional even though every sample we pulled had a number --
     InnoVint returns 0.0 rather than omitting the field for "no data" in
@@ -208,4 +218,100 @@ class VesselEnvelopeItem(StrictModel):
 
 class VesselsResponse(StrictModel):
     results: list[VesselEnvelopeItem]
+    pagination: Pagination
+
+
+# ── /growerReceipts/{vintage} ────────────────────────────────────────────
+
+# Spec-declared enum, all 17 values. Note four spellings of tons, plus
+# weight AND volume units sharing one enum -- a volume unit arriving on a
+# fruit weight is a real data error, handled loudly in weights.py.
+FloatUnitName = Literal[
+    "gal", "gallons", "hl", "liters", "litres", "pg", "PG", "kg", "lbs",
+    "tonne", "tons", "gallon", "hL", "L", "kilograms", "tonnes", "ton",
+]
+
+
+class FloatUnit(StrictModel):
+    """Spec: both `value` and `unit` are required and non-nullable."""
+
+    value: float
+    unit: FloatUnitName
+
+
+class GrowerReceiptAnalysis(StrictModel):
+    """Empty ([]) on all 6 rows live, but the spec declares a real shape, so
+    it is modelled properly rather than as Any -- brix/pH at receipt could
+    legitimately land here in a future harvest."""
+
+    analysis_type: str = Field(alias="analysisType")
+    unit: str
+    value: float
+
+
+class GrowerReceiptAdjustment(StrictModel):
+    provision: str
+    amount: float
+
+
+class GrowerReceipt(StrictModel):
+    """Every field below is spec-required and none is spec-nullable."""
+
+    id: str
+    action_id: str = Field(alias="actionId")
+    lot_id: str = Field(alias="lotId")
+    grower_id: str = Field(alias="growerId")
+    block_id: str = Field(alias="blockId")
+    vineyard_id: str = Field(alias="vineyardId")
+    varietal_id: str = Field(alias="varietalId")
+    appellation_id: str = Field(alias="appellationId")
+    vintage: int
+    weigh_tag_number: str = Field(alias="weighTagNumber")
+    receipt_date: datetime = Field(alias="receiptDate")
+    analyses: list[GrowerReceiptAnalysis] = Field(default_factory=list)
+    total_weight: FloatUnit = Field(alias="totalWeight")
+    contract_cost: float = Field(alias="contractCost")
+    contract_cost_per_unit: float = Field(alias="contractCostPerUnit")
+    adjustments: list[GrowerReceiptAdjustment] = Field(default_factory=list)
+    net_cost: float = Field(alias="netCost")
+    net_cost_per_unit: float = Field(alias="netCostPerUnit")
+
+
+class GrowerReceiptEnvelopeItem(StrictModel):
+    data: GrowerReceipt
+    relationships: dict[str, str | None] = Field(default_factory=dict)
+
+
+class GrowerReceiptsResponse(StrictModel):
+    results: list[GrowerReceiptEnvelopeItem]
+    pagination: Pagination
+
+
+# ── /varietals (GLOBAL - not winery-scoped) ──────────────────────────────
+
+class VarietalRelationships(StrictModel):
+    """`source` is an int here, unlike the `dict[str, str | None]` shape every
+    winery-scoped envelope uses. Modelled separately rather than widening the
+    shared type -- under extra="forbid" a wrong type fails the whole response.
+    """
+
+    source: int
+
+
+class Varietal(StrictModel):
+    """All four fields spec-required and non-nullable."""
+
+    id: str
+    internal_id: int = Field(alias="internalId")
+    color: str
+    name: str
+
+
+class VarietalEnvelopeItem(StrictModel):
+    data: Varietal
+    relationships: VarietalRelationships
+
+
+class VarietalsResponse(StrictModel):
+    results: list[VarietalEnvelopeItem]
     pagination: Pagination

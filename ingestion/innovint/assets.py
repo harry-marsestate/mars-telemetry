@@ -14,13 +14,18 @@ from dagster import AssetExecutionContext, MaterializeResult, asset
 
 from . import capacity, db
 from .client import InnoVintClient
+from .weights import to_short_tons
 
 WINERY_ID = os.environ.get("INNOVINT_WINERY_ID", "wnry_2PW0KJ93L726WKKG54OQE1RY")
+
+# Floor of the growerReceipts sweep. 2022 is the earliest vintage with any
+# receipt (verified by sweeping 2015-2027: zero rows before 2022).
+HARVEST_RECEIPTS_FIRST_VINTAGE = 2022
 
 
 def _resolve_block_id(
     client: InnoVintClient,
-    innovint_block_map: dict[str, str],
+    innovint_block_map: dict[str, list[tuple]],
     lot_id: str,
     cache: dict[str, str | None],
 ) -> str | None:
@@ -31,9 +36,13 @@ def _resolve_block_id(
     was written: just 16/47 are single-component; the rest are 2-4-way
     blends (17 two-block, 8 three-block, 1 four-block) or have zero
     components (5 lots). Everything else stays null, same as any
-    InnoVint block with no blocks.innovint_block_id mapping (e.g. B1, or
-    InnoVint's "06"/"Lower Block"/"xxV1" that were never matched to a
-    local block -- see docs/SECURITY.md). Both are expected, not errors.
+    InnoVint block with no block_innovint_map row covering that component's
+    vintage (e.g. "06"/"Lower Block", never matched to a local block).
+    Both are expected, not errors.
+
+    Vintage-aware since the mapping became time-scoped: the component's own
+    `vintage` field selects which mapping window applies, so a lot from a
+    post-replant vintage cannot resolve through a pre-replant block object.
     """
     if lot_id in cache:
         return cache[lot_id]
@@ -42,7 +51,9 @@ def _resolve_block_id(
     if len(components.results) == 1:
         comp = components.results[0].data
         if abs(comp.percentage - 1.0) < 1e-6:
-            resolved = innovint_block_map.get(comp.block.id)
+            resolved = db.resolve_block_id(
+                innovint_block_map, comp.block.id, comp.vintage
+            )
     cache[lot_id] = resolved
     return resolved
 
@@ -216,3 +227,105 @@ def vessels_sync(context: AssetExecutionContext) -> MaterializeResult:
     finally:
         conn.close()
         client.close()
+
+
+@asset
+def harvest_receipts_sync(context: AssetExecutionContext) -> MaterializeResult:
+    """Fruit intake receipts (growerReceipts) -> harvest_receipts.
+
+    On the ongoing daily asset rather than a standalone backfill script, for
+    the same reason lot_analyses/vessels are: harvest receipts are a recurring
+    operational event, one per lot every season, indefinitely. Standalone
+    scripts (open_meteo, irrigation) were for historical datasets with a fixed
+    end and no future writes.
+
+    Sweeps every vintage from 2022 through current_year+1 each run, not just
+    recent ones: ~6-8 GETs, trivially inside the ~100-call budget noted in
+    client.py, and it both catches late corrections to historical vintages and
+    keeps the reconcile-delete correct for every vintage rather than a recent
+    window. current_year+1 costs one wasted call and avoids a year-boundary miss.
+    """
+    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    now = datetime.now(timezone.utc)
+    client = InnoVintClient(os.environ["INNOVINT_TOKEN"], WINERY_ID, run_stamp)
+    conn = db.get_connection()
+
+    try:
+        block_map = db.load_innovint_block_map(conn)
+        lots_by_id = {lot.id: lot for lot in client.list_lots()}
+
+        vintages = list(range(HARVEST_RECEIPTS_FIRST_VINTAGE, now.year + 2))
+        rows: list[dict] = []
+        unmapped = 0
+
+        # Every fetch completes BEFORE any write. A failure raises here, with
+        # nothing upserted and nothing deleted -- an empty or partial payload
+        # must never reach the reconcile step.
+        for vintage in vintages:
+            for r in client.fetch_grower_receipts(vintage):
+                block_id = db.resolve_block_id(block_map, r.block_id, r.vintage)
+                if block_id is None:
+                    unmapped += 1
+                lot = lots_by_id.get(r.lot_id)
+                rows.append(
+                    {
+                        "innovint_receipt_id": r.id,
+                        "innovint_action_id": r.action_id,
+                        "innovint_lot_id": r.lot_id,
+                        "innovint_block_id": r.block_id,
+                        "block_id": block_id,
+                        "vintage": r.vintage,
+                        "weight_value": r.total_weight.value,
+                        "weight_unit": r.total_weight.unit,
+                        # Raises UnrecognizedWeightUnit rather than coercing --
+                        # a volume unit here is a source data error.
+                        "weight_tons": to_short_tons(
+                            r.total_weight.value, r.total_weight.unit
+                        ),
+                        "receipt_date": r.receipt_date,
+                        "weigh_tag_number": r.weigh_tag_number,
+                        # Carries the raw id; swapped for a display name after
+                        # every receipt is collected, so the catalogue lookup is
+                        # one batched call per run rather than one per row.
+                        "varietal_id": r.varietal_id,
+                        "lot_code": lot.code if lot else None,
+                        "lot_name": lot.name if lot else None,
+                        "grower_id": r.grower_id,
+                        "vineyard_id": r.vineyard_id,
+                        "appellation_id": r.appellation_id,
+                        "source_system": "innovint",
+                        "synced_at": now,
+                    }
+                )
+
+        # A varietal id that doesn't resolve leaves varietal_name NULL rather
+        # than failing the run: the name is display-only (the panel's Variety
+        # column falls back to an em dash), and varietal_id itself is never the
+        # join key for anything. Contrast with an unrecognized weight unit,
+        # which does fail loudly -- that one corrupts a real measurement.
+        varietal_names = client.fetch_varietal_names({r["varietal_id"] for r in rows})
+        unnamed = 0
+        for row in rows:
+            name = varietal_names.get(row.pop("varietal_id"))
+            if name is None:
+                unnamed += 1
+            row["varietal_name"] = name
+
+        upserted, deleted = db.upsert_harvest_receipts(conn, rows, vintages)
+        context.log.info(
+            f"{upserted} receipts upserted, {deleted} stale deleted, "
+            f"{unmapped} unmapped to a local block, {unnamed} without a varietal name"
+        )
+        return MaterializeResult(
+            metadata={
+                "receipts": upserted,
+                "stale_deleted": deleted,
+                "unmapped_block": unmapped,
+                "unnamed_varietal": unnamed,
+                "vintages_swept": f"{vintages[0]}-{vintages[-1]}",
+                "run_stamp": run_stamp,
+            }
+        )
+    finally:
+        client.close()
+        conn.close()

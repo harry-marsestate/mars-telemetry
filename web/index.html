@@ -542,6 +542,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   </section>
 
   <section class="view" id="view-winery">
+    <div class="filters" id="f-winery"></div>
     <div id="body-winery"></div>
   </section>
 
@@ -563,7 +564,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   </section>
 
   <div class="foot">
-    <div>1984 Summit Lake Drive, Angwin CA 94508 &middot; 7.3 acres &middot; Howell Mountain AVA</div>
+    <div>1984 Summit Lake Drive, Angwin CA 94508 &middot; 7.35 acres &middot; Howell Mountain AVA</div>
   </div>
 </div>
 
@@ -731,20 +732,27 @@ function getCurrentUserRole(){
 
 /* §1 ── ESTATE MODEL ───────────────────────────────── */
 const BLOCKS = [
-  {id:'B1', label:'Block 1', sub:'MRS-1A – MRS-1D', acres:3.7, rows:60,
+  // Acreage: Silverado Farming Company survey (winery-confirmed as
+  // authoritative -- supersedes both the original seed values and InnoVint's
+  // block acreage). planted and rows deliberately NOT touched: B1's
+  // '2009-2014' is separately wrong and unresolved, and the survey's row
+  // numbering (MRS-1A rows 1-27 / MRS-1B rows 5-27) overlaps almost entirely
+  // rather than partitioning, so it is not trustworthy as distinct ranges.
+  {id:'B1', label:'Block 1', sub:'MRS-1A – MRS-1D', acres:2.99, rows:60,
    planted:'2009–2014', aspect:'SW', elev:1735, color:'#A98BC9',
-   lots:[{vk:'cs',acres:3.0},{vk:'pv',acres:0.4},{vk:'cf',acres:0.3}]},
-  {id:'B2', label:'Block 2', sub:'MRS-2', acres:2.2, rows:29,
+   // MRS-1A 1.12 + MRS-1B 0.98 = 2.10 CS; MRS-1C 0.60 CF; MRS-1D 0.29 PV
+   lots:[{vk:'cs',acres:2.10},{vk:'cf',acres:0.60},{vk:'pv',acres:0.29}]},
+  {id:'B2', label:'Block 2', sub:'MRS-2', acres:2.91, rows:29,
    planted:'2006', aspect:'SW', elev:1665, color:'#BE9C6A',
-   lots:[{vk:'cs',acres:2.2}]},
-  {id:'B3', label:'Block 3', sub:'MRS-3', acres:1.4, rows:21,
+   lots:[{vk:'cs',acres:2.91}]},
+  {id:'B3', label:'Block 3', sub:'MRS-3', acres:1.45, rows:21,
    planted:'2006', aspect:'W', elev:1620, color:'#7FA3D4',
-   lots:[{vk:'cs',acres:1.4}]}
+   lots:[{vk:'cs',acres:1.45}]}
 ];
 const VNAME = {cs:'Cabernet Sauvignon', cf:'Cabernet Franc', pv:'Petit Verdot'};
 const ALL_IDS = BLOCKS.map(b=>b.id);
 const B = id => BLOCKS.find(b=>b.id===id);
-const acresOf = ids => +ids.reduce((s,i)=>s+B(i).acres,0).toFixed(1);
+const acresOf = ids => +ids.reduce((s,i)=>s+B(i).acres,0).toFixed(2);
 
 const VINTAGES = [2022,2023,2024,2025,2026];
 const CURRENT  = 2026;
@@ -760,6 +768,14 @@ const VCHAR = {2022:{t:+3.1,w:-.30,hs:-8, label:'hot, compressed harvest'},
 // already N-vintage-generic), but a chart with 5 overlapping lines reads as
 // noise rather than a comparison. 4 leaves one vintage always excludable.
 const VINTAGE_SELECT_CAP = 4;
+
+// Per-tab vintage selection limit. Vineyard supports multi-vintage compare
+// mode; winery is deliberately single-vintage, because its only two
+// vintage-aware consumers -- the fruit panel and the winery anomaly RULES --
+// both read `ctx.primary` alone and have no compare rendering at all. A
+// second selection there would be silently ignored (highest vintage wins),
+// which is worse than not offering it.
+const vintageCapFor = tab => tab==='winery' ? 1 : VINTAGE_SELECT_CAP;
 
 /* §2 ── SIMULATED SENSOR ENGINE ────────────────────── */
 function hash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
@@ -1154,7 +1170,11 @@ const selB  = tab => state[tab].blocks.length ? state[tab].blocks : [...ALL_IDS]
 // purely a UI toggle) and outside renderFilters() itself so it survives
 // the renderTab() rebuild triggered by each checkbox click -- otherwise
 // picking a 2nd/3rd vintage would close the menu after every click.
-let vintageDDOpen = false;
+//
+// Keyed by tab, not a single flag: renderTab() runs for BOTH 'vineyard' and
+// 'winery' at boot, so both filter bars exist in the DOM at once. A shared
+// flag would leak one tab's open/closed state into the other's next render.
+const vintageDDOpen = {vineyard:false, winery:false};
 </script>
 
 <script>
@@ -1351,7 +1371,14 @@ const SECTIONS = [
   {tab:'vineyard', id:'labour',  label:'Labour',       note:'Simulated labor record'},
   {tab:'winery',   id:'cellar',  label:'Cellar',       note:'Cellar HVAC sensors'},
   {tab:'winery',   id:'ferm',    label:'Fermentation', note:'InnoVint winery data'},
-  {tab:'winery',   id:'harvest', label:'Harvest',      note:'Simulated weigh-tag record'}
+  // The only function-valued note: harvest's source flips with vintage, and a
+  // static "Simulated weigh-tag record" contradicted the fruit panel's own
+  // REAL_FRUIT_VINTAGES-branched subtitle for 2022-2024 -- section header and
+  // panel subtitle were claiming different things about the same data.
+  {tab:'winery',   id:'harvest', label:'Harvest',
+   note:(c)=>REAL_FRUIT_VINTAGES.has(c.primary)
+     ? 'InnoVint grower receipts'
+     : 'Simulated weigh-tag record'}
 ];
 
 /* Single source of truth for every panel's data-source subtitle text.
@@ -1413,6 +1440,29 @@ const REAL_CLIMATE_VINTAGES = new Set([2022,2023,2024,2025]);
 // summary tile, not this daily-series metric), so both stay mock here.
 const IRRIGATION_REAL_VINTAGES = new Set([2023,2024]);
 
+// Vintages backed by real InnoVint grower receipts (weigh-tag fruit intake).
+// Its own set, not REAL_CLIMATE_VINTAGES or IRRIGATION_REAL_VINTAGES: receipt
+// coverage is 2022-2024 only. 2025 has zero receipts (verified by sweeping
+// /growerReceipts for 2015-2027), so it stays mock even though it IS a real
+// climate vintage. Explicit by hand -- never let this drift to
+// `vintage!==CURRENT`, which would silently claim real data for 2025/2026.
+//
+// Per-vintage BLOCK coverage is uneven and deliberately not smoothed over:
+//   2022 -> B1 only        2023 -> B1,B2,B3        2024 -> B2,B3 only
+const REAL_FRUIT_VINTAGES = new Set([2022,2023,2024]);
+
+// (No fruit-specific acreage constant. The earlier local-vs-InnoVint
+// discrepancy that justified one -- local 7.3ac vs InnoVint 8.25ac -- is
+// resolved by correcting the SOURCE OF TRUTH rather than by giving one panel
+// its own basis: BLOCKS[].acres now carries the Silverado Farming Company
+// survey figures, confirmed authoritative by the winery, superseding both the
+// original seed values and InnoVint's block acreage. renderFruitReal() uses
+// B(id).acres like every other panel.)
+
+const FRUIT_UNMAPPED_NOTE = {
+  B1:'Block 1 was replanted after the 2023 harvest; no InnoVint block record exists for it yet.'
+};
+
 function getDataSourceLabel(metricKey, vintage){
   const s = DATA_SOURCES[metricKey];
   if(!s) return '';
@@ -1428,6 +1478,7 @@ function getDataSourceLabel(metricKey, vintage){
     // here would overclaim the UV portion is real too; says so explicitly.
     if(metricKey==='solar') return 'Open-Meteo (ERA5) · UV stays simulated';
   }
+  if(metricKey==='fruit' && REAL_FRUIT_VINTAGES.has(vintage)) return 'InnoVint grower receipts · weigh-tag intake records';
   if(metricKey==='irrigation_volume' && IRRIGATION_REAL_VINTAGES.has(vintage)) return 'Mars Vineyard Farming records';
   if(s.kind==='weather') return vintage===CURRENT
     ? `Regional weather data (Howell Mountain) · on-site sensors pending${s.detail?' · '+s.detail:''}`
@@ -1659,14 +1710,14 @@ const PANELS = [
      const L=labour(id,v), h=L.reduce((s,r)=>s+r.hours,0), cc=L.reduce((s,r)=>s+r.cost,0);
      tc+=cc; th+=h;
      return [`<span class="vdot" style="background:${B(id).color}"></span>${B(id).label}`,
-             fmt(B(id).acres,1), fmt(h,0), money(cc), money(cc/B(id).acres)];});
+             fmt(B(id).acres,2), fmt(h,0), money(cc), money(cc/B(id).acres)];});
    const ac=acresOf(c.blocks);
    strip(b,[{l:'Crew hours',v:fmt(th,0),u:'hrs'},
             {l:'Total cost',v:money(tc)},
             {l:'Per acre',v:money(tc/ac)},
             {l:'Blended rate',v:'$'+fmt(tc/(th||1),0),u:'/hr'}]);
    table(b,[{h:'Block'},{h:'Acres',num:1},{h:'Hours',num:1},{h:'Cost',num:1},{h:'$ / acre',num:1}],rows,
-     ['Total',fmt(ac,1),fmt(th,0),money(tc),money(tc/ac)]);}},
+     ['Total',fmt(ac,2),fmt(th,0),money(tc),money(tc/ac)]);}},
 
 /* ══ WINERY · CELLAR ══ */
 {id:'cellart', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar temperature', unit:'°F',
@@ -1715,7 +1766,10 @@ const PANELS = [
  render:(b,c)=>renderTanks(b,c)},
 
 /* ══ WINERY · HARVEST ══ */
-{id:'fruit', tab:'winery', sect:'harvest', span:'s12', minRole:'operator', title:'Fruit received by lot', unit:'tons · °Bx · pH',
+{id:'fruit', tab:'winery', sect:'harvest', span:'s12', minRole:'operator', title:'Fruit received by lot',
+ // Vintage-aware: real vintages drop the Bx/pH columns entirely, so a static
+ // 'tons · °Bx · pH' badge would claim two measurements the panel no longer shows.
+ unit:(c)=>REAL_FRUIT_VINTAGES.has(c.primary)?'tons':'tons · °Bx · pH',
  sub:(c)=>getDataSourceLabel('fruit',c.primary),
  render:(b,c)=>renderFruit(b,c)}
 ];
@@ -1855,8 +1909,8 @@ function renderMap(box, ctx){
   box.innerHTML=g;
 
   const leg=el('div','map-legend');
-  BLOCKS.forEach(b=>leg.innerHTML+=`<span><i style="background:${b.color};opacity:${sel.has(b.id)?1:.28}"></i>${b.label} · ${fmt(b.acres,1)} ac</span>`);
-  leg.innerHTML+=`<span style="margin-left:auto;color:var(--muted-2)">${ctx.blocks.length} of 3 · ${fmt(acresOf(ctx.blocks),1)} acres</span>`;
+  BLOCKS.forEach(b=>leg.innerHTML+=`<span><i style="background:${b.color};opacity:${sel.has(b.id)?1:.28}"></i>${b.label} · ${fmt(b.acres,2)} ac</span>`);
+  leg.innerHTML+=`<span style="margin-left:auto;color:var(--muted-2)">${ctx.blocks.length} of 3 · ${fmt(acresOf(ctx.blocks),2)} acres</span>`;
   box.appendChild(leg);
 
   $$('.blk[data-id]',box).filter(n=>n.getAttribute('role')==='button').forEach(node=>{
@@ -1873,7 +1927,7 @@ function renderMap(box, ctx){
       const b=B(id), v=ctx.primary, end=endOf(v,ctx.align);
       showTip(e.clientX,e.clientY,
         `<div class="tip-t">${b.label} · ${b.sub}</div>
-         <div class="tip-r" style="color:${b.color}"><i></i><b>Acres</b> ${fmt(b.acres,1)} · ${b.rows} rows</div>
+         <div class="tip-r" style="color:${b.color}"><i></i><b>Acres</b> ${fmt(b.acres,2)} · ${b.rows} rows</div>
          <div class="tip-r" style="color:var(--muted)"><i style="opacity:0"></i><b>Site</b> ${b.aspect} · ${b.elev} ft</div>
          <div class="tip-r" style="color:var(--muted)"><i style="opacity:0"></i><b>Soil</b> ${fmt(sample('soilMoist',id,end,v),1)} % VWC</div>`);
     });
@@ -2322,7 +2376,96 @@ async function renderTanks(box, ctx){
 }
 
 /* ── Fruit received ── */
-function renderFruit(box, ctx){
+/* Real vintages read InnoVint grower receipts; 2025/2026 stay on the mock
+   generator below. Real vintages deliberately show NO mock rows -- mixing a
+   real B1 with a mock B2/B3 in one 2022 table would be the same real/mock
+   blending bug series_bucketed() had to be fixed for. */
+async function renderFruit(box, ctx){
+  // Defensive even though 'fruit' is in neither POLL_5MIN_PANEL_IDS nor
+  // SCOPED_RERENDER_SAFE today: table()/strip() only appendChild, so if this
+  // panel ever joins EITHER set it would stack duplicates, exactly as irrigblk did.
+  box.innerHTML='';
+  if(!REAL_FRUIT_VINTAGES.has(ctx.primary)) return renderFruitMock(box, ctx);
+  try{
+    await renderFruitReal(box, ctx);
+  }catch(err){
+    // Fail soft, matching the winery-anomalies retrofit: a fetch failure
+    // degrades this panel, it does not blank it.
+    console.warn('fruit: real-data fetch failed, panel degraded', err);
+    box.innerHTML='';
+    box.appendChild(el('div','empty','Fruit intake records are temporarily unavailable.'));
+  }
+}
+
+function fruitMappedFor(maps, blockId, vintage){
+  return maps.some(m => m.block_id===blockId
+    && (m.valid_from_vintage==null || vintage>=m.valid_from_vintage)
+    && (m.valid_to_vintage==null   || vintage<=m.valid_to_vintage));
+}
+
+async function renderFruitReal(box, ctx){
+  const v=ctx.primary;
+  // Visible loading state. This panel clears its body and then makes two
+  // Supabase round-trips; at real-world latency (~2.6s observed in a browser
+  // check, against ~6s to fully settle) a cleared-but-empty body is
+  // indistinguishable from "no data" or a broken panel. Reuses the same
+  // `.empty` + "Loading…" treatment loadApprovalQueue() already uses, rather
+  // than introducing a second visual language for the same idea.
+  box.appendChild(el('div','empty','Loading&hellip;'));
+  const [rcp,mp] = await Promise.all([
+    sb.from('harvest_receipts')
+      .select('block_id,lot_code,lot_name,varietal_name,weight_tons,receipt_date')
+      .eq('vintage',v).order('receipt_date',{ascending:true}),
+    sb.from('block_innovint_map').select('block_id,valid_from_vintage,valid_to_vintage')
+  ]);
+  if(rcp.error) throw rcp.error;
+  if(mp.error)  throw mp.error;
+  // Drop the loader before rendering real content. On the error paths above,
+  // renderFruit()'s catch clears the body itself, so the loader never sticks.
+  box.innerHTML='';
+  const maps=mp.data||[];
+  const mine=(rcp.data||[]).filter(r=>r.block_id && ctx.blocks.includes(r.block_id));
+  const tons=mine.reduce((s,r)=>s+(+r.weight_tons||0),0);
+  // Two different denominators, deliberately. "Acres in view" spans every
+  // SELECTED block; Yield counts only blocks that actually recorded fruit this
+  // vintage. Dividing real tonnage by acreage that produced nothing understated
+  // 2 of the 3 real vintages by roughly 2x -- found in verification, not review.
+  // Under the corrected survey acreage:
+  //   2022  4.802t / 2.99ac (B1)       = 1.61 t/ac  (all-blocks denom: 0.65)
+  //   2023 17.258t / 7.35ac (B1+B2+B3) = 2.35 t/ac  (all-blocks denom: 2.35 -- same)
+  //   2024 16.873t / 4.36ac (B2+B3)    = 3.87 t/ac  (all-blocks denom: 2.30)
+  // 2023 is unaffected by this fix either way: all three blocks cropped, so the
+  // two denominators cover the same set.
+  const acView  = ctx.blocks.reduce((s,id)=>s+B(id).acres,0);
+  const acYield = ctx.blocks.filter(id=>mine.some(r=>r.block_id===id))
+                            .reduce((s,id)=>s+B(id).acres,0);
+  // No Vintage-character tile: VCHAR is hardcoded editorial text, not sourced
+  // from anything, and doesn't belong in a tile row that now reads as real.
+  strip(box,[{l:'Fruit received',v:fmt(tons,3),u:'tons'},
+             {l:'Acres in view',v:fmt(acView,2),u:'ac'},
+             {l:'Yield',v:acYield?fmt(tons/acYield,2):'—',u:'t/ac'},
+             {l:'Lots',v:mine.length}]);
+  if(mine.length){
+    const rows=mine.map(r=>{
+      const bl=B(r.block_id);
+      return [`<span class="vdot" style="background:${bl.color}"></span>${bl.label}`,
+              r.varietal_name||'—', r.lot_code||r.lot_name||'—',
+              dstr(new Date(r.receipt_date)), fmt(r.weight_tons,3)];});
+    table(box,[{h:'Block'},{h:'Variety',dim:1},{h:'Lot'},{h:'Received',dim:1},{h:'Tons',num:1}],
+      rows,['Total','','','',fmt(tons,3)]);
+  }
+  // Two distinguishable empty states. "No receipt recorded" deliberately does
+  // NOT claim "no fruit harvested" -- we cannot tell a block that didn't crop
+  // from one whose receipt was never entered (2022's missing B2/B3 is either).
+  ctx.blocks.forEach(id=>{
+    if(mine.some(r=>r.block_id===id)) return;
+    box.appendChild(el('div','empty', fruitMappedFor(maps,id,v)
+      ? `No fruit receipt recorded in InnoVint for ${B(id).label} in ${v}.`
+      : (FRUIT_UNMAPPED_NOTE[id] || `${B(id).label} has no InnoVint block record for ${v}.`)));
+  });
+}
+
+function renderFruitMock(box, ctx){
   const v=ctx.primary, now=endOf(v,ctx.align);
   const tk=TANKS.filter(t=>ctx.blocks.includes(t.blk));
   if(!tk.length){box.appendChild(el('div','empty','No lots from the selected blocks.')); return;}
@@ -2346,7 +2489,7 @@ function renderFruit(box, ctx){
             fmt(t.vol,0)];});
   const ac=acresOf(ctx.blocks);
   strip(box,[{l:'Fruit received',v:fmt(tons,2),u:'tons'},
-             {l:'Acres in view',v:fmt(ac,1),u:'ac'},
+             {l:'Acres in view',v:fmt(ac,2),u:'ac'},
              {l:'Yield',v:fmt(tons/ac,2),u:'t/ac'},
              {l:'Lots',v:rows.length},
              {l:'Vintage character',v:VCHAR[v].label.split(',')[0]}]);
@@ -2511,56 +2654,96 @@ function ctxFor(tab){
           blocks:selB(tab)};
 }
 
-function renderFilters(tab){
-  const host=$('#f-'+tab), st=state[tab];
-  host.innerHTML='';
-
+/* The vintage control, built standalone so it can mount either in a tab's
+   page-wide filter bar (vineyard) or inside a section (winery/Harvest).
+   Same markup and CSS in both places -- only the mount point differs. */
+function buildVintageGroup(tab){
+  const st=state[tab], cap=vintageCapFor(tab);
   const gV=el('div','fgroup');
   gV.appendChild(el('div','flabel','Vintage'));
 
-  const wrap=el('div','vdd'); wrap.id='vdd-wrap';
-  const trigger=el('button','vdd-trigger'+(vintageDDOpen?' open':''));
-  const menu=el('div','vdd-menu'+(vintageDDOpen?' open':''));
+  const wrap=el('div','vdd'); wrap.id='vdd-wrap-'+tab;
+  const trigger=el('button','vdd-trigger'+(vintageDDOpen[tab]?' open':''));
+  const menu=el('div','vdd-menu'+(vintageDDOpen[tab]?' open':''));
   const summary = st.vintages.length<=3 ? [...st.vintages].sort((a,b)=>b-a).join(', ')
                                          : st.vintages.length+' vintages';
   trigger.innerHTML=`<span>${summary}</span><span class="vdd-caret">&#9662;</span>`;
   trigger.onclick=e=>{
     e.stopPropagation();
-    vintageDDOpen=!vintageDDOpen;
-    trigger.classList.toggle('open',vintageDDOpen);
-    menu.classList.toggle('open',vintageDDOpen);
+    vintageDDOpen[tab]=!vintageDDOpen[tab];
+    trigger.classList.toggle('open',vintageDDOpen[tab]);
+    menu.classList.toggle('open',vintageDDOpen[tab]);
   };
   VINTAGES.forEach(y=>{
     const on=st.vintages.includes(y);
-    const atCap=st.vintages.length>=VINTAGE_SELECT_CAP;
-    const opt=el('div','vdd-opt'+(on?' on':'')+((!on&&atCap)?' disabled':''));
+    const atCap=st.vintages.length>=cap;
+    // Single-select tabs never render an option inert: clicking an unselected
+    // vintage REPLACES the current one, so nothing is ever unreachable. Under
+    // cap===1 the old `!on && atCap` test would have disabled every option
+    // except the selected one, freezing the vintage permanently.
+    const inert = cap>1 && !on && atCap;
+    const opt=el('div','vdd-opt'+(on?' on':'')+(inert?' disabled':''));
     opt.innerHTML=`<span class="vdd-check"></span><span class="vdd-dot" style="--c:${VCOLOR[y]}"></span>
       <span class="vdd-label"><span class="vdd-y">${y}</span><span class="vdd-sub">${y===CURRENT?'current · live feed':VCHAR[y].label}</span></span>`;
-    if(!on && atCap){
+    if(inert){
       // Cap reached: leave unselected options visible but inert, rather than
       // hiding them -- the user can see what they'd need to deselect first.
     } else {
       opt.onclick=e=>{
         e.stopPropagation();
         let v=[...st.vintages];
-        if(on){ if(v.length>1) v=v.filter(x=>x!==y); }
-        else if(v.length<VINTAGE_SELECT_CAP){ v.push(y); }
+        if(cap===1){
+          if(on) return;   // already the selection; never deselect to empty
+          v=[y];           // radio: replace rather than add
+        } else {
+          if(on){ if(v.length>1) v=v.filter(x=>x!==y); }
+          else if(v.length<cap){ v.push(y); }
+        }
         st.vintages=v;
         PANELS.filter(p=>p.tab===tab).forEach(p=>delete state.scrollDays[p.id]);
-        renderTab(tab);
+        // Winery's control now lives inside #body-<tab>, which renderTab()
+        // clears and rebuilds -- the document height briefly collapses and the
+        // browser can clamp scrollTop. Best-effort restore: the panel skeleton
+        // is appended synchronously inside renderTab, so full height is back
+        // by the time it resolves. No-op for vineyard (bar is above the fold).
+        const sy=window.scrollY;
+        renderTab(tab).then(()=>requestAnimationFrame(()=>window.scrollTo(0,sy)));
       };
     }
     menu.appendChild(opt);
   });
-  if(st.vintages.length>=VINTAGE_SELECT_CAP){
-    menu.appendChild(el('div','vdd-cap-note',`Up to ${VINTAGE_SELECT_CAP} vintages at once`));
+  // No cap note on a single-select tab -- "Up to 1 vintage at once" would read
+  // as a restriction rather than as the radio behaviour it actually is.
+  if(cap>1 && st.vintages.length>=cap){
+    menu.appendChild(el('div','vdd-cap-note',`Up to ${cap} vintages at once`));
   }
   wrap.appendChild(trigger); wrap.appendChild(menu);
   gV.appendChild(wrap);
   if(st.vintages.length>1){
     gV.appendChild(el('div','fhint','Comparing '+selV(tab).join(', ')+' — aligned to the same calendar date'));
   }
-  host.appendChild(gV);
+  return gV;
+}
+
+/* The two vintage-derived meta lines. They travel with the control, so on
+   winery they render in the Harvest strip rather than the page-wide bar. */
+function buildVintageMeta(tab){
+  const st=state[tab];
+  const meta=el('div','fmeta');
+  meta.innerHTML=`<div class="fmeta-txt">as of ${dstr(endOf(primV(tab), st.vintages.length>1))} ${primV(tab)}</div>
+     <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`;
+  return meta;
+}
+
+function renderFilters(tab){
+  const host=$('#f-'+tab), st=state[tab];
+  // Defensive: 'chat' has no filter host and never should get one.
+  if(!host) return;
+  host.innerHTML='';
+  // Winery's vintage control is mounted inside the Harvest section by
+  // renderTab() instead: after pinning anom-w to CURRENT, Harvest is the only
+  // region vintage scopes, so a page-wide control would overstate its reach.
+  if(tab!=='winery') host.appendChild(buildVintageGroup(tab));
 
   const gB=el('div','fgroup');
   gB.appendChild(el('div','flabel','Vineyard block'));
@@ -2586,13 +2769,13 @@ function renderFilters(tab){
   const meta=el('div','fmeta');
   meta.innerHTML = tab==='vineyard'
     ? `<div class="live ${live?'on':'off'}"><span class="pulse"></span>${live?'Live feed':'Archive · '+primV(tab)}</div>
-       <div class="fmeta-txt">${st.blocks.length} of 3 blocks · ${fmt(acresOf(selB(tab)),1)} acres</div>
+       <div class="fmeta-txt">${st.blocks.length} of 3 blocks · ${fmt(acresOf(selB(tab)),2)} acres</div>
        <div class="fmeta-txt">as of ${dstr(endOf(primV(tab), st.vintages.length>1))} ${primV(tab)}</div>
        <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`
     : `<div class="live on"><span class="pulse"></span>Cellar sensors live</div>
-       <div class="fmeta-txt">Vintage scopes fermentation<br>and harvest panels only</div>
-       <div class="fmeta-txt">as of ${dstr(endOf(primV(tab), st.vintages.length>1))} ${primV(tab)}</div>
-       <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`;
+       <div class="fmeta-txt">${st.blocks.length} of 3 blocks · ${fmt(acresOf(selB(tab)),2)} acres</div>
+       <div class="fmeta-txt">Blocks scope harvest and insights</div>
+       <div class="fmeta-txt">Vintage is set in the Harvest section</div>`;
   host.appendChild(meta);
 }
 
@@ -2830,7 +3013,8 @@ function makePanel(p, c){
   const panel=el('div','panel '+(p.span||'s4'));
   const hd=el('div','p-hd');
   const subText = typeof p.sub==='function' ? p.sub(c) : p.sub;
-  hd.innerHTML=`<div class="p-hl"><div class="p-ttl-row"><span class="p-ttl">${p.title}</span>${p.unit?`<span class="p-unit">${p.unit}</span>`:''}</div>
+  const unitText = typeof p.unit==='function' ? p.unit(c) : p.unit;
+  hd.innerHTML=`<div class="p-hl"><div class="p-ttl-row"><span class="p-ttl">${p.title}</span>${unitText?`<span class="p-unit">${unitText}</span>`:''}</div>
     ${subText?`<div class="p-sub">${subText}</div>`:''}</div>`;
   if(p.info){
     const infoText = typeof p.info==='function' ? p.info(THRESHOLDS) : p.info;
@@ -2924,7 +3108,7 @@ async function renderTab(tab){
   const c=ctxFor(tab);
   const role = await getCurrentUserRole();
   const isOperator = role==='operator';
-  if(tab==='vineyard') renderFilters(tab);
+  renderFilters(tab);   // no-ops for any tab without an #f-<tab> host
   const host=$('#body-'+tab);
   host.innerHTML='';
   const pending=[];
@@ -2937,7 +3121,7 @@ async function renderTab(tab){
 
   if(tab==='vineyard'){
     const mp=makePanel({id:'map', title:'Block map', unit:'acres',
-      sub:'7.3 acres · click a block to filter · selection highlighted',
+      sub:'7.35 acres · click a block to filter · selection highlighted',
       render:(b,cc)=>renderMap(b,cc)}, c);
     left.appendChild(mp.panel); pending.push(mp.run);
 
@@ -2964,8 +3148,21 @@ async function renderTab(tab){
     pending.push(()=>paintOverviewW());
 
     if(isOperator){
+      // Pinned to CURRENT. The rest of the winery hero is already CURRENT-only
+      // (paintOverviewW hardcodes vintage:CURRENT; both cellar panels call
+      // buildSeriesReal with CURRENT) -- anom-w was the lone exception, and
+      // leaving it vintage-scoped would mean a top-of-page panel silently
+      // driven by a control that now lives at the bottom of the page.
+      // Insights are a live-operations surface: "Fermentation running hot"
+      // has no operational meaning for an archived vintage.
+      //
+      // Only `primary`/`align` are set: renderAnomalies recomputes `end`
+      // itself as endOf(ctx.primary, ctx.align), so an `end` passed here
+      // would be silently overwritten. Blocks stay live from `c` -- 3 of the
+      // 4 winery rules filter TANKS by c.blocks, and blocks remain page-wide.
+      const anomCtx={...c, primary:CURRENT, vintages:[CURRENT], compare:false, align:false};
       const an=makePanel({id:'anom-w', title:'Insights and Anomalies', unit:'rule-based',
-        render:(b,cc)=>renderAnomalies(b,cc,'winery')}, c);
+        render:(b,cc)=>renderAnomalies(b,cc,'winery')}, anomCtx);
       right.appendChild(an.panel); pending.push(an.run);
     }
   }
@@ -2975,8 +3172,21 @@ async function renderTab(tab){
     const ps=PANELS.filter(p=>p.tab===tab && p.sect===s.id && (p.minRole!=='operator' || isOperator));
     if(!ps.length) return;
     const head=el('div','sect');
-    head.innerHTML=`<span class="sect-l">${s.label}</span><span class="sect-r"></span><span class="sect-n">${s.note}</span>`;
+    const note = typeof s.note==='function' ? s.note(c) : s.note;
+    head.innerHTML=`<span class="sect-l">${s.label}</span><span class="sect-r"></span><span class="sect-n">${note}</span>`;
     host.appendChild(head);
+    // Vintage control, scoped to the one section it actually governs. Reuses
+    // the `.filters` bar styling verbatim -- no new CSS. Only rendered when
+    // the section is (i.e. operator-only, since `fruit` is minRole:'operator'
+    // and an empty section returns above), which is correct: a non-operator
+    // has no vintage-scoped winery content to control.
+    if(tab==='winery' && s.id==='harvest'){
+      const strip=el('div','filters');
+      strip.appendChild(buildVintageGroup(tab));
+      strip.appendChild(el('div','fspacer'));
+      strip.appendChild(buildVintageMeta(tab));
+      host.appendChild(strip);
+    }
     const grid=el('div','grid');
     host.appendChild(grid);
     ps.forEach(p=>{
@@ -2987,8 +3197,21 @@ async function renderTab(tab){
     });
   });
 
-  /* render bodies after layout so clientWidth is correct */
-  requestAnimationFrame(()=>{ pending.forEach(f=>f()); });
+  /* Render bodies after layout so clientWidth is correct -- unchanged timing,
+     still exactly one rAF tick before any panel starts rendering. NEW:
+     renderTab's own promise now waits for every panel to actually finish
+     before resolving, instead of resolving as soon as this frame was
+     scheduled. Verified safe against every call site in this file: all 12
+     are fire-and-forget statements (`renderTab(x);`), none `.then()`s or
+     `await`s the result, and none has code after the call that assumed
+     synchronous/fast completion -- so nothing changes for existing callers.
+     Promise.allSettled, not Promise.all, because two pending entries
+     (paintOverviewV/paintOverviewW) are pushed raw, not through makePanel's
+     try/catch -- a throw in either would otherwise surface as an unhandled
+     promise rejection; allSettled absorbs it instead, a genuine (if minor)
+     fix on top of the scroll-restore bug this was written for. */
+  await new Promise(res=>requestAnimationFrame(res));
+  await Promise.allSettled(pending.map(f=>f()));
 }
 
 /* Tabs */
@@ -3061,12 +3284,16 @@ $('#avatar').onclick=e=>{e.stopPropagation(); const m=$('#menu'); m.classList.to
   $('#avatar').setAttribute('aria-expanded',m.classList.contains('open'));};
 document.addEventListener('click',e=>{if(!$('#pwrap').contains(e.target)) $('#menu').classList.remove('open');});
 document.addEventListener('click',e=>{
-  const w=$('#vdd-wrap');
-  if(w && !w.contains(e.target) && vintageDDOpen){
-    vintageDDOpen=false;
-    w.querySelector('.vdd-trigger')?.classList.remove('open');
-    w.querySelector('.vdd-menu')?.classList.remove('open');
-  }
+  // Both filter bars are live in the DOM at once, so this cannot query a
+  // single '#vdd-wrap' -- it would only ever find vineyard's.
+  ['vineyard','winery'].forEach(tab=>{
+    const w=$('#vdd-wrap-'+tab);
+    if(w && !w.contains(e.target) && vintageDDOpen[tab]){
+      vintageDDOpen[tab]=false;
+      w.querySelector('.vdd-trigger')?.classList.remove('open');
+      w.querySelector('.vdd-menu')?.classList.remove('open');
+    }
+  });
 });
 $('#signout').onclick=()=>{$('#menu').classList.remove('open'); hideTip(); sb.auth.signOut();};
 $('#menu-queue').onclick=()=>{

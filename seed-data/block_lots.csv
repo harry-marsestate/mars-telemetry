@@ -1,6 +1,6 @@
 block_id,variety_key,variety_name,acres
-B1,cs,Cabernet Sauvignon,3.0
-B1,pv,Petit Verdot,0.4
-B1,cf,Cabernet Franc,0.3
-B2,cs,Cabernet Sauvignon,2.2
-B3,cs,Cabernet Sauvignon,1.4
+B1,cs,Cabernet Sauvignon,2.10
+B1,cf,Cabernet Franc,0.60
+B1,pv,Petit Verdot,0.29
+B2,cs,Cabernet Sauvignon,2.91
+B3,cs,Cabernet Sauvignon,1.45

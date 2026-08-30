@@ -13,11 +13,14 @@ import httpx
 from .contracts import (
     AnalysesResponse,
     BlockComponentsResponse,
+    GrowerReceipt,
+    GrowerReceiptsResponse,
     InnoVintAnalysis,
     InnoVintVessel,
     Lot,
     LotsResponse,
     Pagination,
+    VarietalsResponse,
     VesselsResponse,
 )
 from .raw_landing import land_raw
@@ -25,10 +28,15 @@ from .raw_landing import land_raw
 BASE_URL = "https://sutter.innovint.us/api/v1"
 
 # ~100 calls per run (47 lots x analyses + 47 x blockComponents + a few
-# vessel pages). No documented InnoVint rate limit was found during the
+# vessel pages, plus ~8 growerReceipts vintages and 1 varietals lookup).
+# No documented InnoVint rate limit was found during the
 # data inventory; this is just a polite default for a scheduled job
 # hitting a third party, not a response to any observed throttling.
 REQUEST_PAUSE_SECONDS = 0.1
+
+# Cap on ids per `idIn` query, to keep the URL comfortably short. Only 2
+# distinct varietals exist across all real receipts today; this is headroom.
+VARIETAL_ID_CHUNK = 50
 
 
 class InnoVintClient:
@@ -110,3 +118,58 @@ class InnoVintClient:
                 yield item.data
             url = parsed.pagination.next
             page += 1
+
+    def fetch_grower_receipts(self, vintage: int) -> list[GrowerReceipt]:
+        """Fruit intake receipts for one vintage.
+
+        Returns a list, not an iterator, deliberately: the caller reconciles
+        deletions by comparing the COMPLETE per-vintage payload against what is
+        already stored, and a partially-consumed iterator would make an empty or
+        truncated result indistinguishable from "this vintage genuinely has no
+        receipts" -- which would then delete real rows.
+
+        This endpoint exposes no `deleted` flag and no `state` filter, unlike
+        /actions/receiveFruitActions. Reconciliation is the only way to detect a
+        deleted receipt.
+        """
+        receipts: list[GrowerReceipt] = []
+        url = f"{BASE_URL}/wineries/{self._winery_id}/growerReceipts/{vintage}?limit=100"
+        page = 0
+        while url:
+            raw = self._get(url, "grower_receipts", f"{vintage}__page{page}")
+            parsed = GrowerReceiptsResponse.model_validate_json(raw)
+            receipts.extend(item.data for item in parsed.results)
+            url = parsed.pagination.next
+            page += 1
+        return receipts
+
+    def fetch_varietal_names(self, varietal_ids: set[str]) -> dict[str, str]:
+        """varietalId -> display name, for the ids actually referenced.
+
+        /varietals is GLOBAL, not winery-scoped -- no wineryId in the path (the
+        one method here that doesn't follow that pattern; it's InnoVint's shared
+        varietal catalogue, confirmed against /api/v1/schema). Filtered with the
+        spec's `idIn` parameter rather than paging the whole catalogue or making
+        one request per id.
+
+        Sorted before chunking so the raw-landing filenames are stable across
+        runs with identical inputs.
+        """
+        if not varietal_ids:
+            return {}
+        names: dict[str, str] = {}
+        ordered = sorted(varietal_ids)
+        for start in range(0, len(ordered), VARIETAL_ID_CHUNK):
+            chunk = ordered[start : start + VARIETAL_ID_CHUNK]
+            url = f"{BASE_URL}/varietals?idIn={','.join(chunk)}&limit=100"
+            page = 0
+            while url:
+                raw = self._get(
+                    url, "varietals", f"chunk{start // VARIETAL_ID_CHUNK}__page{page}"
+                )
+                parsed = VarietalsResponse.model_validate_json(raw)
+                for item in parsed.results:
+                    names[item.data.id] = item.data.name
+                url = parsed.pagination.next
+                page += 1
+        return names

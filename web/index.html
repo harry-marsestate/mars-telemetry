@@ -1584,7 +1584,16 @@ const PANELS = [
  render: async (b,c) => {
    const th = await getThresholds();
    const row = interpolateThreshold(th.byKey.get('soil_below_refill'), th.byKey);
-   const lo = row?.threshold ?? 15, hi = 25; // hi: no DB row -- field-capacity gap, Step 1
+   // lo fallback matches the corrected DB threshold (13.8). hi=29: anchored
+   // to real p90 (28.9, 2022-2025, 20544 hourly readings) - still no DB row
+   // for the upper bound, same display-only gap as before, just the right
+   // number now. See docs/SECURITY.md for the full reasoning, including the
+   // one caveat this doesn't share with vpd_low's earlier fix: this band is
+   // a deliberate deficit-irrigation TARGET per the info text above, not a
+   // claim about the full observed range - part of why real data exceeds
+   // the old 25 is the normal pre-deficit spring wet season, not a stale
+   // number alone.
+   const lo = row?.threshold ?? 13.8, hi = 29;
    const label = row?.display_label ?? `Target ${lo}–${hi} % VWC`;
    const sets = await soilSets(c, 'soil_moisture');
    legendFor(b.parentElement,[...sets,{name:label,color:'#6E9B72',band:true}]);

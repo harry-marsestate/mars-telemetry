@@ -1,0 +1,43 @@
+-- soil_below_refill (metric_key='soil_moisture', operator='lt') threshold
+-- corrected from 15 to 13.8, empirically grounded, same lightweight
+-- treatment DTR already got. Real distribution (20,544 hourly readings,
+-- 2022-2025, ERA5-Land estate-level): p05=13.8, p10=13.8, p25=13.9,
+-- p50=14.7, p90=28.9, p95=33.2, max=43.5. At the OLD threshold (15),
+-- 52.4% of ALL real readings crossed it - not a rare alert condition,
+-- effectively always-on for the entire July-September ripening season
+-- every year (monthly avg sits at 13.9-14.1 for 3 straight months,
+-- confirmed via monthly breakdown, not assumed from the season total).
+-- 13.8 sits right at the real observed near-floor - crossing rate drops
+-- to 0.73%, restoring genuine rarity (comparable to VPD's alert tier at
+-- 1.52%) instead of firing on the site's completely normal summer
+-- baseline. Directly corroborates (more strongly than expected) the
+-- physical reasoning that Aiken's cobbly/stony/very-rocky map-unit
+-- variants have reduced effective water-holding capacity versus an
+-- unmodified "loam" texture-class reference - the real summer floor sits
+-- below even a generic "sandy" assumption, let alone loam's 35-45% field
+-- capacity. Full detail: docs/SECURITY.md.
+update anomaly_thresholds set threshold = 13.8 where rule_key = 'soil_below_refill';
+
+-- display_label had BOTH bounds baked in as literal text, not
+-- {threshold}/{threshold_low}/{threshold_high} placeholders -
+-- interpolateThreshold() only substitutes those three tokens, so neither
+-- number would have updated on its own. Same bug class as vpd_high's
+-- display_label (found there first, checked here proactively rather than
+-- assumed clean). tooltip_phrase already uses {threshold} correctly and
+-- needs no change - confirmed, not assumed, by reading it directly.
+--
+-- The upper bound (25 -> 29) was never a live DB threshold - no
+-- soil_above_target row exists, it was a hardcoded JS display fallback
+-- only (web/index.html). Checked against real data now that the low
+-- bound is being corrected: 25 sits below real p90 (28.9) and well below
+-- p95 (33.2) - 10%+ of real readings exceed it. Anchored to p90 (28.9,
+-- rounded to 29), the same top/bottom-decile design language DTR's own
+-- threshold already uses. One caveat NOT present in vpd_low's case: this
+-- band is framed by the panel's own info text as a deliberate deficit-
+-- irrigation TARGET ("kept below field capacity"), not a claim about the
+-- full observed range - part of why real data exceeds 25 is the normal
+-- pre-deficit-management spring wet season (April alone averages 30.1%),
+-- not purely a stale number. The p90 anchor is still the right fix for
+-- what the chart visually communicates, but this isn't a clean
+-- apples-to-apples repeat of vpd_low's fix - flagged, not glossed over.
+update anomaly_thresholds set display_label = 'Target 13.8–29 % VWC' where rule_key = 'soil_below_refill';

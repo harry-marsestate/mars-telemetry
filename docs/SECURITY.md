@@ -1182,6 +1182,15 @@ isolation. A second, DB-stored copy of the same wrong number can silently
 override a corrected JS fallback - this was only caught by checking, not
 by trusting that changing one `const lo = ...` line was sufficient.
 
+**Recurred once already, on a different row - see the
+`soil_below_refill` entry below.** `display_label` holding a literal
+hardcoded number instead of a `{threshold}` placeholder is not a
+one-off gap specific to `vpd_high`; treat it as a standing property of
+this table. Whenever a `threshold` value changes on ANY row, check that
+row's `display_label`/`tooltip_phrase`/`message`/`action_line` for a
+literal hardcoded number before considering the fix complete - don't
+assume only the row a prior incident already flagged is affected.
+
 **Two real bugs caught during implementation, not glossed over.**
 
 1. An ambiguous column reference (`vintage`/`day`, present in both the
@@ -1228,3 +1237,105 @@ being trusted.
   only the original four derived fields (`gdd_cumulative`, `dtr_f`,
   `vpd_kpa`, `et0_in`). Needs `vpd_peak_kpa` added whenever this tool is
   next touched, or the chat can't be asked about peak-hour VPD at all.
+
+
+## Soil moisture threshold (soil_below_refill, 15% -> 13.8%) corrected after the same real-data check DTR/VPD got - tracked item E closed
+
+Tracked item E, closing it out. `soil_below_refill` (`metric_key=
+'soil_moisture'`, `operator='lt'`, `severity='alert'`) was evaluated
+directly against real `sensor_readings` (not a `daily_derived`
+aggregate - soil moisture never went through the derived-metric layer
+the way DTR/VPD did). Real distribution, 20,544 real hourly readings
+(2022-2025, ERA5-Land, estate-level): p05=13.8, p10=13.8, p25=13.9,
+p50=14.7, p90=28.9, p95=33.2, max=43.5.
+
+**At the old threshold (15), 52.4% of ALL real readings crossed it** -
+not a rare alert condition, effectively always-on. A monthly breakdown
+(2023) shows why: the soil drains steadily April-June, then sits on a
+stable near-floor plateau (monthly average 13.9-14.1%) for the entire
+July-September ripening season, every real year - it doesn't fluctuate
+or worsen, it settles there and stays. An alert that fires continuously
+for three straight months, every season, on a completely normal and
+unchanging condition gives an operator no discriminating signal at all.
+
+**The loam-vs-rocky-loam cross-check, resolved by real data rather than
+a choice between citations.** Aiken (Howell Mountain's dominant series)
+is officially mapped as "loam" texture in USDA/NRCS survey data, and a
+generic texture-class reference (Cornell CALS) gives loam field capacity
+as roughly 35-45% VWC - taken at face value, that would suggest the
+current threshold undershoots badly. But many of Aiken's real NRCS map
+units are specifically cobbly/stony/very-rocky variants, and rock
+fragments hold essentially no plant-available water, reducing a soil's
+*effective* water-holding capacity well below what its fine-earth
+texture class alone implies. The real observed summer floor
+(13.7-14.1%) sits below even a generic "sandy" assumption (15-25%), let
+alone unmodified loam - this **corroborates the rock-fragment reasoning
+more strongly than expected**, confirmed directly against real
+measurements, not decided by picking which literature source to trust.
+
+**13.8 was chosen deliberately, not as "somewhere lower than 15."**
+Crossing rate at a few candidate values: 13.8 -> 0.73%, 14.0 -> 29.78%,
+14.5 -> 46.04%, 15.0 (old) -> 52.40%. There's a steep cliff between 13.8
+and 14.0 - the plateau's own noise floor sits almost exactly in that
+gap, so any value placed inside it would be highly sensitive to exactly
+where the real floor lands in a given season. 13.8 sits at the clean,
+defensible edge of the real plateau (matching p05/p10 almost exactly)
+rather than inside the noisy transition zone, restoring genuine rarity
+(0.73%, comparable to VPD's alert tier at 1.52%) instead of landing on
+an arbitrary point that happens to be lower than the old number.
+
+**The same `display_label` literal-text bug found on `vpd_high` showed
+up again here** - `display_label` stored `'Target 15-25 % VWC'` as
+literal digits, not `{threshold}`/`{threshold_low}`/`{threshold_high}`
+placeholders. `tooltip_phrase` was already correctly templated
+(`'under the {threshold}% VWC floor...'`) and needed no change - checked
+directly, not assumed clean just because one field on the row was fine.
+Corrected in the same migration to `'Target 13.8-29 % VWC'`. See the
+RULE extension on the VPD entry above - this is now confirmed to recur,
+not a one-off.
+
+**The upper display bound (25 -> 29) was also corrected, anchored to
+real p90 (28.9) - but this is a related, not identical, situation to
+`vpd_low`'s earlier fix, and shouldn't be read as a clean repeat of that
+reasoning.** No `soil_above_target` row exists in `anomaly_thresholds` -
+`hi=25` was always a JS-only display fallback, never a live threshold.
+Checked against real data: 25 sits below real p90 (28.9) and well below
+p95 (33.2) - 10%+ of real readings exceed it. The nuance `vpd_low`
+didn't have: this panel's own info text frames the band as *"the
+deficit-irrigation target, deliberately kept below field capacity... not
+a sign of stress unless it drops well under the band"* - a management
+target, not a claim about the full observed range. Part of why real data
+exceeds 25 is structural, not just a stale number: April alone averages
+30.1% VWC (the normal pre-deficit-management spring wet season, before
+deficit irrigation is even in effect), not an anomaly. The p90 anchor is
+still the right fix for what the chart visually communicates to a
+viewer who can't otherwise tell "expected spring wetness" from
+"unusually wet summer" - but it's flagged here as a distinct situation
+with its own reasoning, not vpd_low's fix reapplied verbatim.
+
+**`scope_level='block'` on this row is decorative, not functional -
+confirmed by reading `anomalies_eval()`'s live function body directly,
+not assumed.** The row's `scope_level` column is never referenced
+anywhere in the function's actual join/filter logic - it evaluates
+purely on `metric_key` matching against `latest_sensor`'s real data,
+which is estate-level only (`block_id` always null for real soil
+readings; ERA5-Land's grid can't resolve the three blocks). Verified
+live against a real date (2023-07-15): the rule fires correctly with
+`block_id=null`, matching the labeled scope's own reality. Worth a note
+specifically because `scope_level='block'` could otherwise mislead a
+future reader into believing this project has, or is building toward,
+per-block soil moisture alerting - it doesn't, and the column value
+doesn't reflect anything that's actually wired up.
+
+**Estate-level-only caveat, same shape as DTR/VPD's.** ERA5-Land's grid
+can't distinguish this estate's three blocks, standing in for a
+property with genuinely different plantings and ages (B1's young
+replanted vines vs. B2/B3's established ones). This changes confidence
+in the *exact* value, not the *direction* of the finding: the shape (a
+stable summer plateau sitting well below the old alert floor, every real
+year) is a property of the whole-estate curve relative to the
+threshold, and wouldn't flip if block-level data existed. Treat "the old
+threshold was miscalibrated to near-permanently-on" as solid; treat
+13.8 specifically (versus some other point at the edge of the same
+plateau) as reasonable but not beyond revision if block-level real data
+ever becomes available.

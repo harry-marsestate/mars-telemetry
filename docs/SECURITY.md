@@ -1050,3 +1050,181 @@ semantically correct time. This is the second of two instances in this
 project where only an actual browser pass (not a DB or Node-level check)
 could have found the bug - the first: the winery filter bar entry directly
 above.
+
+
+## DTR threshold (dtr_low, 21°F) investigated and confirmed correct - no change made
+
+Tracked item B's DTR half. Real empirical distribution, `daily_derived.dtr_f`,
+857-860 real days (2022-2025, growing season): p10=20.8, p25=26.7, p50=31-32,
+p75=35.7, max=47.2°F. `dtr_low` (`operator='lt'`, `threshold=21`,
+`severity='note'`) sits close to the real p10, and the current trigger rate
+(~10-12% of real days) is a coherent design for a "note"-severity anomaly -
+occasional, not constant, not unreachable.
+
+Two wine-trade literature leads found this session would have argued for
+raising the threshold dramatically: a Howell-Mountain-specific claim of
+diurnal swings "commonly exceeding 50°F," and a Paso Robles Cabernet
+Sauvignon citation at 35-50°F. Both were checked directly against this
+site's own real data, not adopted on the strength of sounding specific -
+the single highest DTR ever recorded across 4 full real seasons is 47.2°F,
+once. Neither claim is corroborated here; both read as overstatements once
+checked against real measurements, not something to import as a new
+threshold.
+
+RULE: a wine-trade or content-site claim about a specific site's climate is
+not a substitute for that site's own real data, even when the claim is
+worded specifically and confidently. Check it against real measurements
+before treating it as evidence for a threshold change - the same discipline
+already applied to GDD/DTR's own Napa Valley Grapegrowers calibration, now
+applied in the opposite direction (rejecting a lead, not adopting one).
+
+## VPD: the metric itself was wrong, not just the threshold - new vpd_peak_kpa column, new two-tier thresholds, old rule disabled
+
+Tracked item B's VPD half, closing it out. The original threshold
+(`vpd_high`, `metric_key='vpd'`, `operator='gt'`, `threshold=3.1`,
+`severity='warn'`) was compared against `daily_derived.vpd_kpa`, which is
+computed from `tavg_f`/`rh_avg` - already-daily-averaged inputs.
+Structurally, no daily-average quantity can represent an afternoon peak:
+confirmed directly against the real column, the highest `vpd_kpa` ever
+observed across 4 real seasons is 3.64 kPa, crossing the 3.1 threshold on
+just 0.8% of days - de facto almost unreachable, regardless of what any
+literature said the "right" number should be.
+
+**New literature found this session was genuinely stronger than the
+original investigation's, and worth taking seriously - but not at face
+value against the wrong quantity.** A peer-reviewed OENO One review citing
+a real Napa field study (Scholasch et al. 2009) reports maximum afternoon
+VPD reaching 6.5 kPa; an independent primary-source sap-flow paper by the
+same researcher reports 6.6 kPa; a 20-year CIMIS-station analysis from a
+neighboring North Coast AVA confirms summer afternoons commonly reach 6-7+
+kPa. All three are genuinely field/viticulture-specific and North-Coast-CA
+relevant - unlike the generic greenhouse-crop literature the original
+investigation found. Comparing this literature against `vpd_kpa` directly
+would have wrongly suggested it overstates real conditions here by roughly
+2x. That would have been a methodology artifact - comparing a peak-condition
+citation against a daily-average number - not a real difference between
+this site and the literature.
+
+**Fix: a genuine peak-hour VPD, computed independently and added as a real
+column, not a threshold tweak.** `daily_weather.vpd_peak_kpa` is now
+computed by the `daily_weather.sql` dbt model itself, from real hourly
+`air_temp`+`humidity` (`sensor_readings`, 5,136 rows/vintage, confirmed
+genuinely hourly) - paired per hour, run through the same Tetens formula
+`daily_derived.vpd_kpa` already uses, then reduced to the day's max.
+Deliberately placed as a `daily_weather` dbt column, not a `daily_derived`
+view-time subquery against `sensor_readings`: `daily_derived` is read
+frequently, including by `anomalies_eval()`'s hot-path "just the latest
+row" query (`order by day desc limit 1`), which Postgres can push down
+efficiently through a simple view - an expensive per-row hourly
+aggregation inside the view would very likely defeat that pushdown,
+forcing a full-season aggregation just to read one row. `daily_derived`
+now just passes `vpd_peak_kpa` through unchanged, at the same near-zero
+cost as its existing `dtr_f` pass-through.
+
+**New `metric_key='vpd_peak'`, not a redefinition of `'vpd'` in place.**
+Traced every consumer of the literal string `'vpd'` before deciding this
+was safe: `anomalies_eval()`'s own `derived_unpivot` CTE (the one place
+that matters), an orphaned dbt model
+(`ingestion/mars_dbt/models/curated/anomalies.sql`, dead - see below), and
+two unrelated namespaces (`web/index.html`'s panel id `'vpd'`, and the
+chat tool's raw `vpd_kpa` column reference). Redefining `'vpd'` in place
+would have silently changed what the *existing*, still-`enabled=true`
+`vpd_high` row compared its untouched 3.1 threshold against - its observed
+rate would have jumped from 0.8% of days to roughly 43%, with nothing
+anywhere signaling the row's meaning had changed.
+
+RULE: before adding a second meaning to an existing identifier, trace
+every consumer of the literal string first. This is the same reasoning
+that chose `block_innovint_map`'s time-scoped extension over redefining
+`blocks.innovint_block_id` in place - a new, explicit thing alongside the
+old one, not a silent reinterpretation of what the old one already means.
+
+**Two-tier design, matching an existing precedent in this table.**
+`vpd_peak_warn` (`gt 5.0`, `warn`) and `vpd_peak_alert` (`gt 6.5`,
+`alert`), both `metric_key='vpd_peak'`. 6.5 is anchored directly to the
+corroborated literature ceiling (both Scholasch-researcher sources cite
+6.5-6.6 kPa almost identically); 5.0 is anchored to the real p90-p95 band
+of the corrected peak-hour distribution (see below). Two tiers, not one,
+for the same reason the winery's hot/warm fermentation-temperature pair
+already uses two: one physical quantity, two severities, matching
+precedent already in this table rather than inventing a new idiom.
+
+**Old `vpd_high` disabled, not deleted.** `enabled=false` is an
+established pattern in this exact table, not a new mechanism -
+`air_temp_high` already sits disabled today while every other row
+(including mock-backed ones) stays enabled. Verified live against a real
+date, not just reasoned about: 2024-07-06 (`vpd_peak_kpa=8.38`, the season
+max; the *old* average-based `vpd_kpa=3.44` on the same day - itself above
+the old 3.1 threshold too). `anomalies_eval(2024, '2024-07-06T02:00:00Z',
+'vineyard')` returned both new rules firing correctly, and `vpd_high`
+absent from the results despite its own condition being genuinely true
+that day - proving the disable is respected, not just coincidentally
+inert on dates that happen not to need it.
+
+**The `vpd_low=0.4` hardcoded display band was also wrong, and inert -
+never a live DB threshold at all.** Corrected to 0.16 kPa (the real median
+daily-minimum VPD, computed the same way as the peak). Found only by
+checking whether the JS-side fix was actually visible after applying it,
+not by assuming a corrected fallback value takes effect: `vpd_high`'s own
+`display_label` column stored `'Productive band 0.4-{threshold} kPa'` with
+the wrong "0.4" baked in as **literal text**, not a `{threshold_low}`
+template placeholder - `interpolateThreshold()` only substitutes
+`{threshold}`/`{threshold_low}`/`{threshold_high}`, so the stored literal
+overrode the corrected JS fallback in the actual chart legend regardless
+of the JS fix. `getThresholds()` fetches all rows with no `enabled`
+filter, so disabling `vpd_high` for anomaly-firing purposes did not fix
+this either - it needed its own correction, applied in the same migration
+since it's the same row.
+
+RULE: after fixing a displayed value, verify the fix is actually visible
+end-to-end, not just that the code path you edited is correct in
+isolation. A second, DB-stored copy of the same wrong number can silently
+override a corrected JS fallback - this was only caught by checking, not
+by trusting that changing one `const lo = ...` line was sufficient.
+
+**Two real bugs caught during implementation, not glossed over.**
+
+1. An ambiguous column reference (`vintage`/`day`, present in both the
+   `hourly` and new `daily_vpd_peak` CTEs after the `LEFT JOIN`) that
+   `dbt compile` could not catch - compile is Jinja templating only, not a
+   live query plan, and only surfaced when the actual
+   `dbt run --full-refresh` executed against the real database. RULE: a
+   clean `dbt compile` is not proof a model works; only a real run against
+   real data is.
+2. The investigation's own ad-hoc percentile computation (this session,
+   before the dbt column existed) used UTC-date bucketing
+   (`recorded_at::date`) rather than Pacific-local bucketing - the exact
+   same bug already documented and fixed once for `tmax_f`/`tmin_f`/
+   `dtr_f`, now found a **second** time, in independent analysis code
+   rather than the pipeline itself. Corrected mean: 2.86 kPa, vs. the
+   original flawed 2.96. Percentiles from p90 up shifted by ≤0.03 kPa only
+   - the upper-tail extremes that actually matter for a threshold are
+   driven by mid-afternoon hours, nowhere near a day boundary, so they're
+   largely insensitive to a bug that reassigns evening hours across
+   midnight and meaningfully moves the mean. Re-verified crossing
+   fractions directly against the corrected, live column before
+   confirming the thresholds still held - 5.0 crosses on 8.1% of real
+   days, 6.5 on 1.52% (~3/season) - both still matching original design
+   intent almost exactly. Confirmed, not assumed: this was checked with a
+   real query after the correction, not inferred from how small the mean
+   shift looked.
+
+**The disruptive dbt full-refresh step reproduces the same documented
+hazard as every prior `daily_weather` full-refresh, not a new one** - see
+the existing "dbt full-refresh on an incremental model drops dependent
+views AND their grants, silently" entry above. `daily_derived` and its
+grant were cascade-dropped exactly as that entry predicts; both were
+restored and independently re-verified via `information_schema`, then
+adversarially re-tested as `role authenticated` (not superuser) before
+being trusted.
+
+**Flagged, not fixed:**
+- `ingestion/mars_dbt/models/curated/anomalies.sql` - an orphaned dbt
+  model duplicating `anomalies_eval()`'s logic, with no `ref()` consumer
+  and no schedule (confirmed dead, not assumed). It has no `vpd_peak`
+  branch and will drift further out of sync now that one exists elsewhere.
+- `supabase/functions/chat/tools.ts` - `get_derived_series`'s tool
+  description text and its `.select(...)` column list both still name
+  only the original four derived fields (`gdd_cumulative`, `dtr_f`,
+  `vpd_kpa`, `et0_in`). Needs `vpd_peak_kpa` added whenever this tool is
+  next touched, or the chat can't be asked about peak-hour VPD at all.

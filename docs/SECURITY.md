@@ -1630,3 +1630,83 @@ settle a question a real browser-driven load could still answer
 differently - the synthetic test's own methodological gap (smaller
 burst, non-simultaneous dispatch) was flagged at the time specifically
 so it wouldn't later be misread as "tested and ruled out."
+
+## Winery Harvest vintage control: full renderTab() rebuild converted to a scoped update - three pieces of UI, not one
+
+The Harvest vintage dropdown previously called `renderTabPreserveScroll('winery')`
+like every other winery control, even though by this point only one
+panel (`fruit`) genuinely reads the selected vintage for its data -
+`state.winery.blocks` had already been made permanently fixed (the
+winery block filter was removed entirely) and `anom-w` had already been
+pinned to `CURRENT`, so the original "a vintage change can touch more
+than one panel" reasoning no longer applied to winery specifically.
+Confirmed exhaustively before changing anything, not assumed: read
+`renderFerm`/`renderTanks` in full (neither references `ctx.primary`
+anywhere), and traced `cellart`/`cellarh`/`ferm`/`tanks`'s `sub:`
+functions, which do technically take `c.primary` - `getDataSourceLabel()`
+proves the output is vintage-*invariant* for their metric kinds
+(`building` has no vintage branch at all; `real` falls straight to a
+static string), so those four were a false alarm, not a second consumer.
+
+**What actually needed coordinating turned out to be three separate
+pieces of UI, none sharing a single update mechanism - not just "the
+panel whose data changed":**
+
+1. **`fruit`'s panel body** - already covered by the existing
+   `rerenderPanel('fruit')`, itself already safe against the
+   append-only-duplication hazard (`renderFruit` self-clears,
+   `box.innerHTML=''`, confirmed by its own pre-existing defensive
+   comment anticipating exactly this change before it was written).
+2. **`fruit`'s own header** - genuinely vintage-dependent (`unit`
+   differs `'tons'` vs. `'tons · °Bx · pH'`; `sub` differs between the
+   real-InnoVint line and the mock line), and invisible to
+   `rerenderPanel()`: `makePanel()` computes `subText`/`unitText` once
+   and bakes them into `hd.innerHTML` at panel-creation time, never
+   touched again by a scoped re-render. A new `panelHeaders` registry
+   (mirroring the existing `panelRuns` pattern exactly - same
+   population site, one line added) exposes each panel's `.p-hd`
+   element so this one case can recompute and write `.p-sub`/`.p-unit`
+   directly.
+3. **The Harvest strip itself** - the vintage dropdown's own rendered
+   selection state and the "as of `date` `vintage`" / "`vintage`:
+   `character`" meta lines are built once per full `renderTab()` by
+   `buildVintageGroup()`/`buildVintageMeta()`, entirely outside the
+   `makePanel`/`panelRuns`/`SCOPED_RERENDER_SAFE` panel machinery - not
+   panels at all. Given an `id` (`#harvest-vintage-strip`) so a scoped
+   update can find and rebuild just that one small `<div>` in place.
+
+**Mechanism mismatch confirmed, not assumed compatible.**
+`SCOPED_RERENDER_SAFE` is consulted only inside `makePanel`'s
+range-button/history-scroll handlers - `buildVintageGroup`'s vintage
+`onclick` is a wholly separate code path with its own hardcoded call,
+and adding `'fruit'` to that set would have done nothing here. Left
+untouched; the vintage handler now branches on `tab` directly instead
+(winery calls the new `rerenderHarvestVintage()`; every other tab,
+including vineyard, still calls `renderTabPreserveScroll` exactly as
+before).
+
+**Verified after applying, not just reasoned about.** Clicked through
+all five vintages with a real throwaway operator account: unit
+badge/subtitle correctly flip exactly at the real/mock boundary
+(2024→2025) at every step, dropdown selection and meta lines always
+match. `cellart`/`cellarh`/`ferm`/`tanks`'s actual DOM elements were
+marked before the sequence and still had the identical references
+after all five clicks - direct proof they were never torn down, not an
+absence-of-network inference (that check hit an unrelated instrumentation
+bug in the test script and was dropped in favor of the stronger DOM-identity
+proof). Vineyard's own vintage control re-tested for comparison: still a
+full rebuild (58 Supabase calls for one click, the marked panel's DOM
+identity does change), and scroll still correctly recovers via the
+untouched `renderTabPreserveScroll` path. One early scroll reading
+(822 instead of 600 after the final click) turned out to be Playwright's
+own click-action auto-scrolling the on-page trigger into view before
+firing, not an app bug - the same artifact this project hit twice before
+on the map toggle and block chip; a programmatic click bypassing it
+showed scroll holding exactly steady.
+
+RULE: a scoped-rerender fix needs every piece of UI that reflects the
+changed state enumerated, not just the panel whose data changed. A
+control's own displayed selection state and any meta text near it are
+part of that surface too, and typically live in code that was never
+written to be re-run outside a full tab rebuild - "does the data update"
+is a necessary check, not a sufficient one.

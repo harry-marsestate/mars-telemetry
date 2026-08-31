@@ -2722,7 +2722,11 @@ function buildVintageGroup(tab){
         }
         st.vintages=v;
         PANELS.filter(p=>p.tab===tab).forEach(p=>delete state.scrollDays[p.id]);
-        renderTabPreserveScroll(tab);
+        if(tab==='winery'){
+          rerenderHarvestVintage();
+        } else {
+          renderTabPreserveScroll(tab);
+        }
       };
     }
     menu.appendChild(opt);
@@ -3202,7 +3206,7 @@ async function renderTab(tab){
     // and an empty section returns above), which is correct: a non-operator
     // has no vintage-scoped winery content to control.
     if(tab==='winery' && s.id==='harvest'){
-      const strip=el('div','filters');
+      const strip=el('div','filters'); strip.id='harvest-vintage-strip';
       strip.appendChild(buildVintageGroup(tab));
       strip.appendChild(el('div','fspacer'));
       strip.appendChild(buildVintageMeta(tab));
@@ -3215,6 +3219,7 @@ async function renderTab(tab){
       grid.appendChild(m.panel);
       pending.push(m.run);
       panelRuns[p.id]=m.run;
+      panelHeaders[p.id]=m.panel.querySelector('.p-hd');
     });
   });
 
@@ -3283,10 +3288,55 @@ const POLL_5MIN_PANEL_IDS=['soilmoist','soiltemp','irrig','irrigblk'];
 // Every panel with a `range:` option is already in this set, so the range-button/history-scroll `else renderTab(...)` fallback above is currently unreachable -- a future range-having panel left out of this set would need renderTabPreserveScroll() there too.
 const SCOPED_RERENDER_SAFE = new Set(['airtemp','gdd','dtr','rh','solar',
   'soilmoist','soiltemp','vpd','et0','precip','irrig','cellart','cellarh']);
-let panelRuns={}; // panelId -> run(); shared by 5-min polling and scoped re-render
+let panelRuns={};    // panelId -> run(); shared by 5-min polling and scoped re-render
+let panelHeaders={}; // panelId -> .p-hd element; lets a scoped update refresh a
+                      // panel's sub/unit text without a full renderTab() rebuild
+                      // -- currently only used by rerenderHarvestVintage() below.
 async function rerenderPanel(panelId){
   const run = panelRuns[panelId];
   if(run) await run();
+}
+
+/* Scoped update for the winery Harvest vintage dropdown -- replaces a full
+   renderTab('winery') rebuild. Three pieces of UI reflect the selected
+   vintage, none sharing a single update path, so all three are handled
+   explicitly rather than assuming the panel body alone is enough:
+   1. The Harvest strip itself (the dropdown's own selection state, the
+      "as of <date> <vintage>" meta line) -- rebuilt in place via the same
+      buildVintageGroup()/buildVintageMeta() calls renderTab() would have
+      made, just scoped to #harvest-vintage-strip instead of the whole tab.
+   2. fruit's header (.p-sub/.p-unit) -- genuinely vintage-dependent (real
+      vs. mock data-source label, 'tons' vs 'tons · °Bx · pH'), and never
+      touched by rerenderPanel(), which only re-runs render() against the
+      existing body. Recomputed here and written directly into the same
+      nodes makePanel() created, found via panelHeaders (never a full
+      element lookup by title text or similar).
+   3. fruit's body -- the existing, already-safe rerenderPanel('fruit')
+      (renderFruit() self-clears; verified safe against the irrigblk-shaped
+      append-only-duplication hazard before this was written -- see
+      docs/SECURITY.md).
+   cellart/cellarh/ferm/tanks/anom-w are untouched: cellart/cellarh/ferm/
+   tanks's sub: functions technically take c.primary but getDataSourceLabel()
+   proves the output is vintage-invariant for their metric kinds, and anom-w
+   is pinned to CURRENT regardless of Harvest's selection -- confirmed by
+   tracing before this was written, not assumed. See docs/SECURITY.md. */
+async function rerenderHarvestVintage(){
+  const stripEl=$('#harvest-vintage-strip');
+  if(stripEl){
+    stripEl.innerHTML='';
+    stripEl.appendChild(buildVintageGroup('winery'));
+    stripEl.appendChild(el('div','fspacer'));
+    stripEl.appendChild(buildVintageMeta('winery'));
+  }
+  const fp=PANELS.find(p=>p.id==='fruit');
+  const hd=panelHeaders.fruit;
+  if(fp && hd){
+    const c=ctxFor('winery');
+    const subEl=hd.querySelector('.p-sub'), unitEl=hd.querySelector('.p-unit');
+    if(subEl)  subEl.textContent  = typeof fp.sub ==='function' ? fp.sub(c)  : fp.sub;
+    if(unitEl) unitEl.textContent = typeof fp.unit==='function' ? fp.unit(c) : fp.unit;
+  }
+  await rerenderPanel('fruit');
 }
 setInterval(()=>{
   if(!dashboardBooted) return;

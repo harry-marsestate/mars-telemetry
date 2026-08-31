@@ -1339,3 +1339,210 @@ threshold was miscalibrated to near-permanently-on" as solid; treat
 13.8 specifically (versus some other point at the edge of the same
 plateau) as reasonable but not beyond revision if block-level real data
 ever becomes available.
+
+## sensor_read RLS policy: the named suspect was only ~15% of a 2-6s cost - current_role_name() being called per row was the rest
+
+A performance audit measured `anomalies_eval()` at 2-6s end-to-end for a
+real authenticated operator (REST, RLS engaged) - traced via `EXPLAIN
+ANALYZE` run as `role authenticated` (not superuser-bypassed) to
+`sensor_read`'s `latest_sensor` `DISTINCT ON` subquery: 843ms in-DB vs
+264ms bypassing RLS entirely, with a `metric_registry` lookup showing
+`loops=17656` in the plan - a correlated scalar subquery
+(`(select m.min_role from metric_registry m where m.metric_key =
+sensor_readings.metric_key) = 'all'`) re-executed once per candidate row
+instead of once.
+
+**The initial hypothesis, fixed first, was correct but incomplete - and
+that gap was found by isolating, not by stopping at the first
+improvement.** Rewriting the `metric_registry` check as a non-correlated
+`IN` (`metric_key in (select metric_key from metric_registry where
+min_role = 'all')`, safe because `sensor_readings.metric_key` has a NOT
+NULL FK to `metric_registry.metric_key` - every row has exactly one
+matching row, no NULL-handling divergence between the two forms) dropped
+`loops` from 17,656 to 1, but only moved the query from 843ms to 729ms -
+a real but small ~15% of the total. A diagnostic run (real policy logic,
+not a shortcut: `metric_registry` fixed, `current_role_name()` calls left
+real) measured 712ms **with the metric_registry cost entirely absent** -
+proving the dominant cost was somewhere else, not what the correlated-
+subquery evidence had pointed at.
+
+**The dominant cost: `current_role_name()`, a zero-argument `STABLE` SQL
+function, was being invoked as a per-row `FuncExpr` rather than hoisted
+into a single-evaluation `InitPlan`.** Confirmed by isolating it the same
+way - a diagnostic with `metric_registry` fixed and every
+`current_role_name()` call replaced by a literal `true` dropped execution
+to 32.5ms, and a second diagnostic keeping one real `current_role_name()`
+call (no `metric_registry` involvement at all) reproduced almost the
+entire original cost on its own (711.7ms). Fix: wrap the call as a scalar
+subquery, `(select current_role_name())` - the same idiomatic pattern
+Supabase's own RLS performance guidance recommends for `auth.uid()` in
+policies, applied here to a locally-defined `STABLE` function of the
+identical shape (zero arguments, depends only on session-scoped state).
+Postgres treats a non-correlated scalar subquery as an `InitPlan` -
+evaluated once, cached, reused for every row - where it does not
+extend that treatment to a bare function call in a filter expression,
+even a zero-argument `STABLE` one.
+
+RULE: when a diagnosed root cause only partially fixes a measured
+problem, isolate further rather than accepting the partial win as the
+full answer. This is the same discipline already on record for the VPD
+investigation above (two independent bugs found by not stopping after
+the first one explained *some* of the gap) - now applied to a security-
+relevant RLS fix, where getting the actual cause right matters more, not
+less, than for a threshold or subtitle.
+
+**Combined fix, both rewrites together:**
+
+```sql
+create policy sensor_read on sensor_readings for select using (
+  (
+    (
+      metric_key in (select metric_key from metric_registry where min_role = 'all')
+      and (select current_role_name()) in ('operator','customer')
+    )
+    or (select current_role_name()) = 'operator'
+  )
+  and (block_id is null or block_id in (select accessible_blocks()))
+);
+```
+
+**Behavioral equivalence, proven at the row-set level, not row counts -
+and re-proven against the live policy, not just a pre-apply test.** A
+security policy rewrite needs stronger proof than "returns about the same
+number of rows": full ordered-row-set MD5 checksums
+(`md5(string_agg(t::text, '|' order by metric_key, block_id, tank_id,
+recorded_at)))` were computed for the exact same query under the old
+policy and the candidate policy, for two real roles - an unrestricted
+operator (40,527 rows) and a genuinely block-scoped customer (a real
+`customer_block_access` row granting only B2, 35,952 rows). Both
+checksums matched exactly, first in a rolled-back transaction before
+proposing the change, and **again after the policy actually went live** -
+the same checksums, computed fresh against real current data, not
+recalled from the pre-apply run. `anomalies_eval()` itself was checked the
+same way: identical `rule_key`/`observed_value` output before and after,
+both pre-apply and post-apply.
+
+RULE: a security policy rewrite needs row-set-level equivalence proof
+(a full checksum of what each role can see), not row counts alone - a
+row count can match by coincidence while the actual visible rows differ.
+And that proof needs re-running against the live state after the change
+ships, not just trusted from a pre-apply rolled-back-transaction test -
+the mechanism is the same, but "verified in a transaction that never
+committed" and "verified against what real traffic now sees" are not
+interchangeable claims.
+
+**Real measured impact, both roles, in the numbers that actually answer
+"does this feel faster" - not just an in-DB EXPLAIN figure:**
+
+- `anomalies_eval()` REST latency, vineyard test date (2024-07-06):
+  2.96-5.96s -> **0.44-0.92s**.
+- `anomalies_eval()` REST latency, winery test date (2026-08-30):
+  1.99-2.11s -> **1.28-1.64s**. Real and worth having, but plainly a
+  smaller improvement than vineyard's - not stated as if both tabs
+  improved equally, because they didn't.
+- Full cold-load wall clock, both tabs, Playwright, throwaway operator
+  account: ~20.0-20.7s -> **~5.1-5.3s**, two trials each side.
+- The `57014 canceling statement due to statement timeout` errors already
+  documented above (the "anomaly_thresholds permission denied" entry's
+  burst-timeout finding) appeared on every pre-fix cold-load trial and
+  were **absent from both post-fix trials** - independent corroboration
+  from a different signal that the real root cause was fixed, not just
+  one symptom of it.
+
+**Winery's smaller improvement is flagged, not resolved.** Vineyard and
+winery both call the same `anomalies_eval()` function, went through the
+same fix, and were measured the same way - yet winery only improved
+~1.3-1.6x while vineyard improved ~5-7x. This suggests a separate,
+still-uninvestigated latency source specific to the winery path (a
+different table's RLS cost, a different query shape, different data
+volume at that test date) rather than the same bottleneck this entry
+fixes. Not investigated further here - a candidate for future
+investigation, not something this fix was expected to also resolve.
+
+## daily_weather (vintage, day) index - ascending, not matching the hot-path query's own ORDER BY DESC
+
+`daily_weather` had no index of any kind (confirmed via `\d
+daily_weather` - no PK, no secondary index), despite dbt's incremental
+config declaring `unique_key=['vintage','day']` - that's a dbt upsert key,
+not a DB constraint, and never created one. `anomalies_eval()`'s hot path
+reads through `daily_derived` (a plain view) with `where vintage =
+p_vintage and day <= p_as_of order by day desc limit 1`, which was doing
+a Seq Scan on `daily_weather` - cheap only because the table is currently
+tiny (979 rows), a growing-table regression risk left as-is.
+
+**Tested both directions in rolled-back transactions before picking one,
+rather than assuming the query's own `ORDER BY day DESC` meant a
+descending index would obviously win.** It didn't: `(vintage, day desc)`
+measured 7.03ms (an "Index Scan Backward"), `(vintage, day)` ascending
+measured 3.28ms, index-scan step alone 0.44ms vs 4.2ms. The reason:
+`daily_derived.gdd_cumulative` is a window aggregate (`sum(gdd_day) over
+(partition by vintage order by day)`), which needs `day` ascending per
+vintage to compute correctly - that requirement, shared by every reader
+of the view, matters more than superficially matching the `ORDER BY ...
+DESC` of one particular caller's final `LIMIT 1`.
+
+Applied: `create index daily_weather_vintage_day_idx on daily_weather
+(vintage, day);`. Live result on the real hot-path query: 9.7ms -> 3.6ms,
+now an `Index Scan` instead of a `Seq Scan`.
+
+## Logo (LOGO_SRC): lossless recompression, not palette reduction - the image has a genuine alpha gradient, not flat art
+
+The inline base64 logo was flagged as oversized during the same
+performance audit: a 151x180px PNG decoding to 53,841 bytes, ~25% of
+`web/index.html`'s entire raw byte size on its own. Checked the actual
+encoding before assuming any fix, not just the byte count: 8-bit RGBA
+(color type 6), 3,230 unique colors, and a **full 256-value alpha
+gradient** (genuine soft edges/anti-aliasing, not a flat-color mark).
+That last fact ruled out palette reduction (color type 3, which caps at
+256 total colors) as a same-quality option - with 3,230 real colors,
+quantizing down would need dithering and could visibly band the gradient.
+Lossless recompression was chosen instead: `zopflipng`'s more exhaustive
+DEFLATE/filter search, same pixels, better encoding only.
+
+Result: 53,841 -> 32,726 bytes (39.2% smaller). **Verified pixel-identical,
+not just "looks the same"**: `PIL.ImageChops.difference(original,
+recompressed).getbbox()` returned `None` - zero differing pixels
+anywhere. Checked twice, not once: first against the standalone
+recompressed file, then a second time by decoding the base64 straight out
+of the actually-edited live `web/index.html`, confirming the bytes that
+shipped are the same ones verified, not a temp copy that happened to
+match. `web/index.html`: 282,821 -> 254,669 bytes raw, 123,176 -> 101,654
+bytes gzipped.
+
+## harvest_lots dropped - source_system='innovint' was a red herring, not evidence
+
+`harvest_lots` (24 rows) carried `source_system='innovint'` on every row,
+which read like real data - but a later migration's own comment
+(`20260811215238_lot_analyses_vessels.sql`) called it one of "the mock
+tanks/harvest_lots tables" being replaced by `lot_analyses`/`vessels`.
+These two signals were in direct conflict and neither was trusted on its
+own.
+
+**Resolved conclusively by checking row contents, not the provenance
+column.** History: created in the very first schema migration
+(`20260805221617_core_schema.sql`), alongside `tanks` - both original
+mock schema, before any real InnoVint ingestion existed in this project.
+Content: all 24 rows form an exact 6-tank x 4-vintage (2022-2025) grid
+with an identical tank -> block -> variety mapping every single year -
+real InnoVint data (this project's own `harvest_receipts`/B1-replant
+history, documented above) is known to change year over year; this
+didn't. The decisive tell: `volume_l` sits **frozen per tank_id across
+all four vintages regardless of that year's actual `tons`** (e.g. tank
+T-05: 620L in 2022, 2023, 2024, and 2025, while its `tons` value varies
+0.98-1.11 across those same years) - a real measured juice volume tracks
+yield; a constant that ignores yield is a generator artifact. That exact
+constant matches, field for field, `web/index.html`'s live client-side
+`TANKS` mock array (`T-05: vol:620`) - `harvest_lots` was generated from,
+or in lockstep with, that same mock array. Zero consumers repo-wide
+(`web/index.html`, `supabase/functions/`, `ingestion/`, all file types) -
+only its own DDL/RLS/grant migrations ever referenced it.
+
+RULE: a `source_system` (or similarly named provenance) column value is
+not proof of real data on its own - it can be set by a mock-data
+generator as a placeholder label anticipating a future real source, or
+simply be wrong. Check the actual row *contents* for signs of being real
+vs. synthetic (values that should vary with a real-world outcome but
+don't, patterns matching a known mock generator elsewhere in the
+codebase) before trusting a label - the same discipline this file already
+applies to threshold literals and display strings, now applied to
+provenance metadata.

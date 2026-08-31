@@ -1940,7 +1940,7 @@ function renderMap(box, ctx){
       const st=state[ctx.tab];
       st.blocks = st.blocks.includes(id) ? st.blocks.filter(x=>x!==id) : [...st.blocks,id];
       if(!st.blocks.length) st.blocks=[...ALL_IDS];
-      renderTab(ctx.tab);
+      renderTabPreserveScroll(ctx.tab);
     };
     node.addEventListener('click',toggle);
     node.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle();}});
@@ -2258,7 +2258,7 @@ async function renderFerm(box, ctx){
   sel.innerHTML = `<option value="">Select a lot…</option>` + lots.map(l=>
     `<option value="${l.lot_id}" ${l.lot_id===selectedId?'selected':''}>${l.lot_name}${l.lot_code?' · '+l.lot_code:''}</option>`
   ).join('');
-  sel.onchange=()=>{ state.lotSelect.ferm = sel.value || null; renderTab(ctx.tab); };
+  sel.onchange=()=>{ state.lotSelect.ferm = sel.value || null; renderTabPreserveScroll(ctx.tab); };
   box.appendChild(sel);
 
   if(!selectedId){
@@ -2392,7 +2392,7 @@ async function renderTanks(box, ctx){
   const toggle=el('button','tbl-toggle', showArchived
     ? `${activeCount} active · showing all ${all.length} — hide archived`
     : `${activeCount} active · ${archivedCount} archived — show archived`);
-  toggle.onclick=()=>{ state.vesselsArchived.tanks=!showArchived; renderTab(ctx.tab); };
+  toggle.onclick=()=>{ state.vesselsArchived.tanks=!showArchived; renderTabPreserveScroll(ctx.tab); };
   box.appendChild(toggle);
 }
 
@@ -2722,13 +2722,7 @@ function buildVintageGroup(tab){
         }
         st.vintages=v;
         PANELS.filter(p=>p.tab===tab).forEach(p=>delete state.scrollDays[p.id]);
-        // Winery's control now lives inside #body-<tab>, which renderTab()
-        // clears and rebuilds -- the document height briefly collapses and the
-        // browser can clamp scrollTop. Best-effort restore: the panel skeleton
-        // is appended synchronously inside renderTab, so full height is back
-        // by the time it resolves. No-op for vineyard (bar is above the fold).
-        const sy=window.scrollY;
-        renderTab(tab).then(()=>requestAnimationFrame(()=>window.scrollTo(0,sy)));
+        renderTabPreserveScroll(tab);
       };
     }
     menu.appendChild(opt);
@@ -2766,24 +2760,32 @@ function renderFilters(tab){
   // region vintage scopes, so a page-wide control would overstate its reach.
   if(tab!=='winery') host.appendChild(buildVintageGroup(tab));
 
-  const gB=el('div','fgroup');
-  gB.appendChild(el('div','flabel','Vineyard block'));
-  const cB=el('div','chips');
-  BLOCKS.forEach(bl=>{
-    const on=st.blocks.includes(bl.id);
-    const b=el('button','chip dot'+(on?' on':''), bl.label);
-    b.style.setProperty('--c',bl.color);
-    b.title=`${bl.label} · ${bl.sub} · ${bl.acres} acres`;
-    b.onclick=()=>{
-      st.blocks = on ? st.blocks.filter(x=>x!==bl.id) : [...st.blocks,bl.id];
-      if(!st.blocks.length) st.blocks=[...ALL_IDS];
-      renderTab(tab);
-    };
-    cB.appendChild(b);
-  });
-  gB.appendChild(cB);
-  gB.appendChild(el('div','fhint', BLOCKS.map(b=>b.label+' = '+b.sub).join('  ·  ')));
-  host.appendChild(gB);
+  // Winery has no block filter: state.winery.blocks is permanently
+  // [...ALL_IDS] with this removed (the vineyard map's block-click toggle
+  // is the only other writer, and it never reaches winery -- confirmed by
+  // tracing, not assumed, since the map panel is vineyard-only). fruit and
+  // anom-w's 3 block-filtering RULES both degrade correctly on their own
+  // to "always the full estate" -- see docs/SECURITY.md.
+  if(tab!=='winery'){
+    const gB=el('div','fgroup');
+    gB.appendChild(el('div','flabel','Vineyard block'));
+    const cB=el('div','chips');
+    BLOCKS.forEach(bl=>{
+      const on=st.blocks.includes(bl.id);
+      const b=el('button','chip dot'+(on?' on':''), bl.label);
+      b.style.setProperty('--c',bl.color);
+      b.title=`${bl.label} · ${bl.sub} · ${bl.acres} acres`;
+      b.onclick=()=>{
+        st.blocks = on ? st.blocks.filter(x=>x!==bl.id) : [...st.blocks,bl.id];
+        if(!st.blocks.length) st.blocks=[...ALL_IDS];
+        renderTabPreserveScroll(tab);
+      };
+      cB.appendChild(b);
+    });
+    gB.appendChild(cB);
+    gB.appendChild(el('div','fhint', BLOCKS.map(b=>b.label+' = '+b.sub).join('  ·  ')));
+    host.appendChild(gB);
+  }
 
   host.appendChild(el('div','fspacer'));
   const live=st.vintages.includes(CURRENT);
@@ -2794,8 +2796,6 @@ function renderFilters(tab){
        <div class="fmeta-txt">as of ${dstr(endOf(primV(tab), st.vintages.length>1))} ${primV(tab)}</div>
        <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`
     : `<div class="live on"><span class="pulse"></span>Cellar sensors live</div>
-       <div class="fmeta-txt">${st.blocks.length} of 3 blocks · ${fmt(acresOf(selB(tab)),2)} acres</div>
-       <div class="fmeta-txt">Blocks scope harvest and insights</div>
        <div class="fmeta-txt">Vintage is set in the Harvest section</div>`;
   host.appendChild(meta);
 }
@@ -3235,6 +3235,21 @@ async function renderTab(tab){
   await Promise.allSettled(pending.map(f=>f()));
 }
 
+/* Wraps renderTab() for any same-tab, in-place interaction (a control the
+   user clicks without navigating away -- map block toggle, ferm lot
+   select, vessels-archived toggle, block chip, vintage dropdown) where
+   losing scroll position would read as the page randomly jumping. Not
+   used for tab switches: navigating to a different tab starting at the
+   top is normal, not lost state, so that call site intentionally calls
+   renderTab() directly. Safe only because renderTab()'s own promise
+   waits for every panel to finish before resolving (see the comment
+   above) -- restoring scroll before that would restore against a
+   still-collapsed, mid-rebuild page. */
+function renderTabPreserveScroll(tab){
+  const sy=window.scrollY;
+  return renderTab(tab).then(()=>requestAnimationFrame(()=>window.scrollTo(0,sy)));
+}
+
 /* Tabs */
 $$('.tab').forEach(t=>t.onclick=()=>{
   state.tab=t.dataset.tab;
@@ -3265,6 +3280,7 @@ const POLL_5MIN_PANEL_IDS=['soilmoist','soiltemp','irrig','irrigblk'];
 // sibling's DOM, never shared/global state). Anything NOT in this set falls
 // back to the existing full renderTab() behavior automatically -- a panel
 // added later without this check gets today's behavior, not a silent bug.
+// Every panel with a `range:` option is already in this set, so the range-button/history-scroll `else renderTab(...)` fallback above is currently unreachable -- a future range-having panel left out of this set would need renderTabPreserveScroll() there too.
 const SCOPED_RERENDER_SAFE = new Set(['airtemp','gdd','dtr','rh','solar',
   'soilmoist','soiltemp','vpd','et0','precip','irrig','cellart','cellarh']);
 let panelRuns={}; // panelId -> run(); shared by 5-min polling and scoped re-render

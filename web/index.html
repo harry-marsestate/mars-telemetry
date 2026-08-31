@@ -150,6 +150,13 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .vdd-opt.on .vdd-check{background:var(--gold-glow); border-color:var(--gold-dim)}
 .vdd-check::after{content:''; width:6px; height:6px; border-radius:1px; background:var(--gold); opacity:0; transform:scale(.5); transition:all .12s}
 .vdd-opt.on .vdd-check::after{opacity:1; transform:scale(1)}
+.vdd-radio{
+  width:13px; height:13px; border-radius:50%; border:1px solid var(--line-2);
+  background:var(--ink); display:grid; place-items:center; flex:none; transition:all .14s;
+}
+.vdd-opt.on .vdd-radio{background:var(--gold-glow); border-color:var(--gold-dim)}
+.vdd-radio::after{content:''; width:6px; height:6px; border-radius:50%; background:var(--gold); opacity:0; transform:scale(.5); transition:all .12s}
+.vdd-opt.on .vdd-radio::after{opacity:1; transform:scale(1)}
 .vdd-dot{width:6px; height:6px; border-radius:50%; background:var(--c,var(--muted-2)); flex:none}
 .vdd-label{display:flex; flex-direction:column; gap:1px; min-width:0}
 .vdd-y{font-family:var(--mono); font-size:11px; color:var(--cream)}
@@ -2433,19 +2440,14 @@ async function renderFruitReal(box, ctx){
   // `.empty` + "Loading…" treatment loadApprovalQueue() already uses, rather
   // than introducing a second visual language for the same idea.
   box.appendChild(el('div','empty','Loading&hellip;'));
-  const [rcp,mp] = await Promise.all([
-    sb.from('harvest_receipts')
-      .select('block_id,lot_code,lot_name,varietal_name,weight_tons,receipt_date')
-      .eq('vintage',v).order('receipt_date',{ascending:true}),
-    sb.from('block_innovint_map').select('block_id,valid_from_vintage,valid_to_vintage')
-  ]);
-  if(rcp.error) throw rcp.error;
-  if(mp.error)  throw mp.error;
-  // Drop the loader before rendering real content. On the error paths above,
+  const { data, error } = await sb.from('harvest_receipts')
+    .select('block_id,lot_code,lot_name,varietal_name,weight_tons,receipt_date')
+    .eq('vintage',v).order('receipt_date',{ascending:true});
+  if(error) throw error;
+  // Drop the loader before rendering real content. On the error path above,
   // renderFruit()'s catch clears the body itself, so the loader never sticks.
   box.innerHTML='';
-  const maps=mp.data||[];
-  const mine=(rcp.data||[]).filter(r=>r.block_id && ctx.blocks.includes(r.block_id));
+  const mine=(data||[]).filter(r=>r.block_id && ctx.blocks.includes(r.block_id));
   const tons=mine.reduce((s,r)=>s+(+r.weight_tons||0),0);
   // Two different denominators, deliberately. "Acres in view" spans every
   // SELECTED block; Yield counts only blocks that actually recorded fruit this
@@ -2475,15 +2477,6 @@ async function renderFruitReal(box, ctx){
     table(box,[{h:'Block'},{h:'Variety',dim:1},{h:'Lot'},{h:'Received',dim:1},{h:'Tons',num:1}],
       rows,['Total','','','',fmt(tons,3)]);
   }
-  // Two distinguishable empty states. "No receipt recorded" deliberately does
-  // NOT claim "no fruit harvested" -- we cannot tell a block that didn't crop
-  // from one whose receipt was never entered (2022's missing B2/B3 is either).
-  ctx.blocks.forEach(id=>{
-    if(mine.some(r=>r.block_id===id)) return;
-    box.appendChild(el('div','empty', fruitMappedFor(maps,id,v)
-      ? `No fruit receipt recorded in InnoVint for ${B(id).label} in ${v}.`
-      : (FRUIT_UNMAPPED_NOTE[id] || `${B(id).label} has no InnoVint block record for ${v}.`)));
-  });
 }
 
 function renderFruitMock(box, ctx){
@@ -2492,13 +2485,18 @@ function renderFruitMock(box, ctx){
   if(!tk.length){box.appendChild(el('div','empty','No lots from the selected blocks.')); return;}
   const fs=fermSeason(v);
   if(now<fs.start){
-    box.appendChild(el('div','empty',
-      `No fruit received for ${v} yet.<br><b>First pick projected around ${dstr(fs.start)}.</b><br>${v-1}'s completed harvest record is available in the data, not reachable from this tab yet.`));
+    box.appendChild(el('div','empty', `No fruit received for ${v} yet.`));
     return;
   }
   let tons=0;
   const rows=tk.sort((a,b)=>tankStart(a,v)-tankStart(b,v)).map(t=>{
-    const p=pickInfo(t,v), picked = now>=p.date;
+    // now is a real live clock only for CURRENT -- for any archived vintage
+    // it's fixed at that season's own midpoint (see endOf()'s "archive
+    // snapshot = peak of harvest" comment), so gating on it here would mark
+    // genuinely-completed vintages as still having tanks "projected" into a
+    // future that, for them, already happened. Archived vintages are simply
+    // done: every tank picked, no framing as a prediction.
+    const p=pickInfo(t,v), picked = v===CURRENT ? now>=p.date : true;
     if(picked) tons+=p.tons;
     const bl=B(t.blk);
     return [`<span class="vdot" style="background:${bl.color}"></span>${bl.label}`,
@@ -2704,7 +2702,9 @@ function buildVintageGroup(tab){
     // except the selected one, freezing the vintage permanently.
     const inert = cap>1 && !on && atCap;
     const opt=el('div','vdd-opt'+(on?' on':'')+(inert?' disabled':''));
-    opt.innerHTML=`<span class="vdd-check"></span><span class="vdd-dot" style="--c:${VCOLOR[y]}"></span>
+    // cap===1 (winery today) is single-select -- a checkbox affordance implies
+    // multi-select, which vineyard's cap>1 dropdown genuinely is and this isn't.
+    opt.innerHTML=`<span class="${cap===1?'vdd-radio':'vdd-check'}"></span><span class="vdd-dot" style="--c:${VCOLOR[y]}"></span>
       <span class="vdd-label"><span class="vdd-y">${y}</span><span class="vdd-sub">${y===CURRENT?'current · live feed':VCHAR[y].label}</span></span>`;
     if(inert){
       // Cap reached: leave unselected options visible but inert, rather than
@@ -2799,8 +2799,7 @@ function renderFilters(tab){
        <div class="fmeta-txt">${st.blocks.length} of 3 blocks · ${fmt(acresOf(selB(tab)),2)} acres</div>
        <div class="fmeta-txt">as of ${dstr(endOf(primV(tab), st.vintages.length>1))} ${primV(tab)}</div>
        <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`
-    : `<div class="live on"><span class="pulse"></span>Cellar sensors live</div>
-       <div class="fmeta-txt">Vintage is set in the Harvest section</div>`;
+    : `<div class="live on"><span class="pulse"></span>Cellar sensors live</div>`;
   host.appendChild(meta);
 }
 

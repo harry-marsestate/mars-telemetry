@@ -34,7 +34,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_derived_series",
     description:
-      "Real derived daily climate metrics for a vintage: growing degree days (gdd_cumulative), vapor pressure deficit (vpd_kpa), diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in). One row per day. Defaults to the current 2026 vintage's live-to-date range if start_date/end_date are omitted.",
+      "Real derived daily climate metrics for a vintage: growing degree days (gdd_cumulative), average-based vapor pressure deficit (vpd_kpa), peak-hour vapor pressure deficit (vpd_peak_kpa), diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in). One row per day. Defaults to the current 2026 vintage's live-to-date range if start_date/end_date are omitted.",
     input_schema: {
       type: "object",
       properties: {
@@ -178,7 +178,7 @@ async function getDerivedSeries(supabase: any, input: Record<string, unknown>): 
 
   let query = supabase
     .from("daily_derived")
-    .select("day, gdd_cumulative, dtr_f, vpd_kpa, et0_in")
+    .select("day, gdd_cumulative, dtr_f, vpd_kpa, vpd_peak_kpa, et0_in")
     .eq("vintage", vintage)
     .order("day", { ascending: true })
     .limit(400);

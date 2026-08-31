@@ -1546,3 +1546,87 @@ don't, patterns matching a known mock generator elsewhere in the
 codebase) before trusting a label - the same discipline this file already
 applies to threshold literals and display strings, now applied to
 provenance metadata.
+
+## anomalies_eval(): the winery/vineyard RLS-fix asymmetry traced to a second bug in the same function - latest_sensor re-executed 7 times per call
+
+Follow-up to the `sensor_read` RLS entry above, which left winery's
+smaller speedup (~1.3-1.6x vs. vineyard's ~5-7x) explicitly flagged, not
+explained. Traced by reading `anomalies_eval()`'s live definition
+directly and ruling out the obvious suspect first: the function only
+ever touches `sensor_readings`, `daily_derived`/`daily_weather`, and
+`anomaly_thresholds`, identically regardless of `p_tab` - no second,
+differently-shaped RLS policy on `tanks`/`vessels`/`lot_analyses` is
+involved, confirmed by reading the function body, not assumed from the
+tab name.
+
+**The real cause: `latest_sensor` (the expensive `DISTINCT ON` CTE) sits
+on the inner side of a Nested Loop against `anomaly_thresholds` (7
+enabled rules per tab), so Postgres re-executes its entire scan once per
+outer row - 7 times per call, not once.** Confirmed via `EXPLAIN
+ANALYZE` (`loops=7` on the `Merge Append`/`Unique`/`Incremental Sort`
+nodes, cumulative `Buffers` roughly 7x a single execution's). This was
+invisible to the RLS investigation because that investigation tested
+`latest_sensor` as a standalone query, never through the function's
+actual join structure - the same discipline this file's RULE already
+names (isolate further rather than stopping at a partial explanation),
+now catching a second, structurally different bug in the same function
+the first fix touched.
+
+Winery's larger absolute cost comes from the same 7x multiplier landing
+on a higher per-execution base cost: at the two tabs' respective test
+dates, winery's `sensor_readings` scan touched 40,080 rows per loop vs.
+vineyard's 17,656 - a property of *which date* happened to anchor each
+tab's test (2026-08-30 is later into a still-accumulating season than
+2024-07-06 is into a complete, archived one), not anything structural to
+"winery" as a tab.
+
+**Fix: mark `latest_sensor` and `latest_derived_row` `MATERIALIZED`** -
+forces single-evaluation, the same "compute once, reuse" idea already
+applied to `current_role_name()` in the RLS fix, at a different layer of
+the same function.
+
+**Equivalence verified at the full-output level across 7 dates before
+proposing this, matching the RLS fix's own rigor - and the dates weren't
+allowed to coincidentally all agree for the wrong reason.** The first
+four zero-hit dates tried all happened to return empty results on both
+sides, which would have been weak evidence on its own (two versions
+agreeing that nothing happened isn't proof the doy-boundary logic
+behaves identically) - so a fifth date was deliberately sought where a
+doy-windowed rule (`frost_risk`, `valid_to_doy=130`) actually breaches:
+2024-04-06, real sub-freezing readings (28.1°F) within the window, where
+`frost_risk` and `humidity_high` both genuinely fire. All 7 dates -
+vineyard multi-hit, winery zero-hit, a mild zero-anomaly day, both sides
+of the doy=130 boundary, a different winery date, and the genuine
+frost-firing date - produced identical `md5` checksums of the complete
+ordered result set (not row counts) between the live function and a
+temporary `MATERIALIZED` test variant, re-confirmed a second time
+against the now-live function post-apply.
+
+**Measured impact:** vineyard (2024-07-06) 550.9ms -> 151.2ms (3.6x);
+winery (2026-08-30) 1,232.0ms -> 242.2ms (5.1x) - closes, and here
+reverses, the tab asymmetry. Full cold-load wall clock, both fixes live
+together: ~20.0-20.7s (original) -> ~5.1-5.8s (RLS fix alone) ->
+**~3.7-3.9s** (both fixes).
+
+**The linked pagination-stall question (see the performance-audit work
+above) was tested twice, and the first test's negative result was
+correctly not trusted as final.** A synthetic concurrent burst (curl,
+background-jobbed) swapping the live winery RPC for a fast materialized
+test variant showed no clear reduction in a `lot_analyses` pagination
+probe's latency (1,195-2,530ms live vs. 1,963-2,162ms materialized -
+indistinguishable, if anything backwards) - reported honestly as
+inconclusive rather than discarded, since `curl &` backgrounding doesn't
+guarantee the same true-simultaneity a browser's concurrent `fetch()`
+calls produce, and the real cold load's 48 requests sit closer to the
+project's connection ceiling (30 already open at idle against
+`max_connections=60`) than a smaller synthetic burst does. The real
+Playwright re-test after this fix actually went live settled it
+cleanly: the pagination gap dropped from ~2,054ms (RLS fix alone) to
+**~1,198-1,260ms** (both fixes) - residual contention over the isolated
+baseline (~300-590ms) down from ~4-7x to ~2.1-4.2x.
+
+RULE: a negative result from a hand-built concurrency test doesn't
+settle a question a real browser-driven load could still answer
+differently - the synthetic test's own methodological gap (smaller
+burst, non-simultaneous dispatch) was flagged at the time specifically
+so it wouldn't later be misread as "tested and ruled out."

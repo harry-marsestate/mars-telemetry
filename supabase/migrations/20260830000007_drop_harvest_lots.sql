@@ -1,0 +1,27 @@
+-- harvest_lots: confirmed leftover mock/seed data, never real InnoVint
+-- data, despite its source_system column reading 'innovint'. Investigated
+-- because that column value conflicted on its face with
+-- 20260811215238_lot_analyses_vessels.sql's own comment, which calls it
+-- "the mock tanks/harvest_lots tables" being replaced by lot_analyses/
+-- vessels. Both were checked, not assumed either way:
+--
+-- - History: created in the very first schema migration
+--   (20260805221617_core_schema.sql), alongside tanks -- both part of the
+--   original mock schema, before any real InnoVint ingestion existed.
+-- - Row-content proof: all 24 rows form an exact 6-tank x 4-vintage
+--   (2022-2025) grid with an identical tank->block->variety mapping every
+--   single year -- real InnoVint data (this project's own harvest_receipts/
+--   replant history) is known to change year over year, this doesn't.
+--   Conclusively: volume_l is frozen per tank_id regardless of that year's
+--   tons (e.g. tank T-05 stays exactly 620L across four years while tons
+--   varies 0.98-1.11) -- a real measured juice volume would track yield,
+--   not sit at a fixed constant. That constant matches, field for field,
+--   web/index.html's live client-side TANKS mock array (T-05: vol:620) --
+--   harvest_lots was generated from, or in lockstep with, that exact mock
+--   array.
+-- - Zero consumers, verified repo-wide across web/index.html,
+--   supabase/functions/, and ingestion/ (all file types) -- only its own
+--   DDL/RLS/grant migrations ever reference it.
+--
+-- See docs/SECURITY.md for the full investigation.
+drop table harvest_lots;

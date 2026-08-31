@@ -1,0 +1,23 @@
+-- daily_weather had no index at all (confirmed via \d daily_weather --
+-- Indexes section was empty), despite dbt's incremental config declaring
+-- unique_key=['vintage','day'] -- that's a dbt-side upsert key, not a DB
+-- constraint, so it never created anything here. anomalies_eval()'s hot
+-- path reads through daily_derived (a plain view over this table) with
+-- `where vintage = p_vintage and day <= p_as_of order by day desc limit 1`
+-- -- confirmed via EXPLAIN ANALYZE this was a Seq Scan on daily_weather
+-- (215 of 979 rows kept after the vintage filter), cheap only because the
+-- table is currently tiny. Left alone, this becomes a real cost as more
+-- vintages accumulate.
+--
+-- (vintage, day) ascending, not (vintage, day desc): tested both via
+-- EXPLAIN ANALYZE. daily_derived's gdd_cumulative is a window aggregate
+-- (`sum(gdd_day) over (partition by vintage order by day)`), which needs
+-- day in ASCENDING order per vintage to compute correctly -- a plain
+-- ascending index lets the WindowAgg consume an Index Scan directly
+-- (0.44ms for the scan step); the DESC variant forced a backward scan and
+-- measured noticeably slower (4.2ms) despite the query's own `order by
+-- day desc limit 1` on its face suggesting DESC would be the natural fit.
+-- Not unique: this migration only adds an index, not a constraint --
+-- enforcing dbt's unique_key as a real DB constraint is a separate,
+-- larger decision than "make the existing hot-path query fast."
+create index daily_weather_vintage_day_idx on daily_weather (vintage, day);

@@ -3335,6 +3335,21 @@ async function rerenderHarvestVintage(){
     const subEl=hd.querySelector('.p-sub'), unitEl=hd.querySelector('.p-unit');
     if(subEl)  subEl.textContent  = typeof fp.sub ==='function' ? fp.sub(c)  : fp.sub;
     if(unitEl) unitEl.textContent = typeof fp.unit==='function' ? fp.unit(c) : fp.unit;
+
+    // makePanel()'s original run() closure for 'fruit' captured the context
+    // from the LAST FULL renderTab() call -- calling rerenderPanel('fruit')
+    // unmodified kept re-rendering whatever vintage was active at boot,
+    // regardless of what was just selected here (confirmed live: the header
+    // above updated correctly, since it calls ctxFor('winery') fresh, but
+    // the body stayed frozen on boot's vintage through every subsequent
+    // click). Rebuilding panelRuns.fruit with a closure over this fresh `c`
+    // fixes this call site AND any future caller of
+    // rerenderPanel('fruit')/panelRuns.fruit -- not just bypassed once here.
+    const body=hd.parentElement.querySelector('.p-body');
+    panelRuns.fruit=async()=>{
+      try{ await fp.render(body,{...c, range:state.range.fruit||'5D', scrollDays:state.scrollDays.fruit||0}, unitEl); }
+      catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(fp.id,err); }
+    };
   }
   await rerenderPanel('fruit');
 }

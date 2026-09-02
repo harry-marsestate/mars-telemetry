@@ -340,12 +340,6 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 }
 .anom-sublabel{font-size:9.5px; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; margin:2px 0 1px}
 .anom-sublabel:not(:first-child){margin-top:4px}
-.pattern-i{display:flex; gap:12px; padding:11px 13px; border-radius:3px; background:var(--ink-3)}
-.pattern-i.reproduced{border:1px solid var(--cream); opacity:1}
-.pattern-i.single-season{border-left:2px solid var(--muted-2); opacity:.75}
-.pattern-i.directional{border:1px dashed var(--muted-2); opacity:.65}
-.pattern-tag{font-family:var(--mono); font-size:8.5px; color:var(--muted); letter-spacing:.05em; margin-top:5px}
-.pattern-empty{font-family:var(--mono); font-size:10px; color:var(--muted); line-height:1.6; padding:4px 2px}
 
 /* map */
 .mapsvg{width:100%; height:100%; display:block; flex:1; min-height:230px}
@@ -2669,20 +2663,24 @@ async function renderAnomalies(box, ctx, tab){
     wrap.innerHTML += `<div class="anom-sublabel">Patterns</div>`;
     const patterns = await fetchLatestPatterns(); // [] on any failure, fail-soft
     if(!patterns.length){
-      wrap.innerHTML += `<div class="pattern-empty">No multi-season patterns surfaced yet.</div>`;
+      wrap.innerHTML += `<div class="anom-clear">No multi-season patterns surfaced yet.</div>`;
     } else {
+      // Confidence, not severity -- reuses Now's exact card shape (--sev
+      // drives .anom-i's border-left and .anom-ic/.anom-m's color) but
+      // deliberately never --alert/--warn: confidence and severity must
+      // stay visually distinct concepts, never confusable.
       patterns.forEach(p=>{
-        const cls = p.confidence_label==='reproduced' ? 'reproduced'
-                  : p.confidence_label==='single_season' ? 'single-season' : 'directional';
+        const col = p.confidence_label==='reproduced' ? 'var(--cream)'
+                  : p.confidence_label==='single_season' ? 'var(--muted)' : 'var(--muted-2)';
+        const icon = p.confidence_label==='reproduced' ? '●'
+                  : p.confidence_label==='single_season' ? '◐' : '○';
         const tag = p.confidence_label==='reproduced' ? 'Consistent across seasons'
                   : p.confidence_label==='single_season' ? 'Single season observed'
                   : 'Directional only, small sample';
-        wrap.innerHTML += `<div class="pattern-i ${cls}">
-          <div class="anom-b">
-            <div class="anom-t">${escapeHtml(METRIC_LABELS[p.metric_a]||p.metric_a)} &amp; ${escapeHtml(METRIC_LABELS[p.metric_b]||p.metric_b)}</div>
-            <div class="anom-d">${escapeHtml(p.narration)}</div>
-            <div class="pattern-tag">${escapeHtml(tag)}</div>
-          </div></div>`;
+        wrap.innerHTML += `<div class="anom-i" style="--sev:${col}">
+          <div class="anom-ic">${icon}</div>
+          <div class="anom-b"><div class="anom-t">${escapeHtml(METRIC_LABELS[p.metric_a]||p.metric_a)} &amp; ${escapeHtml(METRIC_LABELS[p.metric_b]||p.metric_b)}</div>
+          <div class="anom-d">${escapeHtml(p.narration)}</div><div class="anom-m">${escapeHtml(tag)}</div></div></div>`;
       });
     }
   } else if(tab==='winery'){
@@ -2696,7 +2694,7 @@ async function renderAnomalies(box, ctx, tab){
     // Re-verified against the live schema/ingestion code this session,
     // not just asserted from the original design.
     wrap.innerHTML += `<div class="anom-sublabel">Patterns</div>
-      <div class="pattern-empty">Fruit intake and lab chemistry aren't linked at the lot level in this data yet --
+      <div class="anom-clear">Fruit intake and lab chemistry aren't linked at the lot level in this data yet --
       most lots blend multiple blocks, so a receipt can't be matched to a specific analysis. No winery-tab patterns today.</div>`;
   }
 
@@ -3225,7 +3223,7 @@ async function renderTab(tab){
     pending.push(()=>paintOverviewV('vineyard',c));
 
     if(isOperator){
-      const an=makePanel({id:'anom-v', title:'Insights and Anomalies', unit:'rule-based',
+      const an=makePanel({id:'anom-v', title:'Insights and Anomalies', unit:'AI-enabled',
         render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c);
       right.appendChild(an.panel); pending.push(an.run);
     }
@@ -3251,7 +3249,7 @@ async function renderTab(tab){
       // would be silently overwritten. Blocks stay live from `c` -- 3 of the
       // 4 winery rules filter TANKS by c.blocks, and blocks remain page-wide.
       const anomCtx={...c, primary:CURRENT, vintages:[CURRENT], compare:false, align:false};
-      const an=makePanel({id:'anom-w', title:'Insights and Anomalies', unit:'rule-based',
+      const an=makePanel({id:'anom-w', title:'Insights and Anomalies', unit:'AI-enabled',
         render:(b,cc)=>renderAnomalies(b,cc,'winery')}, anomCtx);
       right.appendChild(an.panel); pending.push(an.run);
     }

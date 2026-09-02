@@ -338,6 +338,14 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   background:var(--ink-3); border-left:2px solid var(--ok);
   font-family:var(--mono); font-size:11px; color:var(--ok);
 }
+.anom-sublabel{font-size:9.5px; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; margin:2px 0 1px}
+.anom-sublabel:not(:first-child){margin-top:4px}
+.pattern-i{display:flex; gap:12px; padding:11px 13px; border-radius:3px; background:var(--ink-3)}
+.pattern-i.reproduced{border:1px solid var(--cream); opacity:1}
+.pattern-i.single-season{border-left:2px solid var(--muted-2); opacity:.75}
+.pattern-i.directional{border:1px dashed var(--muted-2); opacity:.65}
+.pattern-tag{font-family:var(--mono); font-size:8.5px; color:var(--muted); letter-spacing:.05em; margin-top:5px}
+.pattern-empty{font-family:var(--mono); font-size:10px; color:var(--muted); line-height:1.6; padding:4px 2px}
 
 /* map */
 .mapsvg{width:100%; height:100%; display:block; flex:1; min-height:230px}
@@ -1466,10 +1474,6 @@ const REAL_FRUIT_VINTAGES = new Set([2022,2023,2024]);
 // original seed values and InnoVint's block acreage. renderFruitReal() uses
 // B(id).acres like every other panel.)
 
-const FRUIT_UNMAPPED_NOTE = {
-  B1:'Block 1 was replanted after the 2023 harvest; no InnoVint block record exists for it yet.'
-};
-
 function getDataSourceLabel(metricKey, vintage){
   const s = DATA_SOURCES[metricKey];
   if(!s) return '';
@@ -2425,12 +2429,6 @@ async function renderFruit(box, ctx){
   }
 }
 
-function fruitMappedFor(maps, blockId, vintage){
-  return maps.some(m => m.block_id===blockId
-    && (m.valid_from_vintage==null || vintage>=m.valid_from_vintage)
-    && (m.valid_to_vintage==null   || vintage<=m.valid_to_vintage));
-}
-
 async function renderFruitReal(box, ctx){
   const v=ctx.primary;
   // Visible loading state. This panel clears its body and then makes two
@@ -2649,7 +2647,8 @@ async function renderAnomalies(box, ctx, tab){
       return {sev:r.sev, out};}).filter(x=>x.out);
   }
   const wrap=el('div','anom');
-  if(!hits.length) wrap.innerHTML=`<div class="anom-clear">✓ &nbsp;All monitored parameters within range</div>`;
+  wrap.innerHTML += `<div class="anom-sublabel">Now</div>`;
+  if(!hits.length) wrap.innerHTML+=`<div class="anom-clear">✓ &nbsp;All monitored parameters within range</div>`;
   else{
     const ord={alert:0,warn:1,note:2};
     hits.sort((a,b)=>ord[a.sev]-ord[b.sev]);
@@ -2660,8 +2659,75 @@ async function renderAnomalies(box, ctx, tab){
         <div class="anom-b"><div class="anom-t">${h.out.t}</div>
         <div class="anom-d">${h.out.d}</div><div class="anom-m">${h.out.m}</div></div></div>`;});
   }
+
+  // Patterns: a second, separate section below Now -- urgency (Now) and
+  // multi-season statistical patterns aren't comparable on one scale, so
+  // they're never interleaved. Vineyard gets real scanner output;
+  // winery gets a static, honest empty state (see the comment below for
+  // why, re-verified against the live schema this session).
+  if(tab==='vineyard'){
+    wrap.innerHTML += `<div class="anom-sublabel">Patterns</div>`;
+    const patterns = await fetchLatestPatterns(); // [] on any failure, fail-soft
+    if(!patterns.length){
+      wrap.innerHTML += `<div class="pattern-empty">No multi-season patterns surfaced yet.</div>`;
+    } else {
+      patterns.forEach(p=>{
+        const cls = p.confidence_label==='reproduced' ? 'reproduced'
+                  : p.confidence_label==='single_season' ? 'single-season' : 'directional';
+        const tag = p.confidence_label==='reproduced' ? 'Consistent across seasons'
+                  : p.confidence_label==='single_season' ? 'Single season observed'
+                  : 'Directional only, small sample';
+        wrap.innerHTML += `<div class="pattern-i ${cls}">
+          <div class="anom-b">
+            <div class="anom-t">${escapeHtml(METRIC_LABELS[p.metric_a]||p.metric_a)} &amp; ${escapeHtml(METRIC_LABELS[p.metric_b]||p.metric_b)}</div>
+            <div class="anom-d">${escapeHtml(p.narration)}</div>
+            <div class="pattern-tag">${escapeHtml(tag)}</div>
+          </div></div>`;
+      });
+    }
+  } else if(tab==='winery'){
+    // Static, not a scanner result. Fruit intake (harvest_receipts) and
+    // lab chemistry (lot_analyses) aren't linked at the lot level: only
+    // 16/47 real lots resolve to a single block (see
+    // ingestion/innovint/assets.py's _resolve_block_id docstring -- the
+    // rest are multi-block blends or unresolved), and no table/view joins
+    // harvest_receipts to lot_analyses at all -- they share InnoVint's
+    // lot_* id space incidentally, with nothing reconciling them.
+    // Re-verified against the live schema/ingestion code this session,
+    // not just asserted from the original design.
+    wrap.innerHTML += `<div class="anom-sublabel">Patterns</div>
+      <div class="pattern-empty">Fruit intake and lab chemistry aren't linked at the lot level in this data yet --
+      most lots blend multiple blocks, so a receipt can't be matched to a specific analysis. No winery-tab patterns today.</div>`;
+  }
+
   box.appendChild(wrap);
 }
+
+let _latestPatternsCache = null;
+async function fetchLatestPatterns(){
+  if(_latestPatternsCache) return _latestPatternsCache;
+  const { data: latest, error: latestErr } = await sb.from('insights')
+    .select('run_id').eq('status','surfaced').not('narration','is',null)
+    .order('computed_at',{ascending:false}).limit(1).maybeSingle();
+  if(latestErr || !latest) return [];
+  const { data, error } = await sb.from('insights').select('*')
+    .eq('run_id', latest.run_id).eq('status','surfaced').not('narration','is',null)
+    .order('effect', {ascending:false});
+  if(error){ console.error('fetchLatestPatterns error:', error); return []; }
+  return _latestPatternsCache = data;
+}
+
+// Human labels for insights-engine metric keys. Deliberately its own map,
+// not DATA_SOURCES -- DATA_SOURCES's keys/semantics (e.g. gdd_cumulative)
+// don't line up 1:1 with what the scanner actually correlates (gdd_day,
+// dtr_f_calibrated, etc.), so reusing it would mislabel or silently miss keys.
+const METRIC_LABELS = {
+  air_temp:'Air temperature', humidity:'Humidity', precipitation:'Precipitation',
+  soil_moisture:'Soil moisture', soil_temp:'Soil temperature', solar:'Solar insolation',
+  gdd_day:'Daily GDD', dtr:'Diurnal temperature range', vpd_kpa:'VPD (daily avg)',
+  vpd_peak_kpa:'VPD (afternoon peak)', et0_in:'Reference ET (ET₀)',
+  irrigation_volume:'Irrigation volume', harvest_yield_tons:'Harvest yield',
+};
 </script>
 
 <script>

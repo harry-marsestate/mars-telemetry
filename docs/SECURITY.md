@@ -62,6 +62,18 @@ through the RLS model documented above, not just "another function."
   `user_profiles` has no email column. Server-to-server only
   (`auth: ["secret"]`), triggered by the user_profiles UPDATE Database
   Webhook.
+- `insights-scan` Edge Function (`supabase/functions/`) - uses
+  `ctx.supabaseAdmin` (service-role client) to read across
+  sensor_readings/daily_derived/harvest_receipts and write `insights`
+  directly, bypassing RLS on both the read and write side. `insights`
+  itself has no insert/update policy at all -- the service-role client is
+  the ONLY writer, by design, not an oversight to close later. Server-to-
+  server only (`auth: ["secret"]`), triggered exclusively by
+  pg_cron -> pg_net on the weekly schedule (see the insights-engine
+  migration) -- never reachable by a browser session. Getting this
+  working also surfaced that `service_role` had no table-level GRANTs
+  anywhere in this project at all, BYPASSRLS notwithstanding -- see the
+  dedicated entry near the end of this file.
 
 ## Two parallel API key systems - legacy JWT vs new secret/publishable
 
@@ -1722,3 +1734,15 @@ is a necessary check, not a sufficient one.
 **Verified against the live, applied code**, not just the design: all 5 vintages clicked with a real throwaway operator account, each showing genuinely distinct, correct data - 2022 (4.802t, 1 lot), 2023 (17.258t, 3 lots), 2024 (16.873t, 2 lots, B1-replant note), 2025 and 2026 (mock branch, correct labels). Scroll preservation and `cellart`/`cellarh`/`ferm`/`tanks` DOM-identity/network isolation re-checked alongside the fix and still hold.
 
 RULE: before reusing an existing "re-render this panel" mechanism for a new trigger, confirm what context it actually captures and when. A mechanism built for "re-run the same thing again" is not automatically safe for "something changed, show the new thing" - those are different contracts that happen to share a function signature.
+
+## service_role has never had table-level GRANTs in this project - BYPASSRLS is not the same gate
+
+Discovered live, by an actual failed run of `insights-scan`, not assumed in advance: `service_role` has NEVER had SELECT/INSERT/UPDATE/DELETE grants on ANY public-schema table in this project. Confirmed via `information_schema.role_table_grants` across sensor_readings, daily_weather, harvest_receipts, vintages, real_data_sources, metric_derivation, and the new insights table: `service_role` has only REFERENCES/TRIGGER/TRUNCATE everywhere (a schema-level default, not per-table grants). `postgres` (table owner) has full access; `service_role` does not inherit it.
+
+The reason this had never surfaced before: neither existing Edge Function ever exercised `ctx.supabaseAdmin.from(table)` directly. `notify-admin-approval` only calls the Auth Admin API (`auth.admin.getUserById()`); `chat` deliberately never uses `ctx.supabaseAdmin` at all, per its own comment ("ctx.supabase is RLS-scoped to the caller's own JWT for every tool call - deliberately never ctx.supabaseAdmin"). `insights-scan` is the first code in this project to read/write arbitrary tables as the service role, and it hit this immediately: `insert into insights` failed with `permission denied for table insights` even though the Edge Function authenticated correctly and `ctx.supabaseAdmin` is genuinely the service-role client.
+
+**This is the two-gates principle above, applied to a role most people assume is exempt from it.** `service_role` does have `BYPASSRLS` - but BYPASSRLS only removes the RLS *policy* gate. It does nothing for the separate table-level *GRANT* gate, the same way a GRANT alone (as documented above for `anomaly_thresholds`) does nothing for the RLS gate. A service-role client with BYPASSRLS and zero GRANTs on a table gets exactly the same `permission denied` a browser-side `authenticated` role would get from a missing GRANT - the failure mode is identical, it just feels more surprising because "service role" sounds like it should mean "unrestricted."
+
+**Fix applied, narrowly scoped, not a blanket fix:** `grant select` on the six source tables `insights-scan` reads, plus `grant select, insert, update` on `insights` itself, to `service_role` specifically. Deliberately NOT `grant ... on all tables in schema public to service_role` / an `ALTER DEFAULT PRIVILEGES` change - that would be a much larger security-posture change made unilaterally, and cuts against this file's own stated philosophy for service-role holes ("each one is a deliberate hole punched through the RLS model... not just 'another function'"). Also note: `daily_derived` has `security_invoker = true` and `series_bucketed()`/`real_metric_vintage_counts()` are plain `language sql stable` (not SECURITY DEFINER) - none of them run with the view/function owner's privileges, so granting only the view/function itself would not have been sufficient; the underlying tables needed the grant directly.
+
+RULE: never assume `service_role` has implicit table access because it has `BYPASSRLS`. Before any new service-role code path goes live, check `information_schema.role_table_grants` for `service_role` on every table it touches, directly - don't infer it from BYPASSRLS, and don't infer it from another function "probably" having needed the same access, since neither existing Edge Function actually exercised this path before `insights-scan`.

@@ -26,3 +26,9 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/chat/deno.json"
 entrypoint = "./functions/chat/index.ts"
+
+[functions.insights-scan]
+enabled = true
+verify_jwt = false
+import_map = "./functions/insights-scan/deno.json"
+entrypoint = "./functions/insights-scan/index.ts"

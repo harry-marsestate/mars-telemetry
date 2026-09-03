@@ -31,10 +31,10 @@ export default {
       // Personalization only -- not fatal if it fails, unlike role resolution above.
       const { data: profile, error: profileErr } = await ctx.supabase
         .from("user_profiles")
-        .select("full_name")
+        .select("first_name, last_name")
         .maybeSingle();
       if (profileErr) console.error("chat: could not resolve caller profile", profileErr);
-      const displayName = resolveDisplayName(role, profile?.full_name ?? null);
+      const displayName = resolveDisplayName(role, profile?.first_name ?? null, profile?.last_name ?? null);
 
       const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY") });
 
@@ -129,9 +129,9 @@ export default {
   }),
 };
 
-function resolveDisplayName(role: string, fullName: string | null): string | null {
-  if (!fullName || !fullName.trim()) return null;
-  return role === "operator" ? fullName.trim().split(/\s+/)[0] : fullName.trim();
+function resolveDisplayName(role: string, firstName: string | null, lastName: string | null): string | null {
+  if (!firstName) return null;
+  return role === "operator" ? firstName : (lastName ? `${firstName} ${lastName}` : firstName);
 }
 
 function buildSystemPrompt(role: string, displayName: string | null): string {

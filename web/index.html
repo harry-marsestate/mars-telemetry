@@ -432,6 +432,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 /* ── Auth (Phase 6.1 — view only; session gating wired in 6.4) ──── */
 .auth-card{width:340px; max-width:90vw}
 .auth-tabs{display:inline-flex; margin-top:28px}
+.queue-tabs{display:inline-flex; margin:20px 0 6px}
 .auth-form{display:flex; flex-direction:column; gap:12px; margin-top:26px}
 .auth-form input{
   background:var(--ink-2); border:1px solid var(--line); border-radius:3px;
@@ -538,7 +539,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
           Access: Vineyard + Winery<br>
           Session opened 06:12 PDT
         </div>
-        <button class="menu-link" id="menu-queue" role="menuitem" type="button" style="display:none">Approval queue</button>
+        <button class="menu-link" id="menu-queue" role="menuitem" type="button" style="display:none">User Management</button>
         <button class="signout" id="signout" role="menuitem">Sign out</button>
       </div>
     </div>
@@ -604,6 +605,8 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
     </div>
 
     <form id="auth-form" class="auth-form">
+      <input type="text" id="auth-first-name" placeholder="First name" autocomplete="given-name" style="display:none">
+      <input type="text" id="auth-last-name" placeholder="Last name" autocomplete="family-name" style="display:none">
       <input type="email" id="auth-email" placeholder="Email" autocomplete="email" required>
       <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" required>
       <ul class="auth-checklist" id="auth-checklist" style="display:none">
@@ -635,13 +638,34 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   </div>
 </div>
 
+<div class="out" id="finish-profile-view">
+  <div class="auth-card">
+    <img class="out-mono logo-img" alt="Mars Estate monogram">
+    <div class="out-ttl">Mars Telemetry</div>
+    <div class="out-sub">Mars Estate &middot; Howell Mountain</div>
+    <div class="auth-success" style="display:block">One more step &mdash; tell us your name so the estate can address you correctly.</div>
+    <form id="finish-profile-form" class="auth-form">
+      <input type="text" id="finish-first-name" placeholder="First name" autocomplete="given-name">
+      <input type="text" id="finish-last-name" placeholder="Last name" autocomplete="family-name">
+      <div class="auth-err" id="finish-profile-err"></div>
+      <button type="submit" class="out-b" id="finish-profile-submit">Continue</button>
+    </form>
+    <button class="auth-forgot" id="finish-profile-signout" type="button">Sign out</button>
+  </div>
+</div>
+
 <div class="out" id="queue-view">
   <div class="queue-card">
     <img class="out-mono logo-img" alt="Mars Estate monogram">
-    <div class="out-ttl">Approval Queue</div>
+    <div class="out-ttl">User Management</div>
     <div class="out-sub">Mars Estate &middot; Howell Mountain</div>
     <button class="auth-forgot" id="queue-close" type="button">Back to dashboard</button>
+    <div class="tabs queue-tabs" role="tablist">
+      <button class="tab on" id="queue-tab-pending" role="tab" type="button">Pending approvals</button>
+      <button class="tab" id="queue-tab-accounts" role="tab" type="button">Accounts</button>
+    </div>
     <div class="queue-list" id="queue-list"></div>
+    <div class="queue-list" id="accounts-list" style="display:none"></div>
   </div>
 </div>
 
@@ -3551,12 +3575,22 @@ $('#signout').onclick=()=>{$('#menu').classList.remove('open'); hideTip(); sb.au
 $('#menu-queue').onclick=()=>{
   $('#menu').classList.remove('open');
   showQueueOnly();
+  switchQueueTab('pending');
   loadApprovalQueue();
 };
 $('#queue-close').onclick=()=>{
   $('#queue-view').classList.remove('on');
   showDashboard();
 };
+$('#queue-tab-pending').onclick=()=>switchQueueTab('pending');
+$('#queue-tab-accounts').onclick=()=>switchQueueTab('accounts');
+function switchQueueTab(tab){
+  $('#queue-tab-pending').classList.toggle('on', tab==='pending');
+  $('#queue-tab-accounts').classList.toggle('on', tab==='accounts');
+  $('#queue-list').style.display = tab==='pending' ? '' : 'none';
+  $('#accounts-list').style.display = tab==='accounts' ? '' : 'none';
+  if(tab==='accounts') loadAccountsList();
+}
 
 /* Resize */
 let rz; addEventListener('resize',()=>{clearTimeout(rz); rz=setTimeout(()=>{
@@ -3707,13 +3741,14 @@ async function initChat(session, role){
   chatHistory = [];
   LOG.innerHTML = '';
 
-  // Same source/fallback chain as updateHeaderForSession(), so the greeting
-  // and the header avatar/menu never disagree on who's signed in.
-  const { data: profile } = await sb.from('user_profiles').select('full_name').eq('id', session.user.id).single();
-  const displayName = profile?.full_name
-    || session.user.user_metadata?.full_name || session.user.user_metadata?.name
-    || session.user.email;
-  const firstName = escapeHtml(displayName.trim().split(/\s+/)[0]);
+  // Same operator/customer split as the server-side persona
+  // (resolveDisplayName() in supabase/functions/chat/index.ts) -- these
+  // used to disagree (this greeting was always first-name-only,
+  // regardless of role); reconciled here. Login gate guarantees both
+  // fields are set for anyone reaching this point, same as
+  // updateHeaderForSession() -- no fallback chain needed.
+  const { data: profile } = await sb.from('user_profiles').select('first_name, last_name').eq('id', session.user.id).single();
+  const greetName = escapeHtml(role==='operator' ? profile.first_name : `${profile.first_name} ${profile.last_name}`);
 
   let groups;
   if(role==='operator'){
@@ -3735,7 +3770,7 @@ async function initChat(session, role){
        <p>Ask me anything specific, or start with one of the suggestions below.</p>`
     : `<p>Welcome to Mars Telemetry. I'm your AI assistant, and I'm here to help you understand the story behind your wine. I can share how the vineyard has fared this season, what the growing conditions have meant for the fruit, and what to expect as this vintage comes together.</p>
        <p>Please feel free to begin with one of the suggestions below, or simply share what you would like to know.</p>`;
-  addMsg('a', `<p>Hi ${firstName},</p>${body}`);
+  addMsg('a', `<p>Hi ${greetName},</p>${body}`);
 }
 
 /* §9 ── AUTH VIEW (Phase 6.1 — view + logic only; no session gate yet) ── */
@@ -3767,6 +3802,9 @@ function setAuthMode(mode){
   $('#auth-checklist').style.display = mode==='signup' ? '' : 'none';
   $('#auth-password2').style.display = mode==='signup' ? '' : 'none';
   $('#auth-password2').value='';
+  $('#auth-first-name').style.display = mode==='signup' ? '' : 'none';
+  $('#auth-last-name').style.display = mode==='signup' ? '' : 'none';
+  $('#auth-first-name').value=''; $('#auth-last-name').value='';
   updatePasswordChecklist();
   clearAuthError();
   $('#auth-form').style.display='';
@@ -3830,11 +3868,17 @@ $('#auth-form').addEventListener('submit', async e=>{
          further to show here. */
     } else {
       const password2=$('#auth-password2').value;
+      const firstName=$('#auth-first-name').value.trim(), lastName=$('#auth-last-name').value.trim();
+      if(!firstName || !lastName){
+        showAuthError('Enter your first and last name.');
+        return;
+      }
       if(!passwordMeetsAllRules({password,password2})){
         showAuthError('Password doesn’t meet all the requirements listed below.');
         return;
       }
-      const {data,error}=await sb.auth.signUp({email,password});
+      const {data,error}=await sb.auth.signUp({email,password,
+        options:{data:{first_name:firstName, last_name:lastName}}});
       if(error) throw error;
       /* signUp() on an already-registered email returns 200 with no error
          (anti-enumeration) — a pseudo user with an empty identities array,
@@ -3889,17 +3933,15 @@ let dashboardBooted=false;
 // RLS; this only maps how it's displayed.
 const ROLE_LABELS = { operator: 'Team Member', customer: 'Obsidian Member' };
 
-function computeInitials(name){
-  const parts=name.trim().split(/\s+/).filter(Boolean);
-  if(parts.length>=2) return (parts[0][0]+parts[parts.length-1][0]).toUpperCase();
-  return name.slice(0,2).toUpperCase();
+// Login gate guarantees first_name/last_name are both set for anyone
+// reaching this point (see runSessionGate()) -- no fallback chain needed.
+function computeInitials(firstName, lastName){
+  return (firstName[0]+lastName[0]).toUpperCase();
 }
 async function updateHeaderForSession(session, role){
-  const { data: profile } = await sb.from('user_profiles').select('full_name, is_admin').eq('id', session.user.id).single();
-  const displayName = profile?.full_name
-    || session.user.user_metadata?.full_name || session.user.user_metadata?.name
-    || session.user.email;
-  $('#avatar').textContent = computeInitials(displayName);
+  const { data: profile } = await sb.from('user_profiles').select('first_name, last_name, is_admin').eq('id', session.user.id).single();
+  const displayName = `${profile.first_name} ${profile.last_name}`;
+  $('#avatar').textContent = computeInitials(profile.first_name, profile.last_name);
   $('.menu-name').textContent = displayName;
   $('.menu-role').textContent = ROLE_LABELS[role] || role;
   $('#menu-queue').style.display = profile?.is_admin ? '' : 'none';
@@ -3909,6 +3951,7 @@ function showAuthOnly(){
   dashboardBooted=false;
   unsubscribeOverviewRealtime();
   $('#pending-view').classList.remove('on');
+  $('#finish-profile-view').classList.remove('on');
   $('.hdr').style.display='none';
   $('.wrap').style.display='none';
   setAuthMode('signin');
@@ -3919,6 +3962,7 @@ function showPendingOnly(){
   dashboardBooted=false;
   unsubscribeOverviewRealtime();
   $('#auth-view').classList.remove('on');
+  $('#finish-profile-view').classList.remove('on');
   $('.hdr').style.display='none';
   $('.wrap').style.display='none';
   $('#pending-view').classList.add('on');
@@ -3926,6 +3970,7 @@ function showPendingOnly(){
 function showDashboard(){
   $('#auth-view').classList.remove('on');
   $('#pending-view').classList.remove('on');
+  $('#finish-profile-view').classList.remove('on');
   $('.hdr').style.display='';
   $('.wrap').style.display='';
   if(!dashboardBooted){
@@ -3938,15 +3983,59 @@ function showDashboard(){
 function showQueueOnly(){
   $('#auth-view').classList.remove('on');
   $('#pending-view').classList.remove('on');
+  $('#finish-profile-view').classList.remove('on');
   $('.hdr').style.display='none';
   $('.wrap').style.display='none';
   $('#queue-view').classList.add('on');
+}
+function showFinishProfileOnly(prefill){
+  dashboardBooted=false;
+  unsubscribeOverviewRealtime();
+  $('#auth-view').classList.remove('on');
+  $('#pending-view').classList.remove('on');
+  $('.hdr').style.display='none';
+  $('.wrap').style.display='none';
+  $('#finish-first-name').value = prefill.first;
+  $('#finish-last-name').value = prefill.last;
+  $('#finish-profile-err').textContent=''; $('#finish-profile-err').classList.remove('on');
+  $('#finish-profile-view').classList.add('on');
 }
 
 async function runSessionGate(){
   const { data: { session } } = await sb.auth.getSession();
   if(!session){ chatUserId=null; showAuthOnly(); return; }
   _userRolePromise=null; /* always re-check fresh, not a stale cached role from a prior session */
+
+  // Gated for EVERY role/status/provider, checked every login, ahead of
+  // even the pending-approval screen -- a not-yet-approved signup with no
+  // name is asked for it before being told they're awaiting approval.
+  // Google's own live session metadata (not the possibly-stale DB row) is
+  // used for pre-fill when available; given_name/family_name checked
+  // first (not present in this project's real Google data today, but the
+  // correct source if a provider ever supplies them), falling back to
+  // splitting full_name/name -- same logic as the migration's backfill
+  // and handle_new_user(). Email/password accounts have no such metadata
+  // and start blank.
+  const { data: nameProfile, error: nameProfileErr } = await sb.from('user_profiles').select('first_name, last_name').eq('id', session.user.id).single();
+  if(nameProfileErr){
+    // A real query failure here (network/DB, not "no name set yet") must
+    // not be silently treated as an incomplete profile -- nameProfile
+    // would be undefined either way, and without this check a user who
+    // already has a name could get bounced to the finish-profile screen
+    // with nothing logged anywhere to explain why.
+    console.error('runSessionGate: name profile query failed', nameProfileErr);
+  }
+  if(!nameProfile?.first_name || !nameProfile?.last_name){
+    const um = session.user.user_metadata || {};
+    const rawName = (um.full_name || um.name || '').trim();
+    const sp = rawName.indexOf(' ');
+    showFinishProfileOnly({
+      first: um.given_name || (sp>0 ? rawName.slice(0,sp) : rawName),
+      last:  um.family_name || (sp>0 ? rawName.slice(sp+1).trim() : '')
+    });
+    return;
+  }
+
   const role = await getCurrentUserRole();
   if(role==='pending' || role===null){ showPendingOnly(); return; }
   if(session.user.id !== chatUserId){ chatUserId = session.user.id; initChat(session, role); }
@@ -3955,6 +4044,27 @@ async function runSessionGate(){
 }
 
 $('#pending-signout').onclick=()=>sb.auth.signOut();
+$('#finish-profile-signout').onclick=()=>sb.auth.signOut();
+$('#finish-profile-form').addEventListener('submit', async e=>{
+  e.preventDefault();
+  const first=$('#finish-first-name').value.trim(), last=$('#finish-last-name').value.trim();
+  const errBox=$('#finish-profile-err');
+  errBox.textContent=''; errBox.classList.remove('on');
+  if(!first || !last){
+    errBox.textContent='Please enter both your first and last name.';
+    errBox.classList.add('on');
+    return;
+  }
+  const btn=$('#finish-profile-submit'); btn.disabled=true;
+  const {error} = await sb.rpc('update_own_name', {p_first_name:first, p_last_name:last});
+  btn.disabled=false;
+  if(error){
+    errBox.textContent = error.message || 'Something went wrong — try again.';
+    errBox.classList.add('on');
+    return;
+  }
+  await runSessionGate();
+});
 
 /* §11 ── APPROVAL QUEUE (Phase 6.8) ────────────────────── */
 function escapeHtml(str){
@@ -3978,7 +4088,7 @@ async function loadApprovalQueue(){
   list.innerHTML=`<div class="empty">Loading&hellip;</div>`;
 
   const { data: rows, error: profileErr } = await sb.from('user_profiles')
-    .select('id, full_name, role, customer_account_id, confirmed_at')
+    .select('id, first_name, last_name, role, customer_account_id, confirmed_at')
     .eq('status','pending')
     .not('confirmed_at','is',null)
     .order('confirmed_at',{ascending:true});
@@ -4013,7 +4123,7 @@ async function loadApprovalQueue(){
 
 function renderQueueRow(list, row, email){
   const safeEmail = email ? escapeHtml(email) : '<span class="dim">email unavailable</span>';
-  const safeName = row.full_name ? escapeHtml(row.full_name) : '';
+  const safeName = row.first_name ? escapeHtml(`${row.first_name} ${row.last_name}`) : '';
   const wrap=el('div','queue-row');
   wrap.innerHTML=`
     <div class="queue-row-hd">
@@ -4195,6 +4305,119 @@ async function renderApproveForm(formHost, row, wrap){
     wrap.remove();
     const list=$('#queue-list');
     if(!list.children.length) list.innerHTML=`<div class="empty">No accounts awaiting approval.</div>`;
+  };
+}
+
+/* User Management's "Accounts" tab -- edits an existing approved
+   account's first_name/last_name/is_admin. Reuses admin_manages_profiles
+   (same RLS path the approval flow already writes through) plus the
+   guard_self_admin_removal trigger, which is the actual enforcement --
+   the current-admin checkbox lock below is a client-side nicety on top
+   of that, not a substitute for it. */
+async function loadAccountsList(){
+  const list=$('#accounts-list');
+  list.innerHTML=`<div class="empty">Loading&hellip;</div>`;
+
+  const { data: { session } } = await sb.auth.getSession();
+  const { data: rows, error } = await sb.from('user_profiles')
+    .select('id, first_name, last_name, role, is_admin')
+    .eq('status','approved')
+    .order('first_name', {ascending:true, nullsFirst:false});
+
+  if(error){
+    console.error('loadAccountsList: profile query failed', error);
+    list.innerHTML=`<div class="empty">Couldn&rsquo;t load accounts.<br><b>${escapeHtml(error.message||'Unknown error')}</b></div>`;
+    return;
+  }
+  if(!rows.length){ list.innerHTML=`<div class="empty">No approved accounts.</div>`; return; }
+
+  const ids=rows.map(r=>r.id);
+  const { data: emailData, error: emailErr } = await sb.functions.invoke('admin-pending-emails', { body:{ids} });
+  if(emailErr){
+    let message=emailErr.message;
+    if(emailErr.context && typeof emailErr.context.json==='function'){
+      try{ const body=await emailErr.context.json(); if(body?.error) message=body.error; }catch{}
+    }
+    console.error('loadAccountsList: email lookup failed', emailErr);
+    list.innerHTML=`<div class="empty">Couldn&rsquo;t resolve accounts&rsquo; emails.<br><b>${escapeHtml(message)}</b></div>`;
+    return;
+  }
+
+  const emails=emailData?.emails || {};
+  list.innerHTML='';
+  rows.forEach(row=>renderAccountRow(list, row, emails[row.id], session.user.id));
+}
+
+function renderAccountRow(list, row, email, currentUserId){
+  const safeEmail = email ? escapeHtml(email) : '<span class="dim">email unavailable</span>';
+  const wrap=el('div','queue-row');
+  wrap.innerHTML=`
+    <div class="queue-row-hd">
+      <div class="queue-row-id">
+        <div class="queue-row-email">${safeEmail}</div>
+        <div class="queue-row-name">${ROLE_LABELS[row.role]||row.role}</div>
+      </div>
+    </div>
+    <div class="queue-approve-form" style="display:flex">
+      <div class="fgroup">
+        <div class="flabel">First name</div>
+        <input type="text" class="acct-first-input" value="${escapeHtml(row.first_name||'')}">
+      </div>
+      <div class="fgroup">
+        <div class="flabel">Last name</div>
+        <input type="text" class="acct-last-input" value="${escapeHtml(row.last_name||'')}">
+      </div>
+      <div class="fgroup">
+        <label class="flabel queue-admin-label" style="display:flex; align-items:center; gap:8px; cursor:pointer">
+          <input type="checkbox" class="acct-admin-check" ${row.is_admin?'checked':''}> Grant admin privileges
+        </label>
+      </div>
+      <div class="auth-err acct-form-err"></div>
+      <div class="queue-form-actions">
+        <button type="button" class="out-b acct-save-btn">Save</button>
+      </div>
+    </div>
+  `;
+  list.appendChild(wrap);
+
+  const firstInput=wrap.querySelector('.acct-first-input');
+  const lastInput=wrap.querySelector('.acct-last-input');
+  const adminCheck=wrap.querySelector('.acct-admin-check');
+  const adminLabel=wrap.querySelector('.queue-admin-label');
+  const formErr=wrap.querySelector('.acct-form-err');
+  const saveBtn=wrap.querySelector('.acct-save-btn');
+
+  // Client-side nicety only -- the actual enforcement is
+  // guard_self_admin_removal (BEFORE UPDATE trigger, verified live it
+  // can't be bypassed by bundling is_admin with another field). This
+  // just avoids making an admin discover the block via a server error.
+  if(row.id===currentUserId && row.is_admin){
+    adminCheck.disabled=true;
+    adminLabel.style.opacity='.4';
+    adminLabel.title="You can't remove your own admin status.";
+  }
+
+  saveBtn.onclick=async ()=>{
+    const first=firstInput.value.trim(), last=lastInput.value.trim();
+    formErr.textContent=''; formErr.classList.remove('on');
+    if(!first || !last){
+      formErr.textContent='First and last name are both required.';
+      formErr.classList.add('on');
+      return;
+    }
+    saveBtn.disabled=true; saveBtn.textContent='Saving…';
+    const { error } = await sb.from('user_profiles').update({
+      first_name:first, last_name:last, is_admin:adminCheck.checked
+    }).eq('id', row.id);
+    if(error){
+      console.error('account save failed', error);
+      saveBtn.textContent='Save'; saveBtn.disabled=false;
+      formErr.textContent=`Couldn't save: ${error.message}`;
+      formErr.classList.add('on');
+      return;
+    }
+    saveBtn.textContent='Saved';
+    setTimeout(()=>{ saveBtn.textContent='Save'; saveBtn.disabled=false; }, 1400);
   };
 }
 

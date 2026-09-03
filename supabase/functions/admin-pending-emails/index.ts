@@ -1,8 +1,9 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
 
-// Called by an admin's own browser session to resolve pending users' real
-// emails (auth.users, never client-queryable) for the approval queue.
+// Called by an admin's own browser session to resolve users' real emails
+// (auth.users, never client-queryable) for the User Management page --
+// both the pending-approval queue and the accounts list.
 // ctx.supabase is RLS-scoped to the caller's own JWT -- used ONLY to verify
 // is_admin before ctx.supabaseAdmin (bypasses RLS entirely) ever touches
 // the Admin API. Skipping that check would let any authenticated caller

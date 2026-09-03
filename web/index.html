@@ -3717,7 +3717,7 @@ $('#auth-google').onclick=async ()=>{
   try{
     const {error}=await sb.auth.signInWithOAuth({
       provider:'google',
-      options:{redirectTo: window.location.origin + window.location.pathname}
+      options:{redirectTo: window.location.origin + window.location.pathname, queryParams:{prompt:'select_account'}}
     });
     if(error) throw error;
     /* No client-side success path -- this navigates the browser to Google

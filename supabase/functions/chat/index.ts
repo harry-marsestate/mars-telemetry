@@ -57,26 +57,65 @@ export default {
 
         newTurns.push({ role: "assistant", content: response.content });
 
-        if (response.stop_reason !== "tool_use") {
-          const reply = response.content
-            .filter((b): b is Anthropic.TextBlock => b.type === "text")
-            .map((b) => b.text)
-            .join("\n");
-          return Response.json({ reply, appended: newTurns }, { status: 200 });
+        const hasToolUse = response.content.some((b) => b.type === "tool_use");
+
+        // A max_tokens cutoff that still contains tool_use blocks behaves
+        // like a normal tool_use turn, not a finished one: confirmed by
+        // direct reproduction against the API that a cutoff lands at (or
+        // just past) a tool_use block boundary, never mid-JSON -- the SDK
+        // only ever hands back complete, parseable tool_use blocks, even
+        // when one is missing a field the model didn't get to emit. Any
+        // such gap is already caught by each tool's own input validation
+        // in tools.ts (e.g. getSeries' bucket_hours check), which returns
+        // a normal is_error tool_result rather than throwing -- so it's
+        // safe to execute whatever calls did fit and loop for the rest,
+        // instead of discarding tool calls the model already committed to
+        // and silently returning nothing.
+        if (response.stop_reason === "tool_use" || (response.stop_reason === "max_tokens" && hasToolUse)) {
+          const toolResults: Anthropic.ToolResultBlockParam[] = [];
+          for (const block of response.content) {
+            if (block.type !== "tool_use") continue;
+            const result = await runTool(ctx.supabase, block.name, block.input as Record<string, unknown>);
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: result.content,
+              is_error: result.isError,
+            });
+          }
+          newTurns.push({ role: "user", content: toolResults });
+          continue;
         }
 
-        const toolResults: Anthropic.ToolResultBlockParam[] = [];
-        for (const block of response.content) {
-          if (block.type !== "tool_use") continue;
-          const result = await runTool(ctx.supabase, block.name, block.input as Record<string, unknown>);
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: result.content,
-            is_error: result.isError,
+        const reply = response.content
+          .filter((b): b is Anthropic.TextBlock => b.type === "text")
+          .map((b) => b.text)
+          .join("\n");
+
+        // A genuinely terminal turn (no tool_use left to run) can still
+        // carry no usable text -- most commonly a max_tokens cutoff that
+        // landed entirely inside "thinking" before any text was written.
+        // Surface that honestly instead of letting an empty string reach
+        // the frontend, which silently renders as "(no response)" with
+        // no indication anything went wrong.
+        if (!reply.trim()) {
+          console.error("chat: model turn produced no usable text", {
+            stop_reason: response.stop_reason,
+            blockTypes: response.content.map((b) => b.type),
           });
+          const honest = response.stop_reason === "max_tokens"
+            ? "That answer needed more room than I had to work with -- try narrowing the question (a specific block, vintage, or metric) and I'll try again."
+            : "I wasn't able to put together an answer for that -- try rephrasing the question.";
+          return Response.json({ reply: honest, appended: newTurns }, { status: 200 });
         }
-        newTurns.push({ role: "user", content: toolResults });
+
+        // Plain text, deliberately not wrapped in markdown emphasis -- the
+        // frontend's renderer only supports **bold**, not *italics*, so a
+        // single-asterisk wrap here would render as literal asterisks.
+        const truncationNote = response.stop_reason === "max_tokens"
+          ? "\n\n(Cut off before I could finish -- ask me to continue if you'd like the rest.)"
+          : "";
+        return Response.json({ reply: reply + truncationNote, appended: newTurns }, { status: 200 });
       }
 
       return Response.json(

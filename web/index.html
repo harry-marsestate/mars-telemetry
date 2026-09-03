@@ -3615,13 +3615,17 @@ function addMsg(who, html){
 // Escape FIRST, then transform -- markdown syntax is matched and wrapped
 // on the already-escaped string, so raw '<'/'>' from the model or a user
 // can never survive into the HTML (they've already become &lt;/&gt; before
-// any tag-producing regex runs). Only **bold** and '- '/'* ' bullet lists
+// any tag-producing regex runs). Bold consumes ** pairs before italics
+// ever runs, so a real ** sequence can't be seen as two stray *s by the
+// italics regex. Only **bold**, *italics*, and '- '/'* ' bullet lists
 // are supported -- proportional to what the system prompt actually asks
 // the model to produce, not a full markdown spec. No link syntax: a
 // markdown link's URL is caller-controlled text, and turning it into a
 // real href would reopen exactly the injection risk escaping closes.
 function inlineMd(escapedLine){
-  return escapedLine.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  return escapedLine
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>');
 }
 function renderReply(text){
   return escapeHtml(text).split(/\n{2,}/).filter(b=>b.trim()).map(block=>{

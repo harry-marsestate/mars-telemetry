@@ -1732,6 +1732,15 @@ const PANELS = [
 {id:'labcost', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour cost by block', unit:'USD · USD/acre',
  sub:(c)=>getDataSourceLabel('labour',c.primary)+' · selected blocks',
  render:(b,c)=>{
+   // strip()/table() below are append-only (see docs/SECURITY.md's "Two
+   // independent panel repeat-render mechanisms" entry) -- harmless under a
+   // full renderTab() rebuild (b is always fresh) but stacks a duplicate
+   // strip+table if this ever runs twice against the same body, which
+   // rerenderVineyardBlocks() now does. Every other panel in this file
+   // either self-clears (lineChart/barChart/groupedBars) or builds fresh
+   // child nodes each call (irrigblk); labcost was the one exception,
+   // confirmed live (see the vineyard block-filter scoping entry).
+   b.innerHTML='';
    const v=c.primary; let tc=0, th=0;
    const rows=c.blocks.map(id=>{
      const L=labour(id,v), h=L.reduce((s,r)=>s+r.hours,0), cc=L.reduce((s,r)=>s+r.cost,0);
@@ -1946,7 +1955,7 @@ function renderMap(box, ctx){
       const st=state[ctx.tab];
       st.blocks = st.blocks.includes(id) ? st.blocks.filter(x=>x!==id) : [...st.blocks,id];
       if(!st.blocks.length) st.blocks=[...ALL_IDS];
-      renderTabPreserveScroll(ctx.tab);
+      if(ctx.tab==='vineyard') rerenderVineyardBlocks(); else renderTabPreserveScroll(ctx.tab);
     };
     node.addEventListener('click',toggle);
     node.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle();}});
@@ -2641,6 +2650,14 @@ async function renderAnomalies(box, ctx, tab){
       let out=null; try{out=r.test(c);}catch(e){}
       return {sev:r.sev, out};}).filter(x=>x.out);
   }
+  // box.appendChild(wrap) below is append-only (see docs/SECURITY.md's
+  // "Two independent panel repeat-render mechanisms" entry) -- harmless
+  // under a full renderTab() rebuild (box is always fresh) but stacks a
+  // duplicate .anom block if this ever runs twice against the same body,
+  // which rerenderVineyardBlocks() now does. Clearing first, same fix as
+  // the box.innerHTML='' convention lineChart/barChart/irrigblk already
+  // follow -- confirmed live (see the vineyard block-filter scoping entry).
+  box.innerHTML='';
   const wrap=el('div','anom');
   wrap.innerHTML += `<div class="anom-sublabel">Now</div>`;
   if(!hits.length) wrap.innerHTML+=`<div class="anom-clear">✓ &nbsp;All monitored parameters within range</div>`;
@@ -2847,7 +2864,7 @@ function renderFilters(tab){
       b.onclick=()=>{
         st.blocks = on ? st.blocks.filter(x=>x!==bl.id) : [...st.blocks,bl.id];
         if(!st.blocks.length) st.blocks=[...ALL_IDS];
-        renderTabPreserveScroll(tab);
+        if(tab==='vineyard') rerenderVineyardBlocks(); else renderTabPreserveScroll(tab);
       };
       cB.appendChild(b);
     });
@@ -3193,6 +3210,17 @@ function makePanel(p, c){
   }};
 }
 
+/* Factored out of renderTab's hero markup so rerenderVineyardBlocks() can
+   recompute the same string in place -- "X of 3 blocks in view" is the one
+   part of this note that a block-filter change actually invalidates, but
+   the whole string is cheap enough to just rebuild rather than patching
+   one substring. */
+function vineyardOverviewNote(c){
+  return `${c.compare?'Comparing '+c.vintages.join(', ')+'<br>aligned to '+dstr(NOW)
+    : (c.primary===CURRENT?'Live · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
+       :'Vintage '+c.primary+' archive · static')}<br>${c.blocks.length} of 3 blocks in view`;
+}
+
 async function renderTab(tab){
   const c=ctxFor(tab);
   const role = await getCurrentUserRole();
@@ -3213,12 +3241,12 @@ async function renderTab(tab){
       sub:'7.35 acres · click a block to filter · selection highlighted',
       render:(b,cc)=>renderMap(b,cc)}, c);
     left.appendChild(mp.panel); pending.push(mp.run);
+    panelRuns.map=mp.run;
+    panelHeaders.map=mp.panel.querySelector('.p-hd');
 
     const ov=el('div','panel');
     ov.innerHTML=`<div class="ov-hd"><div class="ov-ttl">Estate at a glance</div>
-      <div class="ov-note">${c.compare?'Comparing '+c.vintages.join(', ')+'<br>aligned to '+dstr(NOW)
-        : (c.primary===CURRENT?'Live · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
-           :'Vintage '+c.primary+' archive · static')}<br>${c.blocks.length} of 3 blocks in view</div></div>
+      <div class="ov-note" id="vineyard-ov-note">${vineyardOverviewNote(c)}</div></div>
       <div class="ov-grid" id="ovg-vineyard"></div>`;
     right.appendChild(ov);
     pending.push(()=>paintOverviewV('vineyard',c));
@@ -3227,6 +3255,8 @@ async function renderTab(tab){
       const an=makePanel({id:'anom-v', title:'Insights and Anomalies', unit:'AI-enabled',
         render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c);
       right.appendChild(an.panel); pending.push(an.run);
+      panelRuns['anom-v']=an.run;
+      panelHeaders['anom-v']=an.panel.querySelector('.p-hd');
     }
   } else {
     const ov=el('div','panel');
@@ -3416,6 +3446,62 @@ async function rerenderHarvestVintage(){
     };
   }
   await rerenderPanel('fruit');
+}
+
+/* Rebuilds panelRuns[p.id] with a closure over a FRESH context object,
+   mirroring makePanel()'s own run() closure exactly -- same fix as
+   rerenderHarvestVintage() above, generalized: panelRuns entries are
+   frozen at panel-creation time, so calling rerenderPanel() through an
+   un-rebuilt closure silently replays whatever `c` was active at the last
+   full renderTab(), not the newly-selected block filter. Only touches
+   panels already registered in panelHeaders (i.e. already on the page) --
+   returns false and does nothing otherwise (e.g. 'anom-v' for a
+   non-operator, which renderTab() never creates). */
+function refreshPanelRun(p, c){
+  const hd=panelHeaders[p.id];
+  if(!hd) return false;
+  const body=hd.parentElement.querySelector('.p-body');
+  const unitEl=hd.querySelector('.p-unit');
+  panelRuns[p.id]=async()=>{
+    try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); }
+    catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); }
+  };
+  return true;
+}
+
+/* Scoped update for the vineyard block filter (chips or map click) --
+   replaces a full renderTab('vineyard') rebuild. Investigation (see
+   docs/SECURITY.md) found the block filter affects more than the Soil &
+   water / Labour sections: the map's own selection rendering, the filter
+   bar's chip state + "X of 3 blocks" text, the Estate-at-a-glance note
+   and its soil-moisture tile, and the vineyard Insights/Anomalies panel
+   (irrigation-gap rules take c.blocks) all read it too -- all five are
+   handled explicitly here. Climate panels (airtemp/gdd/dtr/rh/wind/solar)
+   and the non-block soil panels (vpd/et0/precip) are confirmed
+   block-invariant by reading every render function, not assumed, and are
+   never touched. Never touches host.innerHTML or calls renderTab(), so
+   scroll position is never disturbed in the first place -- same reasoning
+   as rerenderHarvestVintage(), verified live rather than just assumed to
+   transfer. */
+async function rerenderVineyardBlocks(){
+  const c=ctxFor('vineyard');
+  const isOperator=(await getCurrentUserRole())==='operator';
+
+  renderFilters('vineyard');
+
+  const noteEl=$('#vineyard-ov-note');
+  if(noteEl) noteEl.innerHTML=vineyardOverviewNote(c);
+  await paintOverviewV('vineyard',c);
+
+  if(refreshPanelRun({id:'map', render:(b,cc)=>renderMap(b,cc)}, c)) await rerenderPanel('map');
+  if(isOperator && refreshPanelRun({id:'anom-v', render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c)){
+    await rerenderPanel('anom-v');
+  }
+
+  const scoped=PANELS.filter(p=>p.tab==='vineyard' && (p.sect==='soil'||p.sect==='labour')
+    && (p.minRole!=='operator' || isOperator));
+  scoped.forEach(p=>refreshPanelRun(p,c));
+  await Promise.allSettled(scoped.map(p=>rerenderPanel(p.id)));
 }
 setInterval(()=>{
   if(!dashboardBooted) return;

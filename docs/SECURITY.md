@@ -1917,9 +1917,22 @@ wholly replaced the next day. 4155.2 matches no column at any vintage today
 4058.0 calibrated). `HARVEST_BAND` itself needed no rebasing - it was correct
 all along and was simply being compared against the wrong column.
 
+**The per-vintage scalar means the RAW columns also distort year-over-year
+COMPARISONS, not just absolute figures** - a second-order consequence worth
+stating separately, since a reader might assume a uniform bias cancels out
+in a comparison. It does not: each vintage carries its own scalar (2023
+1.253220, 2024 1.121165), so the raw gap and the true gap differ materially.
+Measured on the live deployed chat, same question either side of the fix:
+raw reported 2024 as **~27%** above 2023 (3619.45 vs 2853.45); calibrated
+reports **~13%** (4058.0 vs 3576.0). The uncalibrated path roughly doubled
+the apparent year-over-year difference.
+
 **Real user-visible consequences, both reproduced before fixing:**
 - The live deployed chat answered "2023 season total GDD: **2,853.45**" - the
   uncalibrated figure, ~20% below the published 3,576 it claims to reflect.
+  Re-tested against the deployed fix (chat function v12): it now answers
+  "**3,576.0 GDD** (calibrated, per NVGG Angwin figures)" for 2023 and
+  "**4,058.0**" for 2024, with the old raw figures absent from both replies.
 - A completed 2023 season (raw 2853.5) could never reach a picking band it had
   actually finished inside (calibrated 3576.0).
 - The client-side `Veraison window` rule compares `fetchGddAsOf()` against
@@ -1959,27 +1972,74 @@ column that nothing displays is indistinguishable, from the outside, from one
 that was never built. The strongest signal here was already on screen for
 months: a subtitle claiming a correction the plotted data didn't have.
 
-## Adversarial `set role` leaks across the transaction pooler and fakes a "0 rows" / "permission denied" result
+## Adversarial `set role` leaks across the transaction pooler - a CORRECTION to this file's own standing guidance
 
-This file repeatedly recommends verifying RLS adversarially with
-`set role authenticated; select ...` over `DATABASE_URL`. That connection is
-Supabase's **transaction-mode pooler** (port 6543), which hands the same
-backend connection to later clients - and `SET ROLE` is session state that
-survives on it. A verification query left `current_user = authenticated`
-(`session_user` still `postgres`) on a pooled backend, and the *next*
-unrelated psql invocation silently inherited it: an `UPDATE user_profiles`
-returned `UPDATE 0`, `select ... from user_profiles` returned 0 rows of 13,
-and `auth.users` returned `permission denied` - all read at first glance as
-"the row was never created" when the row existed the whole time.
+**This entry corrects advice given in three earlier entries in this file, not
+just a one-off observation.** The `anomaly_thresholds "permission denied"`
+entry ("`set role authenticated; select * from anomaly_thresholds` succeeds
+directly in Postgres"), the VPD entry ("adversarially re-tested as `role
+authenticated` (not superuser) before being trusted"), and the `sensor_read`
+RLS entry ("`EXPLAIN ANALYZE` run as `role authenticated` (not
+superuser-bypassed)") all recommend or record a **bare** `SET ROLE` against
+`DATABASE_URL`. Anyone following that pattern verbatim can hit the silent
+false negative below. The *discipline* those entries teach - verify RLS as
+the real role rather than as a superuser - remains exactly right; only the
+mechanism needs to change.
 
-This is the same "0 rows is ambiguous, not proof" hazard already on record for
-`anomalies_eval`'s DISTINCT ON tie, arriving through a completely different
+**Why a bare SET ROLE is not reliably scoped to your session.**
+`DATABASE_URL` points at Supabase's **transaction-mode** pooler (port 6543).
+Transaction-mode pooling multiplexes many logical clients over a smaller set
+of physical backend connections, handing a backend back to the pool at the
+end of each transaction - and it does NOT reset session-level state such as
+the current role between those clients, the way session-mode pooling (or a
+direct connection) would. `SET ROLE` is session state, so it is not
+guaranteed to end with your query: it can persist on that physical
+connection and silently apply to whichever logical client the pooler hands
+it to next.
+
+**The concrete symptom this produced during the GDD investigation.** A
+verification query left `current_user = authenticated` (`session_user` still
+`postgres`) on a pooled backend. The next, entirely unrelated psql
+invocation silently inherited it:
+
+- `update user_profiles set ... where id = '<a real id>'` returned `UPDATE 0`
+- `select ... from user_profiles where id = '<the same real id>'` returned
+  zero rows
+- `select count(*) from user_profiles` returned 0 - against a table
+  independently confirmed to hold **13 real rows**
+- `select ... from auth.users` returned `permission denied for table users`
+
+Nothing was missing and nothing had failed. The leaked role's RLS was
+filtering every row invisibly, and the missing `auth` grant produced the
+permission error on top. Read cold, that combination looks precisely like
+"the `handle_new_user` trigger never created the row" - a data or trigger
+bug - rather than a role leak, and it cost a real false start before a
+single `select current_user` revealed the true cause.
+
+**The safe pattern: `SET LOCAL` inside an explicit transaction.**
+
+```sql
+begin;
+  set local role authenticated;
+  select ... ;          -- the adversarial check
+rollback;
+```
+
+`SET LOCAL` is scoped to the enclosing transaction and is discarded at
+COMMIT/ROLLBACK, so it cannot escape onto the pooled connection regardless
+of which client receives that backend next. Use this form for every
+adversarial role check from here on - including on a connection you believe
+is not pooled, since the failure mode is silent and the safer form costs one
+extra line.
+
+If a bare `SET ROLE` has already been run, reset it explicitly (`reset role`
+or `discard all`) and confirm with `select current_user` before trusting any
+later result on that connection.
+
+RULE: treat an unexpected `0 rows`, `UPDATE 0`, or `permission denied`
+arriving any time after an adversarial role check as a **suspected leaked
+role first**, before investigating it as a data, trigger, or RLS-policy
+failure - `select current_user` settles it in one query. This is the same
+"0 rows is ambiguous, not proof" hazard already on record for
+`anomalies_eval`'s DISTINCT ON tie, reached through an entirely different
 mechanism.
-
-RULE: after any adversarial `set role` over the pooler, reset it explicitly
-(`reset role` / `discard all`) and confirm with `select current_user` before
-trusting any subsequent result - and treat an unexpected `0 rows`,
-`UPDATE 0`, or `permission denied` immediately following such a check as a
-suspected leaked role first, not as a data or trigger failure. Prefer scoping
-the check to a transaction (`begin; set local role ...; rollback;`) so it
-cannot escape onto the pooled connection at all.

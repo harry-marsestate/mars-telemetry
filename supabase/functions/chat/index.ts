@@ -151,9 +151,12 @@ export default {
           return Response.json({ reply: honest, appended: newTurns }, { status: 200 });
         }
 
-        // Plain text, deliberately not wrapped in markdown emphasis -- the
-        // frontend's renderer only supports **bold**, not *italics*, so a
-        // single-asterisk wrap here would render as literal asterisks.
+        // Plain text, deliberately not wrapped in markdown emphasis. (The
+        // original reason -- "the renderer only supports **bold**, not
+        // *italics*" -- is now stale: it handles bold, italics, bold-italic,
+        // inline code, headings, ordered/nested lists and tables. Kept plain
+        // anyway: this is the app speaking, not the model, and it shouldn't
+        // borrow the model's formatting voice.)
         const truncationNote = response.stop_reason === "max_tokens"
           ? "\n\n(Cut off before I could finish -- ask me to continue if you'd like the rest.)"
           : "";

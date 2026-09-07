@@ -391,7 +391,18 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .msg-tx p{margin:0 0 11px} .msg-tx p:last-child{margin-bottom:0}
 .msg-tx strong{color:var(--gold); font-weight:500}
 .msg-tx code{font-family:var(--mono); font-size:11.5px; color:var(--gold); background:var(--ink-3); padding:1px 5px; border-radius:2px}
-.msg-tx ul{margin:0 0 11px; padding-left:17px} .msg-tx li{margin-bottom:6px}
+.msg-tx ul,.msg-tx ol{margin:0 0 11px; padding-left:17px} .msg-tx li{margin-bottom:6px}
+.msg-tx li>ul,.msg-tx li>ol{margin:6px 0 0} .msg-tx li:last-child{margin-bottom:0}
+/* One weight for every ATX level -- a 13.5px chat bubble has no room for a
+   six-step heading scale, and the model only ever used # and ## anyway. */
+.msg-tx h4{font-family:var(--mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted-2); font-weight:400; margin:0 0 9px}
+.msg-tx h4:not(:first-child){margin-top:16px}
+.msg-tx .md-tw{overflow-x:auto; margin:0 0 11px} /* narrow bubbles: scroll the table, don't crush the column widths */
+.msg-tx table{border-collapse:collapse; font-size:12px; line-height:1.5; min-width:100%}
+.msg-tx th,.msg-tx td{padding:5px 9px 5px 0; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; white-space:nowrap}
+.msg-tx th{font-family:var(--mono); font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted-2); font-weight:400; border-bottom-color:var(--line-2)}
+.msg-tx tbody tr:last-child td{border-bottom:none}
+.msg-tx>*:last-child{margin-bottom:0}
 .msg-src{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); margin-top:12px; padding-top:10px; border-top:1px solid var(--line); letter-spacing:.03em}
 .typing{display:flex; gap:4px; padding:5px 0}
 .typing i{width:5px; height:5px; border-radius:50%; background:var(--muted-2); animation:blink 1.3s infinite}
@@ -3671,35 +3682,124 @@ function addMsg(who, html){
   LOG.appendChild(m); LOG.scrollTop=LOG.scrollHeight;
   return m;
 }
-// Escape FIRST, then transform -- markdown syntax is matched and wrapped
-// on the already-escaped string, so raw '<'/'>' from the model or a user
-// can never survive into the HTML (they've already become &lt;/&gt; before
-// any tag-producing regex runs). Bold consumes ** pairs before italics
-// ever runs, so a real ** sequence can't be seen as two stray *s by the
-// italics regex. Only **bold**, *italics*, and '- '/'* ' bullet lists
-// are supported -- proportional to what the system prompt actually asks
-// the model to produce, not a full markdown spec. No link syntax: a
-// markdown link's URL is caller-controlled text, and turning it into a
-// real href would reopen exactly the injection risk escaping closes.
-function inlineMd(escapedLine){
-  return escapedLine
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>');
+/* Escape FIRST, then transform -- markdown syntax is matched and wrapped on
+   the already-escaped string, so raw '<'/'>' from the model or a user can
+   never survive into the HTML (they've already become &lt;/&gt; before any
+   tag-producing regex runs). escapeHtml() runs exactly once, on the whole
+   reply, at the top of renderReply(); nothing below it ever re-escapes or
+   un-escapes, and every helper here takes already-escaped text.
+
+   What is supported, and why: measured against 32 real replies sampled from
+   the live deployed chat (two roles, single- and multi-turn) --
+
+     **bold**          28/32   *italic*        1/32
+     inline `code`     14/32   top-level bullets 14/32
+     ATX headings #    5/32    | tables |      5/32
+     numbered lists    4/32    indented sub-bullets 1/32
+
+   Deliberately NOT supported, with the same evidence:
+   - _italic_ / __bold__ (0/32). Adding them would be actively harmful here:
+     14/32 replies name snake_case columns (gdd_cumulative_calibrated,
+     vpd_peak_kpa, dtr_f), which an underscore rule would chew into
+     gdd<em>cumulative</em>calibrated.
+   - ``` fences (0/32), > blockquotes (0/32), --- rules (0/32). A fence also
+     spans blank lines, so supporting it would mean pre-splitting before the
+     paragraph split -- real complexity for a construct the model never
+     produced. All three still render as literal text, exactly as today.
+     (Note for anyone adding blockquotes later: '>' is already '&gt;' by the
+     time any of this runs.)
+   - [links](url) (0/32). Unchanged reasoning: a markdown link's URL is
+     caller-controlled text, and turning it into a real href would reopen
+     exactly the injection risk escaping closes. */
+
+/* Emphasis runs over a whole paragraph BLOCK, not line by line, so a **bold**
+   span may cross a soft newline (the <br>s go in afterwards, in flushPara).
+   Order matters twice over: ***both*** must be consumed before ** or *, or
+   the leftovers misnest as <strong><em>x</strong></em>; and the (?=\S)/\S
+   flanking guards stop a lone asterisk from pairing with a distant one --
+   a real shape in sampled output, where the model footnoted a table cell
+   "2026*" and then opened a line with "*2026 not season-complete". */
+function mdEmphasis(s){
+  return s
+    .replace(/\*\*\*(?=\S)([\s\S]*?\S)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(?=\S)([^*]*?\S)\*/g, '<em>$1</em>');
+}
+/* Code spans bind tighter than emphasis, so they're split out first and the
+   emphasis passes only ever see the segments BETWEEN them -- `a*b*c` stays
+   literal instead of turning into a<em>b</em>c. split() with one capture
+   group interleaves outside/inside segments, so odd indices are the code. */
+function inlineMd(escaped){
+  return escaped.split(/`([^`\n]+)`/)
+    .map((seg,i)=> i%2 ? `<code>${seg}</code>` : mdEmphasis(seg))
+    .join('');
+}
+
+const mdIsRow=l=> typeof l==='string' && l.includes('|') && /\S/.test(l);
+const mdIsDelim=l=> typeof l==='string' && l.includes('|') && /^[\s:|-]*-[\s:|-]*$/.test(l);
+const mdCells=r=> r.replace(/^\s*\|/,'').replace(/\|\s*$/,'').split('|').map(c=>c.trim());
+function mdTable(rows){
+  const head=mdCells(rows[0]).map(c=>`<th>${inlineMd(c)}</th>`).join('');
+  const body=rows.slice(1).map(r=>`<tr>${mdCells(r).map(c=>`<td>${inlineMd(c)}</td>`).join('')}</tr>`).join('');
+  // Wrapper carries the horizontal scroll: a wide table inside a narrow chat
+  // bubble should scroll, not squash. The class is a literal, never derived
+  // from model text -- it is the only attribute this renderer ever emits
+  // besides <ol start="N">, which is built from a parsed integer.
+  return `<div class="md-tw"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+/* One nesting level is all the sampled output ever used (a numbered item with
+   indented sub-bullets), but the stack generalises rather than special-casing
+   that shape. A nested list is emitted INSIDE its parent's still-open <li>,
+   so the markup stays well-formed. Each block is parsed independently, so an
+   "2." item that the model put in its own paragraph would otherwise restart
+   at 1 -- hence start=, built from a parsed integer only. */
+function mdList(items){
+  let html='', stack=[];
+  items.forEach(it=>{
+    const tag=it.ordered?'ol':'ul';
+    const d=Math.min(it.depth, stack.length); // never open an orphan level
+    while(stack.length > d+1) html+=`</li></${stack.pop()}>`;
+    if(stack.length===d){
+      html += (tag==='ol' && it.num>1) ? `<ol start="${it.num}">` : `<${tag}>`;
+      stack.push(tag);
+    } else {
+      html+='</li>';
+      if(stack[d]!==tag){ html+=`</${stack.pop()}><${tag}>`; stack.push(tag); }
+    }
+    html+=`<li>${inlineMd(it.text)}`;
+  });
+  while(stack.length) html+=`</li></${stack.pop()}>`;
+  return html;
+}
+function mdBlock(block){
+  const lines=block.split('\n');
+  let html='', para=[], items=[];
+  const flushPara=()=>{ if(para.length){ html+=`<p>${inlineMd(para.join('\n')).replace(/\n/g,'<br>')}</p>`; para=[]; } };
+  const flushList=()=>{ if(items.length){ html+=mdList(items); items=[]; } };
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    // Trailing #s are only a closing sequence when whitespace-separated, so
+    // a heading ending in a real '#' character keeps it.
+    const head=line.match(/^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/);
+    if(head){ flushPara(); flushList(); html+=`<h4>${inlineMd(head[2])}</h4>`; continue; }
+    // A table needs its delimiter row to identify it, and the model often
+    // writes one with no blank line after the heading above it -- so tables
+    // are detected as a RUN of lines inside a block, not as a whole block.
+    if(mdIsRow(line) && mdIsDelim(lines[i+1])){
+      flushPara(); flushList();
+      const rows=[line]; let j=i+2;
+      while(j<lines.length && mdIsRow(lines[j])) rows.push(lines[j++]);
+      html+=mdTable(rows); i=j-1; continue;
+    }
+    const li=line.match(/^(\s*)(?:[-*]|(\d+)[.)])\s+(.*)$/);
+    if(li){ flushPara(); items.push({ordered:li[2]!==undefined, num:parseInt(li[2],10)||1, depth:li[1].length>=2?1:0, text:li[3]}); continue; }
+    flushList(); para.push(line);
+  }
+  flushList(); flushPara();
+  return html;
 }
 function renderReply(text){
-  return escapeHtml(text).split(/\n{2,}/).filter(b=>b.trim()).map(block=>{
-    const lines=block.split('\n');
-    let html='', listBuf=[], textBuf=[];
-    const flushList=()=>{ if(listBuf.length){ html+=`<ul>${listBuf.map(li=>`<li>${inlineMd(li)}</li>`).join('')}</ul>`; listBuf=[]; } };
-    const flushText=()=>{ if(textBuf.length){ html+=`<p>${textBuf.map(inlineMd).join('<br>')}</p>`; textBuf=[]; } };
-    lines.forEach(line=>{
-      const m=line.match(/^[-*]\s+(.*)$/);
-      if(m){ flushText(); listBuf.push(m[1]); }
-      else { flushList(); textBuf.push(line); }
-    });
-    flushList(); flushText();
-    return html;
-  }).join('');
+  return escapeHtml(text).split(/\n{2,}/).filter(b=>b.trim()).map(mdBlock).join('');
 }
 
 function setChipsExpanded(expanded){

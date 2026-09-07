@@ -9,6 +9,22 @@ import { TOOLS, runTool } from "./tools.ts";
 // already allow (including zero rows), the same way the rest of the app works.
 // Stateless: no conversation history persisted server-side -- the frontend
 // sends the full message history every call and appends what we return.
+//
+// Responds with Server-Sent Events, one JSON object per `data:` line:
+//   {type:"text",  text}                    incremental answer text
+//   {type:"tool",  text}                    status line before tools run
+//   {type:"done",  appended, truncated}     terminal, and the ONLY success signal
+//   {type:"error", message}                 failure after streaming began
+// A single JSON object per event rather than named SSE `event:` lines: the
+// client hand-parses this, and one shape is fewer edge cases than two.
+//
+// Measured before building this: 39-80% of a reply's wall clock (median 54%)
+// happens after the first text token, so streaming hides roughly half the
+// perceived wait without changing total generation time. That the Edge runtime
+// -- and specifically withSupabase({auth:["user"]}), not just a bare handler --
+// passes a ReadableStream through unbuffered was verified against the real auth
+// path with a throwaway probe (~1000ms client gaps from a server sleeping
+// 1000ms; 401 without a JWT), not assumed.
 export default {
   fetch: withSupabase({ auth: ["user"] }, async (req, ctx) => {
     try {
@@ -46,143 +62,199 @@ export default {
       // more than any legitimate question over this tool set should need.
       const MAX_TOOL_ITERATIONS = 6;
 
-      for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-        const params: Anthropic.MessageCreateParamsNonStreaming = {
-          model: "claude-sonnet-5",
-          // Sonnet 5 runs adaptive thinking even with no `thinking` param, and
-          // budget_tokens (the old way to reserve thinking separately) is
-          // REMOVED on this model -- so thinking and the answer text compete
-          // for one shared max_tokens pool, with no way to partition it.
-          //
-          // `effort` is the lever that actually bounds thinking DEPTH, and it
-          // is doing the real work here -- not max_tokens. Measured live
-          // (throwaway operator, real data, this exact loop; 39 trials):
-          //   - At the old 2048 with default effort, a two-vintage comparison
-          //     spent the ENTIRE budget on thinking (2048/2048) and returned
-          //     no text at all.
-          //   - Raising max_tokens alone made it WORSE, not better: at 8000,
-          //     thinking simply expanded to fill the new ceiling (7,999 and
-          //     8,000 tokens observed), still returned blank on 2/11 trials,
-          //     and pushed one model call to 67.6s. The heaviest question
-          //     (5 vintages + a broad ask) failed 2/2 at 73.7s and 80.6s.
-          //     Adaptive thinking has no fixed appetite to "leave room" for.
-          //   - effort:"low" bounds it hard: peak thinking 0-400 tokens across
-          //     8 trials spanning every question shape, 0/8 truncated, and
-          //     two-vintage latency fell from 26-59s to 10.9-12.0s. The heavy
-          //     probe passed 2/2 at 22.3-27.5s, peaking at 896 thinking
-          //     tokens. Answer quality held: same three-part structure, same
-          //     figures (both effort levels independently reported 2024's GDD
-          //     ~27% above 2023's).
-          // 4000 is ~1.85x the largest total output ever observed under this
-          // config (2,156 tokens, heavy probe) -- real headroom without
-          // re-inviting the runaway. Step to effort:"medium" (measured: adds
-          // ~6-8s on two-vintage, still 0/6 truncated) if answers ever read as
-          // too shallow. The honest-fallback below stays as the backstop.
-          max_tokens: 4000,
-          system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
-          tools: TOOLS,
-          messages: withCacheBreakpoint([...conversation, ...newTurns]),
-        };
+      // Everything above here can still fail as an ordinary JSON error response,
+      // because nothing has been streamed yet. Everything below runs inside the
+      // stream, where headers are already sent and the only way to report a
+      // failure is an `error` event.
+      const encoder = new TextEncoder();
+      const body = new ReadableStream({
+        async start(controller) {
+          const send = (event: Record<string, unknown>) =>
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          let sawText = false;
 
-        // `output_config.effort` postdates this project's pinned SDK types
-        // (@anthropic-ai/sdk ^0.70, which is 0.70.1 -- the field lands in the
-        // 0.124 types), but the API accepts and honors it today: verified by
-        // direct measurement, with a clean dose-response across the three
-        // levels (default -> 1,189-8,000 thinking tokens, medium -> 398-687,
-        // low -> 0-400). Cast here rather than bumping the SDK 54 minor
-        // versions under a live feature -- insights-scan shares the same pin.
-        // If that pin is ever raised, delete the cast and move the field into
-        // the typed object above.
-        const response = await anthropic.messages.create(
-          { ...params, output_config: { effort: "low" } } as Anthropic.MessageCreateParamsNonStreaming,
-        );
+          try {
+            for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+              const params: Anthropic.MessageStreamParams = {
+                model: "claude-sonnet-5",
+                // Sonnet 5 runs adaptive thinking even with no `thinking` param, and
+                // budget_tokens (the old way to reserve thinking separately) is
+                // REMOVED on this model -- so thinking and the answer text compete
+                // for one shared max_tokens pool, with no way to partition it.
+                //
+                // `effort` is the lever that actually bounds thinking DEPTH, and it
+                // is doing the real work here -- not max_tokens. Measured live
+                // (throwaway operator, real data, this exact loop; 39 trials):
+                //   - At the old 2048 with default effort, a two-vintage comparison
+                //     spent the ENTIRE budget on thinking (2048/2048) and returned
+                //     no text at all.
+                //   - Raising max_tokens alone made it WORSE, not better: at 8000,
+                //     thinking simply expanded to fill the new ceiling (7,999 and
+                //     8,000 tokens observed), still returned blank on 2/11 trials,
+                //     and pushed one model call to 67.6s. The heaviest question
+                //     (5 vintages + a broad ask) failed 2/2 at 73.7s and 80.6s.
+                //     Adaptive thinking has no fixed appetite to "leave room" for.
+                //   - effort:"low" bounds it hard: peak thinking 0-400 tokens across
+                //     8 trials spanning every question shape, 0/8 truncated, and
+                //     two-vintage latency fell from 26-59s to 10.9-12.0s. The heavy
+                //     probe passed 2/2 at 22.3-27.5s, peaking at 896 thinking
+                //     tokens. Answer quality held: same three-part structure, same
+                //     figures (both effort levels independently reported 2024's GDD
+                //     ~27% above 2023's).
+                // 4000 is ~1.85x the largest total output ever observed under this
+                // config (2,156 tokens, heavy probe) -- real headroom without
+                // re-inviting the runaway. Step to effort:"medium" (measured: adds
+                // ~6-8s on two-vintage, still 0/6 truncated) if answers ever read as
+                // too shallow. The honest-fallback below stays as the backstop.
+                max_tokens: 4000,
+                system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+                tools: TOOLS,
+                messages: withCacheBreakpoint([...conversation, ...newTurns]),
+              };
 
-        // Counts only, no content. Cache effectiveness is invisible from the
-        // response body, and `cache_read_input_tokens` is the one field that
-        // separates "the breakpoint above is working" from "we are silently
-        // paying full price for the whole history on every turn" -- a
-        // regression there is otherwise completely silent. Logged per model
-        // turn so it is checkable in production, not only in a harness.
-        const usage = response.usage;
-        console.log("chat: usage " + JSON.stringify({
-          turn: i,
-          input: usage.input_tokens,
-          cache_read: usage.cache_read_input_tokens ?? 0,
-          cache_write: usage.cache_creation_input_tokens ?? 0,
-          output: usage.output_tokens,
-          stop: response.stop_reason,
-        }));
+              // `output_config.effort` postdates this project's pinned SDK types
+              // (@anthropic-ai/sdk ^0.70, which is 0.70.1 -- the field lands in the
+              // 0.124 types), but the API accepts and honors it today: verified by
+              // direct measurement, with a clean dose-response across the three
+              // levels (default -> 1,189-8,000 thinking tokens, medium -> 398-687,
+              // low -> 0-400). Cast here rather than bumping the SDK 54 minor
+              // versions under a live feature -- insights-scan shares the same pin.
+              // If that pin is ever raised, delete the cast and move the field into
+              // the typed object above.
+              const modelStream = anthropic.messages.stream(
+                { ...params, output_config: { effort: "low" } } as Anthropic.MessageStreamParams,
+              );
 
-        newTurns.push({ role: "assistant", content: response.content });
+              // finalMessage().usage DROPS output_tokens_details on this SDK
+              // version -- confirmed directly: the raw message_delta event carries
+              // {"output_tokens_details":{"thinking_tokens":33}} while
+              // finalMessage() reports no such field at all. docs/SECURITY.md's
+              // rule for this model says to verify thinking spend with exactly
+              // that field, so it has to be captured off the raw event or the
+              // check silently reports nothing forever.
+              let thinkingTokens = 0;
+              modelStream.on("streamEvent", (e) => {
+                if (e.type === "message_delta") {
+                  const t = (e.usage as { output_tokens_details?: { thinking_tokens?: number } } | undefined)
+                    ?.output_tokens_details?.thinking_tokens;
+                  if (typeof t === "number") thinkingTokens = t;
+                }
+              });
+              // Text is forwarded from every turn, not only the terminal one. In
+              // 39+ measured trials a tool_use turn emitted no text at all, so
+              // this is near-theoretical -- but if one ever does, showing what
+              // the model actually said beats the old behaviour of silently
+              // discarding it.
+              modelStream.on("text", (delta: string) => {
+                if (delta) { sawText = true; send({ type: "text", text: delta }); }
+              });
 
-        const hasToolUse = response.content.some((b) => b.type === "tool_use");
+              const response = await modelStream.finalMessage();
 
-        // A max_tokens cutoff that still contains tool_use blocks behaves
-        // like a normal tool_use turn, not a finished one: confirmed by
-        // direct reproduction against the API that a cutoff lands at (or
-        // just past) a tool_use block boundary, never mid-JSON -- the SDK
-        // only ever hands back complete, parseable tool_use blocks, even
-        // when one is missing a field the model didn't get to emit. Any
-        // such gap is already caught by each tool's own input validation
-        // in tools.ts (e.g. getSeries' bucket_hours check), which returns
-        // a normal is_error tool_result rather than throwing -- so it's
-        // safe to execute whatever calls did fit and loop for the rest,
-        // instead of discarding tool calls the model already committed to
-        // and silently returning nothing.
-        if (response.stop_reason === "tool_use" || (response.stop_reason === "max_tokens" && hasToolUse)) {
-          const toolResults: Anthropic.ToolResultBlockParam[] = [];
-          for (const block of response.content) {
-            if (block.type !== "tool_use") continue;
-            const result = await runTool(ctx.supabase, block.name, block.input as Record<string, unknown>);
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: block.id,
-              content: result.content,
-              is_error: result.isError,
-            });
+              // Counts only, no content. Cache effectiveness is invisible from the
+              // response body, and `cache_read_input_tokens` is the one field that
+              // separates "the breakpoint below is working" from "we are silently
+              // paying full price for the whole history on every turn" -- a
+              // regression there is otherwise completely silent. Logged per model
+              // turn so it is checkable in production, not only in a harness.
+              const usage = response.usage;
+              console.log("chat: usage " + JSON.stringify({
+                turn: i,
+                input: usage.input_tokens,
+                cache_read: usage.cache_read_input_tokens ?? 0,
+                cache_write: usage.cache_creation_input_tokens ?? 0,
+                output: usage.output_tokens,
+                thinking: thinkingTokens,
+                stop: response.stop_reason,
+              }));
+
+              newTurns.push({ role: "assistant", content: response.content });
+
+              const toolUses = response.content.filter(
+                (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+              );
+
+              // A max_tokens cutoff that still contains tool_use blocks behaves
+              // like a normal tool_use turn, not a finished one: confirmed by
+              // direct reproduction against the API that a cutoff lands at (or
+              // just past) a tool_use block boundary, never mid-JSON -- the SDK
+              // only ever hands back complete, parseable tool_use blocks, even
+              // when one is missing a field the model didn't get to emit. Any
+              // such gap is already caught by each tool's own input validation
+              // in tools.ts (e.g. getSeries' bucket_hours check), which returns
+              // a normal is_error tool_result rather than throwing -- so it's
+              // safe to execute whatever calls did fit and loop for the rest,
+              // instead of discarding tool calls the model already committed to
+              // and silently returning nothing.
+              if (response.stop_reason === "tool_use" || (response.stop_reason === "max_tokens" && toolUses.length)) {
+                // Emitted only AFTER the model has committed to these calls, so
+                // the status names work genuinely about to run rather than a
+                // guess. Derived server-side rather than client-side on purpose:
+                // tool arguments are model-controlled text, and building the
+                // string here from whitelisted tokens only means no
+                // model-authored string ever reaches the browser in this event.
+                const status = describeToolCalls(toolUses);
+                if (status) send({ type: "tool", text: status });
+
+                const toolResults: Anthropic.ToolResultBlockParam[] = [];
+                for (const block of toolUses) {
+                  const result = await runTool(ctx.supabase, block.name, block.input as Record<string, unknown>);
+                  toolResults.push({
+                    type: "tool_result",
+                    tool_use_id: block.id,
+                    content: result.content,
+                    is_error: result.isError,
+                  });
+                }
+                newTurns.push({ role: "user", content: toolResults });
+                continue;
+              }
+
+              // A genuinely terminal turn (no tool_use left to run) can still
+              // carry no usable text -- most commonly a max_tokens cutoff that
+              // landed entirely inside "thinking" before any text was written.
+              // Surface that honestly instead of finishing with an empty bubble.
+              if (!sawText) {
+                console.error("chat: model turn produced no usable text", {
+                  stop_reason: response.stop_reason,
+                  blockTypes: response.content.map((b) => b.type),
+                });
+                send({
+                  type: "text",
+                  text: response.stop_reason === "max_tokens"
+                    ? "That answer needed more room than I had to work with -- try narrowing the question (a specific block, vintage, or metric) and I'll try again."
+                    : "I wasn't able to put together an answer for that -- try rephrasing the question.",
+                });
+              }
+
+              // `truncated` rides on the done event rather than being concatenated
+              // onto the reply the way it used to be: by this point the text has
+              // already been streamed, so the note has to be appended client-side.
+              send({
+                type: "done",
+                appended: newTurns,
+                truncated: response.stop_reason === "max_tokens",
+              });
+              return;
+            }
+
+            send({ type: "error", message: "conversation needed too many tool calls to resolve" });
+          } catch (err) {
+            console.error("chat: stream failed", err);
+            send({ type: "error", message: "unexpected error" });
+          } finally {
+            controller.close();
           }
-          newTurns.push({ role: "user", content: toolResults });
-          continue;
-        }
+        },
+      });
 
-        const reply = response.content
-          .filter((b): b is Anthropic.TextBlock => b.type === "text")
-          .map((b) => b.text)
-          .join("\n");
-
-        // A genuinely terminal turn (no tool_use left to run) can still
-        // carry no usable text -- most commonly a max_tokens cutoff that
-        // landed entirely inside "thinking" before any text was written.
-        // Surface that honestly instead of letting an empty string reach
-        // the frontend, which silently renders as "(no response)" with
-        // no indication anything went wrong.
-        if (!reply.trim()) {
-          console.error("chat: model turn produced no usable text", {
-            stop_reason: response.stop_reason,
-            blockTypes: response.content.map((b) => b.type),
-          });
-          const honest = response.stop_reason === "max_tokens"
-            ? "That answer needed more room than I had to work with -- try narrowing the question (a specific block, vintage, or metric) and I'll try again."
-            : "I wasn't able to put together an answer for that -- try rephrasing the question.";
-          return Response.json({ reply: honest, appended: newTurns }, { status: 200 });
-        }
-
-        // Plain text, deliberately not wrapped in markdown emphasis. (The
-        // original reason -- "the renderer only supports **bold**, not
-        // *italics*" -- is now stale: it handles bold, italics, bold-italic,
-        // inline code, headings, ordered/nested lists and tables. Kept plain
-        // anyway: this is the app speaking, not the model, and it shouldn't
-        // borrow the model's formatting voice.)
-        const truncationNote = response.stop_reason === "max_tokens"
-          ? "\n\n(Cut off before I could finish -- ask me to continue if you'd like the rest.)"
-          : "";
-        return Response.json({ reply: reply + truncationNote, appended: newTurns }, { status: 200 });
-      }
-
-      return Response.json(
-        { error: "conversation needed too many tool calls to resolve" },
-        { status: 500 },
-      );
+      return new Response(body, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        },
+      });
     } catch (err) {
       console.error("chat: unexpected error", err);
       return Response.json({ error: "unexpected error" }, { status: 500 });
@@ -190,8 +262,70 @@ export default {
   }),
 };
 
+// Every token below is either a hardcoded label or a value that passed a
+// whitelist -- nothing the model wrote is ever interpolated into the status
+// line. An unrecognised tool, metric, block or vintage degrades to the plain
+// tool label (or is dropped entirely), never to a canned phrase describing work
+// that isn't happening.
+const TOOL_LABELS: Record<string, string> = {
+  get_derived_series: "climate data",
+  get_series: "sensor readings",
+  get_anomalies: "anomaly checks",
+  get_lot_analyses: "lab analyses",
+  get_vessels: "tank inventory",
+  get_labour_summary: "labour records",
+};
+const METRIC_LABELS: Record<string, string> = {
+  air_temp: "air temperature",
+  soil_moisture: "soil moisture",
+  soil_temp: "soil temperature",
+  humidity: "humidity",
+  wind_speed: "wind speed",
+  precip: "precipitation",
+  solar: "solar radiation",
+  uv: "UV",
+  irrigation_volume: "irrigation volume",
+};
+
+function joinList(xs: string[]): string {
+  if (xs.length <= 1) return xs[0] ?? "";
+  return `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
+}
+
+function describeToolCalls(blocks: Anthropic.ToolUseBlock[]): string | null {
+  // Grouped by tool so two get_derived_series calls read "climate data for 2022
+  // and 2023" rather than repeating the phrase once per call.
+  const groups = new Map<string, { vintages: Set<string>; scopes: Set<string>; metrics: Set<string> }>();
+  for (const b of blocks) {
+    const label = TOOL_LABELS[b.name];
+    if (!label) continue;
+    const input = (b.input ?? {}) as Record<string, unknown>;
+    const g = groups.get(label) ?? { vintages: new Set(), scopes: new Set(), metrics: new Set() };
+
+    const vintage = input.vintage;
+    if (typeof vintage === "number" && Number.isInteger(vintage) && vintage >= 2000 && vintage <= 2100) {
+      g.vintages.add(String(vintage));
+    }
+    const scope = input.block ?? input.block_id;
+    if (typeof scope === "string" && /^B[1-9]$/.test(scope)) g.scopes.add(scope);
+    const metric = input.metric;
+    if (typeof metric === "string" && METRIC_LABELS[metric]) g.metrics.add(METRIC_LABELS[metric]);
+
+    groups.set(label, g);
+  }
+  if (groups.size === 0) return null;
+
+  const parts: string[] = [];
+  for (const [label, g] of groups) {
+    const head = g.metrics.size ? joinList([...g.metrics]) : label;
+    const quals = [...g.scopes, ...g.vintages];
+    parts.push(quals.length ? `${head} for ${joinList(quals)}` : head);
+  }
+  return `Reading ${joinList(parts)}`;
+}
+
 // A second cache breakpoint, on the GROWING END of the conversation, alongside
-// the static one on the system block. The system breakpoint only ever covers
+// the static one on the system block. The system breakpoint only ever covered
 // tools+system -- measured at 3,417 tokens, about 1.3% of what a real
 // conversation actually sends. Everything expensive is in `messages`: a single
 // get_derived_series tool_result is 35KB+, and because this function is

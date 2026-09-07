@@ -403,6 +403,11 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .msg-tx th{font-family:var(--mono); font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted-2); font-weight:400; border-bottom-color:var(--line-2)}
 .msg-tx tbody tr:last-child td{border-bottom:none}
 .msg-tx>*:last-child{margin-bottom:0}
+/* App voice, never the model's: the tool-phase status line, the truncation
+   note, and the incomplete-stream marker. Deliberately mono/uppercase so they
+   never read as part of the answer. */
+.msg-tx .msg-status{font-family:var(--mono); font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted-2); margin-bottom:9px}
+.msg-tx .msg-note{font-family:var(--mono); font-size:10px; letter-spacing:.04em; line-height:1.6; color:var(--muted-2); margin:12px 0 0; padding-top:9px; border-top:1px solid var(--line)}
 .msg-src{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); margin-top:12px; padding-top:10px; border-top:1px solid var(--line); letter-spacing:.03em}
 .typing{display:flex; gap:4px; padding:5px 0}
 .typing i{width:5px; height:5px; border-radius:50%; background:var(--muted-2); animation:blink 1.3s infinite}
@@ -3842,26 +3847,107 @@ function renderChipPanel(groups){
   });
 }
 
+// "Is the reader parked at the bottom?" -- measured BEFORE any DOM mutation,
+// because reading scrollHeight after innerHTML has already grown gives the new
+// height and would report everyone as scrolled-up. 40px of slack absorbs
+// sub-pixel/rounding drift without needing an exact match.
+const atLogBottom=()=> LOG.scrollHeight - LOG.scrollTop - LOG.clientHeight < 40;
+
 async function ask(q){
   if(!q.trim()) return;
   if(chipsExpanded) setChipsExpanded(false); // collapses on every send, not just the first -- toggle stays reachable
   addMsg('u',`<p>${escapeHtml(q)}</p>`);
   const t=addMsg('a','<div class="typing"><i></i><i></i><i></i></div>');
-  chatHistory.push({role:'user', content:q});
-  const {data, error} = await sb.functions.invoke('chat', {body:{messages:chatHistory}});
+  const tx=t.querySelector('.msg-tx');
+
+  // BUILD-THEN-COMMIT. chatHistory is not touched until a `done` event actually
+  // arrives, replacing the old push-then-pop(). That made "never persist a
+  // broken turn" structural rather than a compensating action -- and it matters
+  // more with streaming, because a stream can die AFTER text is on screen. The
+  // frontend cannot repair that case even in principle: the tool_use/tool_result
+  // turn pairs live server-side and are only ever sent as part of `appended`, so
+  // a synthesised partial turn would be missing its pairs and 400 the next
+  // request.
+  const pending=[...chatHistory,{role:'user', content:q}];
+
+  let buf='', status='', done=null, failed=null, frame=null;
+
+  // Repaint on an animation frame, not per delta: deltas arrive far faster than
+  // the display refreshes, and renderReply() is a whole-string parse each time.
+  const paint=()=>{
+    frame=null;
+    const stick=atLogBottom();
+    // Status only ever renders while there is no text yet, so "cleared on the
+    // first text delta" is structural rather than a separate step. It is app
+    // voice -- plain escaped text, never through renderReply().
+    tx.innerHTML = buf
+      ? renderReply(buf)
+      : (status?`<div class="msg-status">${escapeHtml(status)}</div>`:'')+'<div class="typing"><i></i><i></i><i></i></div>';
+    if(stick) LOG.scrollTop=LOG.scrollHeight; // only follow a reader who was already at the bottom
+  };
+  const schedule=()=>{ if(frame===null) frame=requestAnimationFrame(paint); };
+
+  const {data, error} = await sb.functions.invoke('chat', {body:{messages:pending}});
   if(error){
     let message=error.message;
     if(error.context && typeof error.context.json==='function'){
       try{ const body=await error.context.json(); if(body?.error) message=body.error; }catch{}
     }
     console.error('ask: chat function failed', error);
-    t.querySelector('.msg-tx').innerHTML = `<p>Something went wrong reaching the assistant.<br><code>${escapeHtml(message)}</code></p>`;
-    chatHistory.pop(); // drop the unanswered turn so a retry doesn't duplicate it
+    tx.innerHTML = `<p>Something went wrong reaching the assistant.<br><code>${escapeHtml(message)}</code></p>`;
+    return; // pending discarded -- chatHistory never saw this turn
+  }
+
+  if(!data || typeof data.body?.getReader!=='function'){
+    console.error('ask: expected an SSE stream, got', data);
+    tx.innerHTML = `<p>Something went wrong reaching the assistant.<br><code>unexpected response format</code></p>`;
     return;
   }
-  chatHistory.push(...data.appended);
-  t.querySelector('.msg-tx').innerHTML = renderReply(data.reply || '(no response)');
-  LOG.scrollTop=LOG.scrollHeight;
+
+  const reader=data.body.getReader(), dec=new TextDecoder();
+  let sse=''; // partial-line buffer -- NOT optional: a real chunk boundary was
+              // observed splitting a payload mid-string ({"i":2,"role":"operato),
+              // so a read() cannot be assumed to contain whole events.
+  try{
+    for(;;){
+      const {done:streamDone, value} = await reader.read();
+      if(streamDone) break;
+      sse += dec.decode(value,{stream:true});
+      let cut;
+      while((cut=sse.indexOf('\n\n'))>=0){
+        const frame_=sse.slice(0,cut); sse=sse.slice(cut+2);
+        const line=frame_.split('\n').find(l=>l.startsWith('data:'));
+        if(!line) continue;
+        let ev; try{ ev=JSON.parse(line.slice(5)); }catch{ continue; }
+        if(ev.type==='text'){ buf+=ev.text; status=''; schedule(); }
+        else if(ev.type==='tool'){ if(!buf){ status=ev.text; schedule(); } } // never replace text already on screen
+        else if(ev.type==='done'){ done=ev; }
+        else if(ev.type==='error'){ failed=ev.message||'unexpected error'; }
+      }
+    }
+  }catch(err){
+    console.error('ask: stream interrupted', err);
+    failed=err?.message||'connection lost';
+  }
+
+  if(frame!==null){ cancelAnimationFrame(frame); frame=null; }
+  const stick=atLogBottom();
+  if(done && !failed){
+    // The ONLY success path, and the only place chatHistory is written.
+    chatHistory=pending.concat(done.appended||[]);
+    tx.innerHTML = renderReply(buf||'(no response)')
+      + (done.truncated?'<p class="msg-note">Cut off before I could finish — ask me to continue if you’d like the rest.</p>':'');
+  } else if(buf){
+    // Partial text stays: discarding something the reader may already have used
+    // is worse than keeping it. But the marker has to name BOTH facts, because a
+    // visible answer that silently isn't in context is exactly the kind of
+    // misleading UI state this project refuses to ship.
+    tx.innerHTML = renderReply(buf)
+      + '<p class="msg-note">Connection lost — this answer is incomplete, and I won’t remember it in follow-up questions. Ask again to retry.</p>';
+  } else {
+    tx.innerHTML = `<p>Something went wrong reaching the assistant.<br><code>${escapeHtml(failed||'no response')}</code></p>`;
+  }
+  if(stick) LOG.scrollTop=LOG.scrollHeight;
 }
 $('#send').onclick=()=>{ask($('#chatin').value); $('#chatin').value=''; $('#chatin').style.height='auto';};
 $('#chatin').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault(); $('#send').click();}});

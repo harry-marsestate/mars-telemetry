@@ -3725,14 +3725,30 @@ function mdEmphasis(s){
     .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(?=\S)([^*]*?\S)\*/g, '<em>$1</em>');
 }
-/* Code spans bind tighter than emphasis, so they're split out first and the
-   emphasis passes only ever see the segments BETWEEN them -- `a*b*c` stays
-   literal instead of turning into a<em>b</em>c. split() with one capture
-   group interleaves outside/inside segments, so odd indices are the code. */
+/* Code spans bind tighter than emphasis, so they're LIFTED OUT to a
+   placeholder before the emphasis passes and put back afterwards -- `a*b*c`
+   stays literal instead of turning into a<em>b</em>c.
+
+   Lifting, not splitting, is the whole point, and this was originally got
+   wrong: splitting the string on code spans and transforming the segments
+   between them cut the text at every code boundary, so the two halves of
+   **`vpd_kpa`** landed in different segments and could never pair -- the
+   bold rendered as literal asterisks. That escaped a 32-reply sample of real
+   model output (which happens to contain zero emphasis-wrapped code spans)
+   and was only caught by the live production browser check. A placeholder
+   keeps the string whole, so emphasis can span, wrap, or sit inside a code
+   span exactly as it would anywhere else.
+
+   The placeholder is collision-proof by construction rather than by luck:
+   inlineMd only ever receives already-escaped text, in which '<' cannot
+   appear at all (escapeHtml turned every one into '&lt;' before any of this
+   ran), so a '<N>' token cannot occur in real text or be forged by it. The
+   put-back regex only matches all-digit tags, which none of the tags
+   mdEmphasis emits ever are. */
 function inlineMd(escaped){
-  return escaped.split(/`([^`\n]+)`/)
-    .map((seg,i)=> i%2 ? `<code>${seg}</code>` : mdEmphasis(seg))
-    .join('');
+  const code=[];
+  const lifted=escaped.replace(/`([^`\n]+)`/g, (_,c)=>`<${code.push(c)-1}>`);
+  return mdEmphasis(lifted).replace(/<(\d+)>/g, (_,i)=>`<code>${code[i]}</code>`);
 }
 
 const mdIsRow=l=> typeof l==='string' && l.includes('|') && /\S/.test(l);

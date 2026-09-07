@@ -2214,25 +2214,62 @@ therefore found by scanning for a row followed by a delimiter row and
 consuming forward, so a table can start mid-block and a paragraph can follow
 it in the same block.
 
-**Adversarial testing: 198 cases, re-run after every regex change, not once
+**Adversarial testing: 220 cases, re-run after every regex change, not once
 at the end.** 11 injection payloads (`<img src=x onerror=alert(1)>`,
 `<script>`, `<svg/onload>`, `<iframe srcdoc>`, `javascript:` hrefs,
 attribute-breakout `">` and `'>` variants, `<style>`, `<body onload>`,
-inline event handlers) crossed with 18 formatting constructs (bold, italic,
+inline event handlers) crossed with 20 formatting constructs (bold, italic,
 `***`, nested emphasis, bullets, numbered, indented, headings, headings with
-bold, inline code, code plus bold, tables, tables with code, multi-block,
-bold across a newline, unclosed bold, asterisk soup, plain). Each case
-asserts four things, not just "no alert fired": an element allowlist; **no
-attributes at all** beyond `<ol start="N">` (built from a parsed integer) and
-the table wrapper's literal `class="md-tw"`; well-formed tag nesting; and no
-raw angle bracket surviving outside an emitted tag.
+bold, inline code, code plus bold, bold WRAPPING code, placeholder forgery,
+tables, tables with code, multi-block, bold across a newline, unclosed bold,
+asterisk soup, plain). Each case asserts four things, not just "no alert
+fired": an element allowlist; **no attributes at all** beyond
+`<ol start="N">` (built from a parsed integer) and the table wrapper's
+literal `class="md-tw"`; well-formed tag nesting; and no raw angle bracket
+surviving outside an emitted tag.
 
 Before this round that suite scored **221 pass / 37 fail** - and worth being
 precise about what those 37 were: **none were injections**. The pre-fix
 renderer was XSS-safe; every failure was the `***` misnesting or a construct
-rendering as literal text. Final state: **258/258 passing**, and the
+rendering as literal text. Final state: **290/290 passing**, and the
 well-formed-nesting assertion is new this round precisely because the `***`
 case proved a renderer can be injection-safe and still emit malformed markup.
+
+**The 32-reply sample was not sufficient, and the live production check is
+what proved it - recorded because the sampling method above could otherwise
+read as more complete than it was.** The first version of this round's fix
+handled code spans by `split()`ing the escaped text on them and running the
+emphasis passes over the segments in between. That is correct for `` `a*b*c` ``
+(the asterisks inside a code span must stay literal) and wrong for anything
+where emphasis *wraps* a code span: splitting cut the string at every code
+boundary, so the two halves of ``**`vpd_kpa`**`` landed in different segments,
+never paired, and rendered as **literal asterisks** - the exact symptom
+originally reported, arrived at through a mechanism nobody had proposed.
+
+It passed all 258 tests, passed the local real-browser battery, and passed
+because the 32 sampled replies contain **zero** instances of emphasis
+wrapping a code span - verified by grep, not assumed. It surfaced on the
+first question asked against the merged production build ("What's the
+difference between `vpd_kpa` and `vpd_peak_kpa`?"), where the model
+naturally wrote ``**`vpd_kpa`**``.
+
+Fixed by LIFTING code spans to a placeholder before the emphasis passes and
+putting them back after, instead of splitting on them - the string stays
+whole, so emphasis can wrap, span, or sit inside a code span normally. The
+placeholder is `<N>`, collision-proof by construction rather than by luck:
+`inlineMd()` only ever receives already-escaped text, in which `<` cannot
+appear at all, so the token cannot occur in real model text or be forged by
+it. Two adversarial constructs were added for exactly that (`bold wrapping
+code`, `placeholder forgery`) plus ten rendering cases covering emphasis
+around code in paragraphs, headings, bullets, tables and `***`.
+
+RULE: a frequency-based corpus tells you which constructs to support; it does
+NOT tell you which *combinations* of them are broken, because a combination
+absent from the corpus is untested rather than safe. Enumerate the pairwise
+interactions of whatever the renderer handles - emphasis x code, emphasis x
+table cell, code x heading - as deliberate test cases, and treat the live
+post-merge check as a real verification step that can still fail, not as a
+formality after a green suite.
 
 Verified again in a real browser (real Chrome, the branch's own
 `web/index.html`, live chat function, throwaway operator, session injected

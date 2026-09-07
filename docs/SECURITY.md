@@ -2043,3 +2043,209 @@ failure - `select current_user` settles it in one query. This is the same
 "0 rows is ambiguous, not proof" hazard already on record for
 `anomalies_eval`'s DISTINCT ON tie, reached through an entirely different
 mechanism.
+
+## Chat markdown renderer: three rounds of extension, one unchanged safety invariant - and a hypothesis that was real but wasn't the bug
+
+**This is the first documentation this code path has received**, confirmed by
+grep rather than assumed: `docs/SECURITY.md` had zero hits for `markdown`,
+`escapeHtml`, `inlineMd`, `renderReply`, `xss`, `injection`, `italic` or
+`bold` before this entry. Every `innerHTML` hit in the file belongs to the
+panel re-render entries above, which are a different concern entirely. So
+there is nothing here to cross-reference - the two prior rounds are recorded
+only in their commit messages, which is why this entry covers all three
+rather than just the latest.
+
+`renderReply()` turns the chat model's reply text into HTML that goes
+straight into `.msg-tx` via `innerHTML`. It is the only place in this app
+where LLM-generated text becomes markup, so it is the one renderer where a
+formatting bug and a security bug live in the same function.
+
+| commit | date | what changed |
+|---|---|---|
+| `48168d2` | 2026-08-17 | `renderReply()` born - paragraph splitting only, no markdown at all |
+| `719cd43` | 2026-09-02 | `inlineMd()` added: `**bold**` plus `- `/`* ` bullet lists |
+| `94b88ae` | 2026-09-03 | `*italics*` -> `<em>`, chained after the bold pass |
+| `e0e55e0` | 2026-09-07 | this round: whole-block transform, inline code, headings, tables, ordered/nested lists |
+
+**The one constant across all three extensions: escape FIRST, then
+transform.** `escapeHtml()` runs exactly once, on the whole reply, at the top
+of `renderReply()`, before any tag-producing regex has seen the string - so a
+raw `<` or `>` from the model (or from a user, whose text is echoed back
+through the same history) is already `&lt;`/`&gt;` by the time anything can
+wrap it in a tag. No round has reordered this, and no helper below it
+re-escapes or un-escapes: every function in the chain takes already-escaped
+text as its contract. This round's restructure was the first one with real
+pressure to break that - block-level constructs (tables, headings, lists)
+want to slice the text into cells and items *after* the fact - and the
+invariant held because the slicing happens on the escaped string too, never
+on the original.
+
+RULE: any future extension to this renderer must keep `escapeHtml()` as the
+single first operation on the whole reply. A construct that needs the raw
+text to parse correctly is a construct that should not be supported here.
+
+**Investigation method this round: 32 real replies sampled from the LIVE
+deployed chat, not synthetic test cases.** Three sampling rounds through
+throwaway operator *and* customer accounts, single- and multi-turn, against
+real Supabase data over the real RLS path. Each raw pre-render reply was
+logged beside what the shipped `renderReply()` actually produced with it. The
+renderer under test was extracted verbatim from `web/index.html`'s own source
+text by the harness - the same zero-drift discipline the chat-latency entry
+above used for `tools.ts` - so "before" and "after" were scored by identical
+code, not by a retyped copy that could silently diverge.
+
+That measurement, not a reading of the CommonMark spec, decided what to
+build:
+
+| construct | replies | construct | replies |
+|---|---|---|---|
+| `**bold**` | 28/32 | ATX headings `#`/`##` | 5/32 |
+| inline `` `code` `` | 14/32 | `\| tables \|` | 5/32 |
+| top-level bullets | 14/32 | numbered lists | 4/32 |
+| `*italic*` | 1/32 | indented sub-bullets | 1/32 |
+| `***bi***`, `_i_`, `__b__`, fences, `>`, `---`, `[link]()` | 0/32 each | | |
+
+Literal markdown was visible in **21 of the 32** replies before this round
+and **0 of 32** after.
+
+**THE CORRECTED HYPOTHESIS - the reported symptom was not what the named
+cause would have produced.** The bug report was that bold sometimes still
+rendered as a literal `**`, and the leading hypothesis was that `inlineMd()`
+being applied per line (`textBuf.map(inlineMd).join('<br>')`) broke any bold
+span crossing a soft newline inside a paragraph.
+
+That code path was real and live, confirmed by measurement rather than
+inspection: **17 paragraph blocks across 9 of the 32 replies** contained a
+soft newline that reached a `<br>`, and the pre-fix renderer emitted 62
+`<br>`s across the corpus. (An earlier count of 14 blocks was taken before
+the third sampling round and is superseded by these figures - recorded here
+so the smaller number isn't later mistaken for a contradiction.)
+
+It was still not the cause of the reported bug. Across those same 32 replies:
+`**bold**` appeared in 28 and rendered correctly in **all 28**; **zero** bold
+pairs straddled a soft newline; **zero** lines carried an unclosed `**`. The
+defects the sampling actually found were entirely different constructs -
+inline code rendered as literal backticks (14/32), headings as literal hashes
+(5/32), tables as a wall of pipe rows (5/32), numbered lists and indented
+sub-bullets as literal text (4/32 and 1/32) - plus a genuine
+`***bold italic***` case that produced misnested
+`<strong><em>x</strong></em>`, malformed markup the browser silently repairs.
+
+The whole-block restructure shipped anyway, because headings and tables need
+it and because it makes bold-across-a-newline work if the model ever does
+emit it. But it shipped as a *prerequisite*, not as the fix for the reported
+symptom, and the entry says so rather than letting a tidy narrative close the
+loop. The literal-`**` report remains unreproduced against 32 real replies;
+the most likely remaining mechanism is a reply truncated mid-bold (`index.ts`
+appends its truncation note to whatever text arrived, so an unclosed `**`
+would show), which was frequent before `afb076c` bounded thinking with
+`effort:"low"` and is now rare.
+
+RULE: a plausible-sounding hypothesis being technically confirmed as a real
+code path does not mean it is the actual root cause of a specific reported
+symptom. Both need independent verification - "this bug is real" and "this
+bug is THE bug" are different claims, and conflating them here would have
+shipped a fix that addressed nothing the user reported while leaving four
+larger, genuinely-reproducing defects untouched. The same discipline the
+`sensor_read` RLS entry above already names (isolate further rather than
+accepting the first plausible explanation), reached from the opposite
+direction: there the named suspect was real but only 15% of the cost; here
+the named suspect was real and 0% of the reported symptom.
+
+**A lone asterisk pairing across unrelated content - the real
+asterisk-survival case, and why it forced flanking guards.** One sampled
+reply footnoted a table cell as `| 2026* | ... |` and then opened a later
+line with `*2026 not season-complete - compare its Jul 28 GDD ...`. Under the
+old per-line pass these were two unpaired asterisks on two lines and stayed
+harmlessly literal. Moving emphasis to whole-block matching is exactly what
+would let them find each other and swallow everything between into a bogus
+`<em>`.
+
+A greedy/non-greedy tweak does not help: the failure is not about how much a
+matched pair consumes, it is about whether two unrelated asterisks should be
+treated as a pair at all. The fix is CommonMark's flanking rule - a delimiter
+only opens if the character after it is non-space, and only closes if the
+character before it is non-space:
+
+```js
+.replace(/\*\*\*(?=\S)([\s\S]*?\S)\*\*\*/g, '<strong><em>$1</em></strong>')
+.replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g,     '<strong>$1</strong>')
+.replace(/\*(?=\S)([^*]*?\S)\*/g,           '<em>$1</em>');
+```
+
+`2026*` fails the opening test (the next character is a space), so it can
+never pair with anything. Ordering carries the second half of the fix:
+`***` must be consumed before `**` or `*`, or the leftovers misnest.
+
+RULE: when widening the scope a text-transform regex matches over, check what
+previously-inert unmatched delimiters that widening newly brings into range.
+This one was only visible because the corpus was real model output - no
+hand-written test case would have thought to footnote a table cell.
+
+**Deliberate non-support, with the evidence for each.** These are decisions,
+not gaps:
+- `_italic_` / `__bold__`: **rejected on evidence, not just absence.** 0/32
+  occurrences, and 14/32 replies name snake_case database columns
+  (`gdd_cumulative_calibrated`, `vpd_peak_kpa`, `dtr_f`). An underscore
+  emphasis rule would chew `gdd_cumulative_calibrated` into
+  `gdd<em>cumulative</em>calibrated` - it would actively corrupt correct
+  output in nearly half of all replies to support a construct that appears in
+  none of them.
+- Fenced code blocks (0/32), `>` blockquotes (0/32), `---` horizontal rules
+  (0/32), `[links](url)` (0/32): left unsupported rather than speculatively
+  built. A
+  fence additionally spans blank lines, so it would need a pre-pass before
+  the paragraph split - real complexity for a construct the model never
+  produced. All continue to render as literal text, exactly as before. Links
+  keep their original reasoning unchanged: a markdown link's URL is
+  caller-controlled text, and turning it into a real `href` would reopen
+  precisely the injection risk escaping closes. Anyone adding blockquotes
+  later should note `>` is already `&gt;` by the time any of this runs.
+
+**Table detection is a run of lines INSIDE a block, not a whole block -
+driven by observed model behavior.** The obvious design (a block is a table
+if all its lines look like table rows) fails against what the model actually
+writes: in real output a `## Labor & Cost (Operator Data)` heading sits
+directly above its table with **no blank line between them**, so the heading
+and every row land in one `\n{2,}` block together. Whole-block detection
+would reject that block as "not a table" and render the entire thing as one
+`<p>` of pipes - which is exactly what the pre-fix renderer did. Tables are
+therefore found by scanning for a row followed by a delimiter row and
+consuming forward, so a table can start mid-block and a paragraph can follow
+it in the same block.
+
+**Adversarial testing: 198 cases, re-run after every regex change, not once
+at the end.** 11 injection payloads (`<img src=x onerror=alert(1)>`,
+`<script>`, `<svg/onload>`, `<iframe srcdoc>`, `javascript:` hrefs,
+attribute-breakout `">` and `'>` variants, `<style>`, `<body onload>`,
+inline event handlers) crossed with 18 formatting constructs (bold, italic,
+`***`, nested emphasis, bullets, numbered, indented, headings, headings with
+bold, inline code, code plus bold, tables, tables with code, multi-block,
+bold across a newline, unclosed bold, asterisk soup, plain). Each case
+asserts four things, not just "no alert fired": an element allowlist; **no
+attributes at all** beyond `<ol start="N">` (built from a parsed integer) and
+the table wrapper's literal `class="md-tw"`; well-formed tag nesting; and no
+raw angle bracket surviving outside an emitted tag.
+
+Before this round that suite scored **221 pass / 37 fail** - and worth being
+precise about what those 37 were: **none were injections**. The pre-fix
+renderer was XSS-safe; every failure was the `***` misnesting or a construct
+rendering as literal text. Final state: **258/258 passing**, and the
+well-formed-nesting assertion is new this round precisely because the `***`
+case proved a renderer can be injection-safe and still emit malformed markup.
+
+Verified again in a real browser (real Chrome, the branch's own
+`web/index.html`, live chat function, throwaway operator, session injected
+into `localStorage` rather than typed): across the 10-question battery, zero
+literal markdown; the complete set of attributes emitted anywhere was
+`div[class="md-tw"]` x6 and `ol[start="2|3|4"]`; and the adversarial payloads
+run through `renderReply()` in the live DOM produced **0** `script`/`img`/
+`iframe`/`svg`/`a`/`style` nodes, 0 unexpected tags and 0 dialogs, with every
+payload visible as inert text.
+
+RULE: for this renderer, "no injection" is a necessary test, not a sufficient
+one. Assert the element allowlist, the attribute allowlist, and well-formed
+nesting too - the `***` misnesting was *created* by `94b88ae`'s italics pass
+(before it, `***x***` merely left stray asterisks) and survived that round's
+own adversarial re-test, which checked that payloads stayed inert but never
+checked that the tags produced around them were well-formed.

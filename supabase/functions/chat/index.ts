@@ -81,7 +81,7 @@ export default {
           max_tokens: 4000,
           system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
           tools: TOOLS,
-          messages: [...conversation, ...newTurns],
+          messages: withCacheBreakpoint([...conversation, ...newTurns]),
         };
 
         // `output_config.effort` postdates this project's pinned SDK types
@@ -96,6 +96,22 @@ export default {
         const response = await anthropic.messages.create(
           { ...params, output_config: { effort: "low" } } as Anthropic.MessageCreateParamsNonStreaming,
         );
+
+        // Counts only, no content. Cache effectiveness is invisible from the
+        // response body, and `cache_read_input_tokens` is the one field that
+        // separates "the breakpoint above is working" from "we are silently
+        // paying full price for the whole history on every turn" -- a
+        // regression there is otherwise completely silent. Logged per model
+        // turn so it is checkable in production, not only in a harness.
+        const usage = response.usage;
+        console.log("chat: usage " + JSON.stringify({
+          turn: i,
+          input: usage.input_tokens,
+          cache_read: usage.cache_read_input_tokens ?? 0,
+          cache_write: usage.cache_creation_input_tokens ?? 0,
+          output: usage.output_tokens,
+          stop: response.stop_reason,
+        }));
 
         newTurns.push({ role: "assistant", content: response.content });
 
@@ -173,6 +189,66 @@ export default {
     }
   }),
 };
+
+// A second cache breakpoint, on the GROWING END of the conversation, alongside
+// the static one on the system block. The system breakpoint only ever covers
+// tools+system -- measured at 3,417 tokens, about 1.3% of what a real
+// conversation actually sends. Everything expensive is in `messages`: a single
+// get_derived_series tool_result is 35KB+, and because this function is
+// stateless the frontend replays the entire history on every question, so that
+// payload was re-sent and re-billed at full price on every later model turn AND
+// every later question.
+//
+// Measured over a real 4-turn conversation (throwaway operator, real data, this
+// exact loop): full-price input tokens 258,970 -> 12, cache reads 17,085 ->
+// 220,030, input-side cost down ~62% with cache writes counted at their 1.25x
+// rate rather than netted out. This is a COST lever, not a speed one -- wall
+// clock was indistinguishable, and the run that happened to be slower simply
+// generated 37% more output tokens.
+//
+// Built as an immutable copy on purpose. `newTurns` is handed back to the
+// frontend as `appended` and replayed verbatim on the next request, so
+// annotating a block in place would send our own breakpoint back to us next
+// turn; they would accumulate and eventually 400 against the API's limit of 4.
+// Nothing here writes to `conversation` or `newTurns`.
+//
+// Note the string -> block conversion below is only a shape change, not a
+// content change: the same user turn is sent as a bare string once it is no
+// longer last, and the cached prefix still matches (confirmed live -- an 85
+// token user message written to cache on one turn read back as part of a 3,502
+// token hit on the next).
+//
+// TTL caveat: `ephemeral` means 5 minutes. A user who leaves the tab idle
+// longer than that pays one fresh cache write on their next question and then
+// reads normally again -- the intended trade, not a regression.
+function withCacheBreakpoint(msgs: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+  if (!msgs.length) return msgs;
+  const cacheControl = { type: "ephemeral" as const };
+  const out = msgs.slice();
+  const last = out[out.length - 1];
+
+  if (typeof last.content === "string") {
+    out[out.length - 1] = {
+      ...last,
+      content: [{ type: "text", text: last.content, cache_control: cacheControl }],
+    };
+  } else if (Array.isArray(last.content) && last.content.length > 0) {
+    const blocks = last.content.slice();
+    const tail = blocks[blocks.length - 1];
+    // Only block types that can actually carry a breakpoint. In this loop the
+    // tail is always a tool_result (a tool turn) or a text block (the user
+    // question, converted above) -- but `thinking`/`redacted_thinking` are in
+    // the same union and cannot take cache_control, which tsc --strict
+    // correctly rejects. Anything else is left unmarked: no breakpoint is
+    // exactly the pre-change behaviour, so the fallback degrades to "no
+    // saving" rather than to a 400.
+    if (tail.type === "text" || tail.type === "tool_result") {
+      blocks[blocks.length - 1] = { ...tail, cache_control: cacheControl };
+      out[out.length - 1] = { ...last, content: blocks };
+    }
+  }
+  return out;
+}
 
 function resolveDisplayName(role: string, firstName: string | null, lastName: string | null): string | null {
   if (!firstName) return null;

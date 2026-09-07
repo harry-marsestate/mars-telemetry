@@ -47,13 +47,55 @@ export default {
       const MAX_TOOL_ITERATIONS = 6;
 
       for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-        const response = await anthropic.messages.create({
+        const params: Anthropic.MessageCreateParamsNonStreaming = {
           model: "claude-sonnet-5",
-          max_tokens: 2048,
+          // Sonnet 5 runs adaptive thinking even with no `thinking` param, and
+          // budget_tokens (the old way to reserve thinking separately) is
+          // REMOVED on this model -- so thinking and the answer text compete
+          // for one shared max_tokens pool, with no way to partition it.
+          //
+          // `effort` is the lever that actually bounds thinking DEPTH, and it
+          // is doing the real work here -- not max_tokens. Measured live
+          // (throwaway operator, real data, this exact loop; 39 trials):
+          //   - At the old 2048 with default effort, a two-vintage comparison
+          //     spent the ENTIRE budget on thinking (2048/2048) and returned
+          //     no text at all.
+          //   - Raising max_tokens alone made it WORSE, not better: at 8000,
+          //     thinking simply expanded to fill the new ceiling (7,999 and
+          //     8,000 tokens observed), still returned blank on 2/11 trials,
+          //     and pushed one model call to 67.6s. The heaviest question
+          //     (5 vintages + a broad ask) failed 2/2 at 73.7s and 80.6s.
+          //     Adaptive thinking has no fixed appetite to "leave room" for.
+          //   - effort:"low" bounds it hard: peak thinking 0-400 tokens across
+          //     8 trials spanning every question shape, 0/8 truncated, and
+          //     two-vintage latency fell from 26-59s to 10.9-12.0s. The heavy
+          //     probe passed 2/2 at 22.3-27.5s, peaking at 896 thinking
+          //     tokens. Answer quality held: same three-part structure, same
+          //     figures (both effort levels independently reported 2024's GDD
+          //     ~27% above 2023's).
+          // 4000 is ~1.85x the largest total output ever observed under this
+          // config (2,156 tokens, heavy probe) -- real headroom without
+          // re-inviting the runaway. Step to effort:"medium" (measured: adds
+          // ~6-8s on two-vintage, still 0/6 truncated) if answers ever read as
+          // too shallow. The honest-fallback below stays as the backstop.
+          max_tokens: 4000,
           system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
           tools: TOOLS,
           messages: [...conversation, ...newTurns],
-        });
+        };
+
+        // `output_config.effort` postdates this project's pinned SDK types
+        // (@anthropic-ai/sdk ^0.70, which is 0.70.1 -- the field lands in the
+        // 0.124 types), but the API accepts and honors it today: verified by
+        // direct measurement, with a clean dose-response across the three
+        // levels (default -> 1,189-8,000 thinking tokens, medium -> 398-687,
+        // low -> 0-400). Cast here rather than bumping the SDK 54 minor
+        // versions under a live feature -- insights-scan shares the same pin.
+        // If that pin is ever raised, delete the cast and move the field into
+        // the typed object above.
+        const response = await anthropic.messages.create(
+          { ...params, output_config: { effort: "low" } } as Anthropic.MessageCreateParamsNonStreaming,
+        );
 
         newTurns.push({ role: "assistant", content: response.content });
 

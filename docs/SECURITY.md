@@ -1239,16 +1239,14 @@ restored and independently re-verified via `information_schema`, then
 adversarially re-tested as `role authenticated` (not superuser) before
 being trusted.
 
-**Flagged, not fixed:**
-- `ingestion/mars_dbt/models/curated/anomalies.sql` - an orphaned dbt
-  model duplicating `anomalies_eval()`'s logic, with no `ref()` consumer
-  and no schedule (confirmed dead, not assumed). It has no `vpd_peak`
-  branch and will drift further out of sync now that one exists elsewhere.
-- `supabase/functions/chat/tools.ts` - `get_derived_series`'s tool
-  description text and its `.select(...)` column list both still name
-  only the original four derived fields (`gdd_cumulative`, `dtr_f`,
-  `vpd_kpa`, `et0_in`). Needs `vpd_peak_kpa` added whenever this tool is
-  next touched, or the chat can't be asked about peak-hour VPD at all.
+**Flagged at the time, both since RESOLVED in `aee5cd9` - checked directly
+against the working tree, not assumed from the commit message:**
+- `ingestion/mars_dbt/models/curated/anomalies.sql` - the orphaned dbt model
+  duplicating `anomalies_eval()`'s logic. Deleted; `models/curated/` now holds
+  only `daily_derived.sql`, `daily_weather.sql`, `labour_summary.sql`.
+- `supabase/functions/chat/tools.ts` - `get_derived_series` now names
+  `vpd_peak_kpa` in BOTH its tool description and its `.select(...)` list, so
+  the chat can be asked about peak-hour VPD.
 
 
 ## Soil moisture threshold (soil_below_refill, 15% -> 13.8%) corrected after the same real-data check DTR/VPD got - tracked item E closed
@@ -1784,3 +1782,91 @@ Two related features, investigated and built together since both touch `user_pro
 **One external limitation hit, not a defect: Supabase's project-wide email-send rate limit (`over_email_send_rate_limit`, `429`) blocked a full real `signUp()` browser test late in this session**, after many real signups across prior verification rounds this session exhausted it. Client-side validation (blocks empty names) was confirmed live regardless. The server-side half of the mechanism - `handle_new_user()` reading `raw_user_meta_data->>'first_name'`/`'last_name'` at priority 1 - was verified directly via the Admin API (which doesn't send email and so isn't subject to this limit), confirming a real row lands with `first_name='Nova', last_name='Bright', full_name=null` exactly as designed. Not verified in this round: the literal browser click-through of a full `signUp()` call hitting this exact code path end-to-end; worth a follow-up check once the rate limit window clears, not because there's a specific reason to doubt it; the two verified halves (form validation, trigger logic) are the same code on either side of the one call that couldn't complete.
 
 RULE: a view-switching function that adds a new overlay's "on" state needs the same addition mirrored into *every* other view-switching function's clearing list, not just the ones a manual click-through happens to visit - the same class of bug as the panel-append-only hazard above, just in the DOM-visibility layer instead of the render layer, and caught the same way: by a real end-to-end test hitting the path a code review would have had to trace by hand across five separate functions to catch.
+
+## Chat truncation/slowness: raising max_tokens made BOTH worse - `output_config.effort` was the real lever
+
+The chat's honest-fallback message ("That answer needed more room than I had
+to work with...") was firing frequently on ordinary questions, and the chat
+was generally slow. The obvious fix - raise `max_tokens` - was measured and
+found to be actively harmful. Recorded here specifically because the
+intuition is wrong and would otherwise be retried.
+
+**Why the shared budget can't be partitioned.** `claude-sonnet-5` runs
+adaptive thinking even with no `thinking` parameter, and `budget_tokens` (the
+old way to reserve a thinking allowance separate from output) is REMOVED on
+this model - it returns a 400. So thinking and the answer text draw from one
+shared `max_tokens` pool with no API-level way to split them. The prior fix
+(commit `047d83f`) made the blank case honest rather than silent, but never
+addressed the budget.
+
+**Measured, 39 real trials** - throwaway approved operator, real Supabase
+data over the real RLS path, the production loop reproduced exactly (real
+`tools.ts` imported directly via Node type-stripping; `buildSystemPrompt`
+extracted verbatim from `index.ts`, so neither was hand-retyped and could
+not drift):
+
+| config | n | hit max_tokens | returned blank | median wall | worst wall | peak thinking |
+|---|---|---|---|---|---|---|
+| 2048, default effort (pre-fix) | 2 | 2/2 | 2/2 | 24.0s | 25.9s | 2,048 |
+| 2048 + payload rounding only | 5 | 4/5 | 3/5 | 23.6s | 28.9s | 2,048 |
+| **8000**, default effort | 11 | 2/11 | 2/11 | 26.1s | **67.6s** | **8,000** |
+| 8000, default effort, heaviest Q | 2 | 2/2 | 2/2 | 77.2s | **80.6s** | **8,000** |
+| 4000 + `effort:"medium"` | 6 | 0/6 | 0/6 | 18.8s | 20.6s | 687 |
+| **4000 + `effort:"low"`** (shipped) | 20 | **0/20** | **0/20** | **11.8s** | **27.5s** | **896** |
+
+**The decisive finding: adaptive thinking has no fixed appetite to "leave
+room" for - it expands to fill whatever ceiling it is given.** At 2048 it
+spent 2,048 tokens thinking and returned no text. At 8000 it spent 7,999 and
+8,000 and *still* returned no text, while pushing single model calls to 67.6s
+and the heaviest question to 80.6s. Sizing a budget against previously
+observed thinking spend is therefore invalid reasoning on this model: the
+observation is a function of the ceiling, not of the question.
+
+**`effort` bounds thinking DEPTH, which is what was actually needed.** A
+clean dose-response confirms the parameter is honored rather than coincidence:
+same question, same data, default -> 1,189-8,000 thinking tokens, `medium` ->
+398-687, `low` -> 0-400. At `low`, two-vintage latency fell from 26-59s to
+10.9-12.0s and the four-vintage case from 49-67.6s to 18.1-22.1s.
+
+**Answer quality was checked, not assumed.** `low` preserved the system
+prompt's three-part structure, the operator persona, and the real figures -
+`low` and default independently reported 2024's GDD as ~27% above 2023's.
+Across 20 trials at `low`, every tool call arrived as a genuine `tool_use`
+block; the documented disabled-thinking failure mode (a tool call written
+into visible text instead) never appeared, and does not apply here anyway -
+thinking stays enabled at `low`, just shallow.
+
+**Latency attribution, since "the DB is slow" was the competing hypothesis
+and it is wrong.** Across all 100 tool calls in every battery, total tool/DB
+time was 22.4s against 903.9s of model time - **2.4% of wall clock**. The
+slowest single tool call in the entire run was 523ms. Loop iterations were
+not the driver either: all 39 trials resolved in exactly 2 model turns, never
+approaching `MAX_TOOL_ITERATIONS = 6`, so that cap was left untouched. The
+system prompt was also cleared of the "excessive tool fan-out" suspicion -
+calls were proportionate to the question (one `get_derived_series` per
+vintage asked about), not runaway.
+
+**The payload-rounding fix is real but secondary, and was isolated to prove
+it.** `get_derived_series` returned full double precision
+(`vpd_kpa: 0.2012390913710435`); rounding to display precision cut
+two-vintage input tokens 14.2% (43,124 -> 36,987 avg). Since input tokens
+dominate this route's bill (36-84K in vs ~700-2,200 out), that is the main
+*cost* lever. It is NOT a truncation fix: measured alone at 2048, 4/5 trials
+still hit max_tokens and 3/5 still returned blank.
+
+**One deliberate compromise on record.** `output_config.effort` postdates
+this project's pinned SDK types (`@anthropic-ai/sdk ^0.70`, resolving to
+0.70.1; the field lands in the 0.124 types). The API accepts and honors it
+today, so it ships as a single narrow cast at the call site - verified to
+typecheck clean under `tsc --strict` against 0.70.1 - rather than bumping the
+SDK 54 minor versions under a live feature that `insights-scan` shares the
+pin with. Raising that pin is the clean follow-up; when it happens, delete
+the cast and inline the field.
+
+RULE: on any model where thinking is adaptive and `budget_tokens` is
+unavailable, treat `max_tokens` as a safety ceiling, not a tuning dial -
+raising it grants thinking more room to consume and can degrade both latency
+and completion rate. Control thinking with `output_config.effort` and verify
+with `usage.output_tokens_details.thinking_tokens`, which is the only field
+that distinguishes "the model needed more room" from "the model spent the
+room it was given." A blank or truncated reply says nothing about which.

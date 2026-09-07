@@ -169,7 +169,14 @@ async function getSeries(supabase: any, input: Record<string, unknown>): Promise
     p_agg: agg ?? "avg",
   });
   if (error) return formatErrorForModel(error);
-  return { content: JSON.stringify(data), isError: false };
+  // series_bucketed's avg/sum aggregation returns full double precision
+  // (e.g. 18.383333333333333) -- measured live, this alone accounts for a
+  // meaningful share of a series call's token cost with zero benefit to the
+  // model, which never needs more than display-grade precision to compare
+  // buckets. Round to 2dp, matching this app's own fmt() display convention.
+  // deno-lint-ignore no-explicit-any
+  const rounded = (data as any[])?.map((row) => ({ ...row, v: row.v == null ? null : Math.round(row.v * 100) / 100 }));
+  return { content: JSON.stringify(rounded), isError: false };
 }
 
 // deno-lint-ignore no-explicit-any
@@ -187,7 +194,26 @@ async function getDerivedSeries(supabase: any, input: Record<string, unknown>): 
 
   const { data, error } = await query;
   if (error) return formatErrorForModel(error);
-  return { content: JSON.stringify(data), isError: false };
+  // Measured live: dtr_f/vpd_kpa/vpd_peak_kpa/et0_in come back at full double
+  // precision (e.g. vpd_kpa: 0.2012390913710435). A single vintage's ~214-row
+  // response is ~35KB, so a two-vintage comparison (2 calls in one turn) sent
+  // ~43K input tokens and a four-vintage one ~86K -- the single largest
+  // input-token cost in the tool set, and since input dominates this route's
+  // bill, its largest cost lever too. Rounding cut two-vintage input by a
+  // measured 14.2% (43,124 -> 36,987 tokens avg) at zero cost to the answers.
+  // It is NOT a truncation fix and was measured not to be one: with rounding
+  // alone at the old 2048 ceiling, 4/5 trials still hit max_tokens and 3/5
+  // still returned blank -- see index.ts's `effort` comment for what actually
+  // fixed that. gdd_cumulative is left as-is (already a clean running total).
+  // deno-lint-ignore no-explicit-any
+  const rounded = (data as any[])?.map((row) => ({
+    ...row,
+    dtr_f: row.dtr_f == null ? null : Math.round(row.dtr_f * 100) / 100,
+    vpd_kpa: row.vpd_kpa == null ? null : Math.round(row.vpd_kpa * 100) / 100,
+    vpd_peak_kpa: row.vpd_peak_kpa == null ? null : Math.round(row.vpd_peak_kpa * 100) / 100,
+    et0_in: row.et0_in == null ? null : Math.round(row.et0_in * 1000) / 1000,
+  }));
+  return { content: JSON.stringify(rounded), isError: false };
 }
 
 // deno-lint-ignore no-explicit-any

@@ -34,7 +34,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_derived_series",
     description:
-      "Real derived daily climate metrics for a vintage: growing degree days (gdd_cumulative), average-based vapor pressure deficit (vpd_kpa), peak-hour vapor pressure deficit (vpd_peak_kpa), diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in). One row per day. Defaults to the current 2026 vintage's live-to-date range if start_date/end_date are omitted.",
+      "Real derived daily climate metrics for a vintage: cumulative growing degree days (gdd_cumulative_calibrated -- calibrated per-vintage against the Napa Valley Grapegrowers Growing Conditions Report figures for Angwin, and the authoritative GDD figure to quote), average-based vapor pressure deficit (vpd_kpa), peak-hour vapor pressure deficit (vpd_peak_kpa), uncalibrated diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in). One row per day. Defaults to the current 2026 vintage's live-to-date range if start_date/end_date are omitted.",
     input_schema: {
       type: "object",
       properties: {
@@ -185,7 +185,13 @@ async function getDerivedSeries(supabase: any, input: Record<string, unknown>): 
 
   let query = supabase
     .from("daily_derived")
-    .select("day, gdd_cumulative, dtr_f, vpd_kpa, vpd_peak_kpa, et0_in")
+    // gdd_cumulative_calibrated, NOT gdd_cumulative -- the raw column is the
+    // uncorrected Open-Meteo sum and understates this site's real heat
+    // accumulation (2023: 2853.5 raw vs 3576.0 calibrated, the latter exactly
+    // matching the published Grapegrowers Angwin total). The chat was
+    // reporting the raw figure as authoritative. dtr_f deliberately stays
+    // raw, matching the dashboard -- see docs/SECURITY.md.
+    .select("day, gdd_cumulative_calibrated, dtr_f, vpd_kpa, vpd_peak_kpa, et0_in")
     .eq("vintage", vintage)
     .order("day", { ascending: true })
     .limit(400);
@@ -204,10 +210,21 @@ async function getDerivedSeries(supabase: any, input: Record<string, unknown>): 
   // It is NOT a truncation fix and was measured not to be one: with rounding
   // alone at the old 2048 ceiling, 4/5 trials still hit max_tokens and 3/5
   // still returned blank -- see index.ts's `effort` comment for what actually
-  // fixed that. gdd_cumulative is left as-is (already a clean running total).
+  // fixed that.
+  //
+  // gdd_cumulative_calibrated IS rounded here, unlike the raw gdd_cumulative
+  // it replaced. The old comment said GDD was "already a clean running total"
+  // and skipped it -- true of the raw sum (2853.4500000000000000) but NOT of
+  // the calibrated column, which multiplies through a 6-decimal per-vintage
+  // scalar and arrives as 3576.0006090000000000000000: 27 chars vs 21, ~26%
+  // wider, on ~214 rows per vintage per call. 1dp keeps the exact
+  // Grapegrowers match legible (3576.0) at a fraction of the tokens.
   // deno-lint-ignore no-explicit-any
   const rounded = (data as any[])?.map((row) => ({
     ...row,
+    gdd_cumulative_calibrated: row.gdd_cumulative_calibrated == null
+      ? null
+      : Math.round(row.gdd_cumulative_calibrated * 10) / 10,
     dtr_f: row.dtr_f == null ? null : Math.round(row.dtr_f * 100) / 100,
     vpd_kpa: row.vpd_kpa == null ? null : Math.round(row.vpd_kpa * 100) / 100,
     vpd_peak_kpa: row.vpd_peak_kpa == null ? null : Math.round(row.vpd_peak_kpa * 100) / 100,

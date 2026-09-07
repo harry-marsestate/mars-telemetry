@@ -1870,3 +1870,116 @@ and completion rate. Control thinking with `output_config.effort` and verify
 with `usage.output_tokens_details.thinking_tokens`, which is the only field
 that distinguishes "the model needed more room" from "the model spent the
 room it was given." A blank or truncated reply says nothing about which.
+
+## GDD display/chat read the UNCALIBRATED column - the calibration project built the corrected column and never rewired its consumers
+
+`daily_derived` carries two GDD accumulations: `gdd_cumulative` (the raw
+`sum(gdd_day)` window aggregate) and `gdd_cumulative_calibrated`
+(`sum(gdd_day * coalesce(scalar,1))`, per-vintage scalar from
+`vintage_climate_calibration`). Every display and chat consumer read the RAW
+one. Real values, confirmed directly against the live view:
+
+| vintage | raw | calibrated | scalar | NVG Angwin published |
+|---|---|---|---|---|
+| 2022 | 3211.2 | 3812.3 | 1.187192 (borrowed) | - |
+| 2023 | 2853.5 | **3576.0** | 1.253220 (anchored) | **3576** |
+| 2024 | 3619.5 | **4058.0** | 1.121165 (anchored) | **4058** |
+| 2025 | 2830.0 | 3359.8 | 1.187192 (borrowed) | - |
+| 2026 | 2104.1 | 2104.1 | none (`coalesce(scalar,1)`) | - |
+
+**Intent was never ambiguous - the calibrated column exists precisely to be
+the real-world-true figure.** `20260824000000_climate_calibration_schema.sql`
+states the scalars were "solved so each anchored vintage's raw Open-Meteo GDD
+total ... exactly reproduces Angwin's real, same-year Napa Valley Grapegrowers
+Growing Conditions Report total," and it does, to 1dp, for both anchored
+years. The raw column is a known-biased intermediate (the migration names
+elevation as "the established driver of the Open-Meteo/regional-report
+divergence"). The columns were added "alongside the existing raw ones" purely
+as a *mechanism* choice - correcting upstream in `daily_weather` "would
+silently pull VPD/ET0 along with it" - not as a statement that raw is what
+users should see.
+
+**The tell that this was an unfinished rollout, not a decision:** the GDD
+panel's own subtitle already told users the data was "calibrated to Napa
+Valley Grapegrowers regional reports" while the panel plotted the raw column.
+The label and the data disagreed, in production, on screen.
+
+**Timeline explains both this and the stale `4155.2` comment.** `c698a0e`
+(2026-08-23) corrected `HARVEST_BAND` to `[3550,4050]` from NVG's *published*
+Angwin/Deer Park figures - i.e. onto the calibrated scale - and recorded "2022
+reaches 4155.2" as the then-current raw max. One day later `7ece953`
+(2026-08-24) simultaneously replaced the underlying data with the real ERA5
+backfill, fixed `daily_weather`'s UTC-vs-Pacific `date_trunc` bucketing, and
+added the calibrated columns. So the band was put on the published scale one
+day *before* a column on that scale existed, and the data behind 4155.2 was
+wholly replaced the next day. 4155.2 matches no column at any vintage today
+(2022 is now 3211.2 raw / 3812.3 calibrated; the true max anywhere is 2024's
+4058.0 calibrated). `HARVEST_BAND` itself needed no rebasing - it was correct
+all along and was simply being compared against the wrong column.
+
+**Real user-visible consequences, both reproduced before fixing:**
+- The live deployed chat answered "2023 season total GDD: **2,853.45**" - the
+  uncalibrated figure, ~20% below the published 3,576 it claims to reflect.
+- A completed 2023 season (raw 2853.5) could never reach a picking band it had
+  actually finished inside (calibrated 3576.0).
+- The client-side `Veraison window` rule compares `fetchGddAsOf()` against
+  `HARVEST_BAND[0]`, so it misfired: at 2024's mid-harvest as-of date raw
+  3242.5 read as "still below the picking band" while calibrated 3635.4 shows
+  the season had already entered it. Verified in a real browser - the card
+  renders for 2024 on raw and correctly disappears on calibrated.
+
+**Deliberately NOT switched, with reasons:**
+- `anomalies_eval()`'s `dtr` -> `dtr_f` and the DTR chart/tile. The live
+  `dtr_low` threshold (21°F) was tuned against the RAW distribution (real
+  p10 = 20.8, ~10-12% trigger rate, see the DTR entry above). Calibrated p10
+  is 22.1-24.9, so switching the column without re-deriving the threshold
+  would collapse a deliberately-tuned rule to near-never. `dtr_f_calibrated`
+  also has no independent anchor - the scalar was solved against GDD *totals*,
+  and no published DTR reference exists to validate it, unlike GDD's exact
+  3576/4058 match. Chart, overview tile and anomaly rule are therefore all
+  left on one raw scale rather than half-migrated; the shared subtitle was
+  split so it stops claiming DTR is calibrated.
+- `anomalies_eval()`'s `gdd` -> `gdd_cumulative`. Inert: no enabled
+  `anomaly_thresholds` row has `metric_key='gdd'`, so nothing consumes it.
+- `insights-scan` needed no change - it already reads `gdd_day_calibrated`
+  and `dtr_f_calibrated`. The most recently written consumer got it right;
+  only the older display path predates the calibrated column.
+
+**Known, accepted consequence:** compare mode now mixes a calibrated
+2022-2025 series with an uncalibrated 2026 one. 2026 has no calibration row
+by design (no Grapegrowers report exists yet) and `coalesce(scalar,1)` makes
+it a true no-op, so its subtitle correctly does not claim calibration. This is
+the documented intended state, not drift - and 2026 is mock-pipeline data
+anyway, so cross-vintage parity with it was never sound.
+
+RULE: when a migration adds a corrected column "alongside" an existing one,
+the migration is only half the change - grep every consumer of the old column
+in the same pass and either switch it or record why it stays. A calibrated
+column that nothing displays is indistinguishable, from the outside, from one
+that was never built. The strongest signal here was already on screen for
+months: a subtitle claiming a correction the plotted data didn't have.
+
+## Adversarial `set role` leaks across the transaction pooler and fakes a "0 rows" / "permission denied" result
+
+This file repeatedly recommends verifying RLS adversarially with
+`set role authenticated; select ...` over `DATABASE_URL`. That connection is
+Supabase's **transaction-mode pooler** (port 6543), which hands the same
+backend connection to later clients - and `SET ROLE` is session state that
+survives on it. A verification query left `current_user = authenticated`
+(`session_user` still `postgres`) on a pooled backend, and the *next*
+unrelated psql invocation silently inherited it: an `UPDATE user_profiles`
+returned `UPDATE 0`, `select ... from user_profiles` returned 0 rows of 13,
+and `auth.users` returned `permission denied` - all read at first glance as
+"the row was never created" when the row existed the whole time.
+
+This is the same "0 rows is ambiguous, not proof" hazard already on record for
+`anomalies_eval`'s DISTINCT ON tie, arriving through a completely different
+mechanism.
+
+RULE: after any adversarial `set role` over the pooler, reset it explicitly
+(`reset role` / `discard all`) and confirm with `select current_user` before
+trusting any subsequent result - and treat an unexpected `0 rows`,
+`UPDATE 0`, or `permission denied` immediately following such a check as a
+suspected leaked role first, not as a data or trigger failure. Prefer scoping
+the check to a transaction (`begin; set local role ...; rollback;`) so it
+cannot escape onto the pooled connection at all.

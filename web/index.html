@@ -975,6 +975,18 @@ function gddTo(date,v){
 // numbers, but describe different decades; a live operational dashboard
 // should reflect current measurement. Previously [3000,3450], sourced
 // from the AVA petition.
+//
+// SCALE: these are Grapegrowers-PUBLISHED GDD figures, so this band lives on
+// the same scale as daily_derived.gdd_cumulative_calibrated -- whose whole
+// purpose is to reproduce those published totals exactly (2023 -> 3576.0 vs
+// the report's 3576; 2024 -> 4058.0 vs 4058). It must therefore only ever be
+// compared against the CALIBRATED column, never the raw gdd_cumulative sum.
+// It was compared against raw from the day this band was corrected until the
+// calibrated column was wired up, which made a completed 2023 season (raw
+// 2853.5) look like it never reached a picking window it had actually
+// finished inside (calibrated 3576.0). Do not "rebase" these numbers to the
+// raw scale to close a gap -- that would be re-fitting a real published
+// reference to an uncorrected intermediate.
 const HARVEST_BAND=[3550,4050];
 
 /* Labour */
@@ -1443,7 +1455,15 @@ const DATA_SOURCES = {
   irrigation_volume: {kind:'weather'},
   cellar_temp:       {kind:'building'},
   cellar_rh:         {kind:'building'},
-  gdd_cumulative:    {kind:'derived', detail:'from air temperature (base 50°F)'},
+  // Key deliberately names the CALIBRATED column, matching what the GDD
+  // panel/overview tile/chat now actually read. The old key was
+  // 'gdd_cumulative', which read as "this panel shows the raw sum" while
+  // the label under it claimed Grapegrowers calibration -- the exact
+  // mismatch that let the display path sit on the wrong column unnoticed.
+  gdd_cumulative_calibrated: {kind:'derived', detail:'from air temperature (base 50°F)'},
+  // Stays keyed on the RAW column, deliberately -- see getDataSourceLabel
+  // below and docs/SECURITY.md: the diurnal-range display is still raw
+  // dtr_f, because the live dtr_low threshold is tuned to the raw scale.
   dtr_f:             {kind:'derived', detail:'from air temperature (daily max − min)'},
   vpd_kpa:           {kind:'derived', detail:'from air temperature and humidity'},
   et0_in:            {kind:'derived', detail:'from temperature, humidity, wind, and solar radiation'},
@@ -1456,7 +1476,7 @@ const DATA_SOURCES = {
 };
 
 // Vintages backed by real Open-Meteo/ERA5 data for air_temp/soil_moisture/
-// soil_temp/gdd_cumulative/dtr_f (real-climate-data project, Phase 1-3,
+// soil_temp/gdd_cumulative_calibrated/dtr_f (real-climate-data project, Phase 1-3,
 // 2026-08-25). Deliberately explicit, not inferred from `vintage!==CURRENT`
 // -- 2026 will eventually become archived too, but stays mock until its
 // own backfill happens (no same-year Grapegrowers report exists for it
@@ -1499,7 +1519,17 @@ function getDataSourceLabel(metricKey, vintage){
   if(REAL_CLIMATE_VINTAGES.has(vintage)){
     if(metricKey==='air_temp' || metricKey==='humidity' || metricKey==='precipitation') return 'Open-Meteo (ERA5)';
     if(metricKey==='soil_moisture' || metricKey==='soil_temp') return 'Open-Meteo (ERA5-Land), surface 0-7cm';
-    if(metricKey==='gdd_cumulative' || metricKey==='dtr_f') return 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports';
+    // GDD and DTR were one branch, both claiming Grapegrowers calibration.
+    // Only GDD actually reads a calibrated column, so the shared claim was
+    // false for DTR -- split rather than left overclaiming for one metric.
+    if(metricKey==='gdd_cumulative_calibrated') return 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports';
+    // dtr_f is the RAW column and says so. daily_derived.dtr_f_calibrated
+    // exists but is NOT displayed: the scalar behind it was solved against
+    // Grapegrowers GDD *totals*, and no published DTR reference exists to
+    // anchor it, so unlike GDD it has no independent validation. The live
+    // dtr_low threshold (21°F) is also tuned to this raw distribution
+    // (real p10 = 20.8). See docs/SECURITY.md.
+    if(metricKey==='dtr_f') return 'Open-Meteo (ERA5), uncalibrated daily max − min';
     // "daily average" wasn't said anywhere before this, which was a real
     // gap independent of the (now-removed) peak chart panel -- a user had
     // no way to know this line under-represents afternoon stress. Same
@@ -1556,18 +1586,34 @@ const PANELS = [
  }},
 
 {id:'gdd', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Growing degree days', unit:'GDD · base 50 °F',
- sub:(c)=>getDataSourceLabel('gdd_cumulative',c.primary), range:'30D',
+ sub:(c)=>getDataSourceLabel('gdd_cumulative_calibrated',c.primary), range:'30D',
  info:"The running total of heat banked since April 1st, base 50°F — the best single predictor of where the season sits relative to picking. The shaded band marks the normal harvest window for this site; approaching it means berry sampling should begin.",
  render: async (b,c) => {
+   // gdd_cumulative_calibrated, NOT gdd_cumulative: the raw column is the
+   // uncorrected Open-Meteo sum, which the calibration project established
+   // diverges from this site's real accumulation (elevation-driven). The
+   // calibrated column reproduces the Grapegrowers Angwin totals exactly,
+   // which is also the scale HARVEST_BAND is quoted on -- see its comment.
+   // For 2026 the two columns are identical by construction
+   // (coalesce(scalar,1) with no calibration row), so this is a no-op for
+   // the live vintage and only corrects 2022-2025.
    const sets = c.compare
      ? await Promise.all(c.vintages.map(async v=>({name:String(v), color:VCOLOR[v],
-         pts: await buildDerivedSeriesReal('gdd_cumulative', v, c.range, {align:c.align, scrollDays:c.scrollDays})})))
-     : [{name:'GDD', color:'#C6A961', pts: await buildDerivedSeriesReal('gdd_cumulative', c.primary, c.range, {scrollDays:c.scrollDays})}];
+         pts: await buildDerivedSeriesReal('gdd_cumulative_calibrated', v, c.range, {align:c.align, scrollDays:c.scrollDays})})))
+     : [{name:'GDD', color:'#C6A961', pts: await buildDerivedSeriesReal('gdd_cumulative_calibrated', c.primary, c.range, {scrollDays:c.scrollDays})}];
    legendFor(b.parentElement,[...sets,{name:`Harvest window ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD`,color:'#6E9B72',band:true}]);
-   // domain ceiling must clear both HARVEST_BAND[1] and the real historical
-   // max (2022 reaches 4155.2) -- lineChart only auto-expands domain to fit
-   // band when no explicit domain is given, so these two numbers have to be
-   // kept in sync by hand whenever HARVEST_BAND changes.
+   // domain ceiling must clear both HARVEST_BAND[1] (4050) and the real
+   // historical max, which on the calibrated scale this panel now plots is
+   // 2024's 4058.0 -- verified directly against daily_derived, all five
+   // vintages. (The previous comment here claimed "2022 reaches 4155.2";
+   // that figure was 2022's RAW gdd_cumulative read on 2026-08-23, one day
+   // before commit 7ece953 simultaneously replaced the underlying data with
+   // the real ERA5 backfill, fixed daily_weather's UTC-vs-Pacific
+   // date_trunc bucketing bug, and added these calibrated columns. It
+   // matches no column at any vintage today -- raw 2022 is now 3211.2 and
+   // calibrated 2022 is 3812.3.) lineChart only auto-expands its domain to
+   // fit the band when no explicit domain is given, so these numbers have
+   // to be kept in sync by hand whenever HARVEST_BAND changes.
    lineChart(b,sets,{unit:'GDD',dec:0,h:186,domain:[0,4400],
      band:HARVEST_BAND, bandColor:'#6E9B72', bandLabel:'Harvest window'});}},
 
@@ -2264,15 +2310,21 @@ async function fetchIrrigationGaps(vintage, blockIds, asOf){
 // wired to daily_derived, and would silently evaluate against fake heat
 // accumulation instead of the real derived metric the GDD chart itself
 // reads via buildDerivedSeriesReal.
+// Reads the CALIBRATED column, matching the GDD chart above. This value is
+// compared directly against HARVEST_BAND[0] by the veraison rule, so it must
+// be on the band's published-Grapegrowers scale -- on the raw column the rule
+// misfired: at 2024's mid-harvest as-of date, raw 3242.5 read as "still below
+// the picking band" while the calibrated 3635.4 shows the season had already
+// entered it. Verified against real data for all five vintages.
 async function fetchGddAsOf(vintage, asOf){
   const { data, error } = await sb.from('daily_derived')
-    .select('gdd_cumulative')
+    .select('gdd_cumulative_calibrated')
     .eq('vintage', vintage)
     .lte('day', asOf.toISOString())
     .order('day', {ascending:false})
     .limit(1);
   if(error) throw error;
-  return data.length ? +data[0].gdd_cumulative : null;
+  return data.length ? +data[0].gdd_cumulative_calibrated : null;
 }
 
 async function fetchAnalysisLots(){
@@ -2758,9 +2810,10 @@ async function fetchLatestPatterns(){
 }
 
 // Human labels for insights-engine metric keys. Deliberately its own map,
-// not DATA_SOURCES -- DATA_SOURCES's keys/semantics (e.g. gdd_cumulative)
-// don't line up 1:1 with what the scanner actually correlates (gdd_day,
-// dtr_f_calibrated, etc.), so reusing it would mislabel or silently miss keys.
+// not DATA_SOURCES -- DATA_SOURCES's keys/semantics (e.g.
+// gdd_cumulative_calibrated, a season running total) don't line up 1:1 with
+// what the scanner actually correlates (gdd_day_calibrated, a per-day value),
+// so reusing it would mislabel or silently miss keys.
 const METRIC_LABELS = {
   air_temp:'Air temperature', humidity:'Humidity', precipitation:'Precipitation',
   soil_moisture:'Soil moisture', soil_temp:'Soil temperature', solar:'Solar insolation',
@@ -3002,8 +3055,14 @@ async function overviewStats(tab, c){
     const [t, soilByBlock, g, vp, dt, rh] = await Promise.all([
       getLatestValue({metric:'air_temp', scope:'estate', vintage:vv}),
       Promise.all(ids.map(async id => ({id, v: await getLatestValue({metric:'soil_moisture', scope:id, vintage:vv})}))),
-      getLatestDerivedValue({field:'gdd_cumulative', vintage:vv}),
+      // Calibrated, matching the GDD panel -- the "GDD to date" tile and the
+      // chart must not quote two different numbers for the same metric.
+      getLatestDerivedValue({field:'gdd_cumulative_calibrated', vintage:vv}),
       getLatestDerivedValue({field:'vpd_kpa', vintage:vv}),
+      // dtr_f stays RAW: this tile's own good-acid-retention/compressed
+      // verdict is decided against the dtr_low threshold (21°F), which is
+      // tuned to the raw distribution. Switching only the displayed number
+      // would flip verdicts without the threshold moving with it.
       getLatestDerivedValue({field:'dtr_f', vintage:vv}),
       getLatestValue({metric:'humidity', scope:'estate', vintage:vv})
     ]);

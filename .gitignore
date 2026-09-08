@@ -8,3 +8,6 @@ dbt_packages/
 logs/
 supabase/.temp/
 .DS_Store
+
+# spike/kimi-integration scratch harness -- not shipped
+spike-harness/

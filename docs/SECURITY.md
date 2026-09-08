@@ -2286,3 +2286,302 @@ nesting too - the `***` misnesting was *created* by `94b88ae`'s italics pass
 (before it, `***x***` merely left stray asterisks) and survived that round's
 own adversarial re-test, which checked that payloads stayed inert but never
 checked that the tags produced around them were well-formed.
+
+## Kimi K3 on Fireworks (Phase 1 spike): the integration works and the answers are correct - it is the latency, the cost and the answer-turn truncation that fail
+
+Investigated and built behind a deploy-time flag on `spike/kimi-integration`,
+NOT merged and NOT enabled anywhere. `CHAT_MODEL_PROVIDER` defaults to
+`anthropic`, and anything other than the exact string `kimi` takes the existing
+path, so the shipped behaviour is unchanged until someone sets it deliberately.
+
+**Two corrections to the brief this work started from, both confirmed against
+the live API rather than reasoned about.**
+
+1. The model id is `accounts/fireworks/models/kimi-k3`. The brief's
+   `accounts/fireworks/kimi-k3` does not resolve - the `/models/` segment is
+   required. `accounts/fireworks/routers/kimi-k3-fast` is correct as given.
+   Both report `supports_tools: true` and a 1,048,576-token context.
+2. Kimi K3 is **more expensive than the model it would replace**, not cheaper.
+   Fireworks lists $3.00 in / $0.30 cached in / $15.00 out per MTok (confirmed
+   on both `fireworks.ai/models/fireworks/kimi-k3` and
+   `docs.fireworks.ai/serverless/pricing`); `claude-sonnet-5` is $2.00 / $10.00
+   with cache reads at 0.1x ($0.20) and 5-minute cache writes at 1.25x ($2.50).
+   That is 1.5x on input and output alike. Any expectation that an
+   open-weights model on a third-party host would be the cheap option is
+   simply wrong here, and it is wrong before a single token is measured.
+
+### The tool-schema translation is real work, and it is not the hard part
+
+Anthropic puts the JSON Schema at `tool.input_schema`; OpenAI nests the tool
+under `function` and calls it `parameters`. The schema BODY transferred
+unchanged - every property in `tools.ts` uses plain `type`/`description`/`enum`,
+which mean the same thing on both sides - so the model reads the identical
+descriptions either way. `strict: true` was deliberately NOT emitted: OpenAI's
+strict mode requires `additionalProperties:false` plus every property in
+`required`, which would misdescribe this tool set (`get_series`' `block`,
+`vintage` and `agg` are genuinely optional).
+
+The messages are the harder half, and the part a "just repoint the SDK" framing
+hides entirely:
+- An Anthropic assistant turn is a list of content blocks; an OpenAI one is a
+  single message with a `tool_calls` array.
+- `tool_use.input` is an OBJECT on Anthropic and a JSON **string** on OpenAI -
+  the one mismatch that would produce a request the server accepts and the
+  model then misreads.
+- Anthropic tool RESULTS ride inside a `user` turn as `tool_result` blocks;
+  OpenAI wants one `role:"tool"` message per result. One message fans out to
+  several.
+- `thinking`/`redacted_thinking` blocks have no OpenAI equivalent and are
+  dropped.
+
+The canonical conversation format stays ANTHROPIC-shaped end to end. That was a
+deliberate choice, not an accident of where the code grew: `web/index.html`
+holds `chatHistory` in that shape and replays it verbatim on every request
+(the function is stateless), so translating in and back out inside `kimi.ts`
+means **the frontend needed zero changes** and the flag-off path is
+byte-identical to what ships today.
+
+**A token-accounting trap worth naming, because it silently favours one side.**
+Anthropic's `input_tokens` EXCLUDES cache reads and writes - the three counters
+are disjoint. OpenAI's `prompt_tokens` is the TOTAL, with
+`prompt_tokens_details.cached_tokens` a SUBSET of it. Billing the total at the
+full rate and the cached subset again at the cached rate double-counts every
+cached token, which on a 32K prefix is most of the bill. Confirmed against real
+responses (a Claude turn: input=4, cache_read=7,002; a Kimi turn: prompt=32,136,
+cached=32,134). `kimi.ts` now normalises `usage.input` to Anthropic's meaning so
+the two providers' `chat: usage` log lines are directly comparable, and keeps
+`inputTotal` for reconciling against Fireworks' own numbers.
+
+### Tool selection: Fireworks' overlapping-surface warning did not bite
+
+Fireworks warns the Kimi family "performs best when tools have clearly distinct
+names, descriptions and parameter schemas". Checked directly against this app's
+real six tools across eight question shapes: the right tool was selected every
+time, including the two pairs with the most surface overlap
+(`get_series` vs `get_derived_series`, and the three operator-only tools).
+The two-vintage question produced exactly two `get_derived_series` calls, one
+per vintage - the same pattern Claude produces.
+
+Not a clean sweep on *efficiency*, though. Kimi fans out more: on the no-data
+irrigation question it used 4 loop turns and 5 tool calls on one trial where
+Claude used 2 and 1 every time, and on the customer question it made 3-5 calls
+against Claude's 2. Correct, but more round trips for the same answer.
+
+### The reasoning warning is real, and it lands somewhere the metric can't see
+
+Fireworks warns the K2/K3 family "can produce very long reasoning traces" and
+to always set `max_tokens`. This project has a documented instance of exactly
+that shape on `claude-sonnet-5` (see the `output_config.effort` entry above), so
+it was tested rather than assumed - and the finding is that Kimi's failure is
+NOT the same failure.
+
+**On the tool-selection turn, reasoning is bounded and ignores the ceiling.**
+Same question, five ceilings, three trials each: reasoning spend stayed at
+0-191 tokens from `max_tokens: 1024` all the way to `16000`. That is the exact
+opposite of Sonnet 5's adaptive thinking, which expanded to fill whatever
+ceiling it was given (2,048/2,048 then 8,000/8,000). On this turn `max_tokens`
+is a genuine safety ceiling for Kimi, not a tuning dial that backfires.
+
+**On the ANSWER turn, after ~57KB of tool results land, it writes its
+scratchpad into the visible answer.** Not into `reasoning_content` - into
+`content`. Real sampled output: *"Both series returned. Now compute the
+comparison stats."*, then paragraphs of longhand arithmetic
+(`39.4+35.7=75.1; +33.8=108.9; ...`), day-by-day threshold counting, and
+self-corrections - and then the budget runs out before any answer is written.
+
+This matters for two reasons beyond the bad output:
+1. **`completion_tokens_details.reasoning_tokens` under-reports it.** A
+   truncated leaked reply reported 106 and 138 reasoning tokens while spending
+   4,193 and 4,225 output tokens on longhand working. The one field you would
+   reach for to detect this reads *reassuringly small* exactly when the problem
+   is happening. docs' standing rule for Sonnet 5 - verify thinking spend with
+   `thinking_tokens` - does NOT transfer to this provider.
+2. **Raising `max_tokens` does not fix it, and wrecks latency.** Measured on
+   the two-vintage question through the real loop with real tool results:
+
+   | max_tokens | n | truncated | output tokens | wall clock |
+   |---|---|---|---|---|
+   | 4000 | 3 | **3/3** | 4,139-4,210 | 73.5-85.4s |
+   | 8000 | 3 | **2/3** | 4,819-8,242 | 80.1-**134.4s** |
+   | 16000 | - | run aborted | - | a single turn exceeded **180s** |
+
+   The 16000 row is not a missing measurement: the 180s client timeout added to
+   `callKimi` during this work fired on the first trial. So the same "raising
+   the ceiling buys latency, not completion" conclusion the Sonnet 5 entry
+   reached applies here too, by a different mechanism - there the ceiling fed
+   an adaptive thinking block, here it feeds longhand prose in the answer field.
+
+**A related behavioural difference with a concrete UI consequence.** Claude
+emits no text at all on a tool_use turn (39+ measured trials). Kimi sometimes
+emits a preamble - *"Kim - pulling the full-season derived metrics for both
+vintages now."* `index.ts` forwards text from every turn, and
+`web/index.html` suppresses its own curated status line as soon as any text has
+arrived (`else if(ev.type==='tool'){ if(!buf){...} }`). So a Kimi preamble
+silently REPLACES the app's own whitelisted "Reading climate data for 2023 and
+2024" status with model-authored text. That status line is built server-side
+from whitelisted tokens specifically so no model-authored string reaches the
+browser in that event - the preamble does not defeat that (it arrives as a
+normal `text` event and goes through `renderReply()`'s escaping like any other
+reply text), but it does defeat the *design intent* of having a curated status
+line at all. Behaviour to decide on deliberately before any wider rollout, not
+a bug to discover in production.
+
+### Streaming: it exists, it is standard, and it does not fit this loop
+
+Confirmed live rather than scoped from documentation. Fireworks returns
+`text/event-stream` with ordinary OpenAI `chat.completion.chunk` frames, first
+frame at 3ms, terminated by `[DONE]`, with a final usage frame only when
+`stream_options.include_usage` is set. Reasoning arrives on its own
+`delta.reasoning_content` channel (usefully - it can simply not be forwarded),
+and tool calls arrive as `delta.tool_calls` fragments to be reassembled by index.
+
+None of that fits what `index.ts` is written against today: an
+`anthropic.messages.stream()` handle with a semantic `.on("text")` event, a raw
+`.on("streamEvent")` hook, and `finalMessage()` for the assembled blocks. Those
+are SDK affordances, not wire features, and there is no OpenAI-shaped
+equivalent to borrow. **Deliberately deferred to Phase 2.** Phase 1 runs Kimi
+non-streaming inside the unchanged SSE envelope, so the answer arrives as one
+`text` event instead of many. Given the measured 30-83s wall clock that is a
+real UX regression on top of a real latency regression - the typing indicator
+sits there for the whole time - which is itself an argument for fixing latency
+before bothering to fix streaming.
+
+### Measured comparison: 40 runs, real RLS path, throwaway operator and customer
+
+Four trials per question per backend, real Supabase data, real JWTs, the
+production loop reproduced with `tools.ts` imported directly and
+`buildSystemPrompt` parsed out of `index.ts` (same zero-drift discipline as the
+chat-latency and markdown rounds).
+
+| question | backend | median wall | truncated | median out tok | median cost/question |
+|---|---|---|---|---|---|
+| simple | kimi | 25.1s | 0/4 | 1,403 | $0.0619 |
+| simple | claude | **10.6s** | 0/4 | 634 | **$0.0343** |
+| two-vintage | kimi | 77.8s | **2/4** | 4,193 | $0.0730 |
+| two-vintage | claude | **16.4s** | 0/4 | 1,167 | $0.1092 |
+| no-data | kimi | 24.0s | 0/4 | 1,117 | $0.0519 |
+| no-data | claude | **6.0s** | 0/4 | 434 | **$0.0071** |
+| rls-restricted | kimi | 26.5s | 0/4 | 1,365 | $0.0515 |
+| rls-restricted | claude | **5.0s** | 0/4 | 286 | **$0.0039** |
+| customer-tone | kimi | 39.2s | 0/4 | 1,808 | $0.0668 |
+| customer-tone | claude | **14.7s** | 0/4 | 945 | **$0.0383** |
+| **pooled** | **kimi** | **30.3s** | **2/20** | - | **$0.0593 mean** |
+| **pooled** | **claude** | **10.6s** | **0/20** | - | **$0.0332 mean** |
+
+**Latency: Kimi is 2.4-5.3x slower on every question shape**, worst on the
+heaviest one. The gap is not tool/DB time - that was 0.3-1.0s per question for
+both backends, on the same queries.
+
+**Cost: Kimi is ~1.8x more expensive on average**, and the one cell where it
+wins (two-vintage, $0.0730 vs $0.1092) needs an honest caveat rather than being
+quoted as a win. Each battery question is a FRESH single-turn conversation, so
+Claude pays a 38.8K-token cache WRITE at 1.25x on nearly every two-vintage trial
+and gets almost no reads back. In the real app - a multi-turn conversation
+against a warm 5-minute cache, which is what the cache-breakpoint work above
+was built for - those writes amortise and that cell should move Claude's way
+too. Fireworks' automatic caching is genuinely good (32,134 of 32,136 prompt
+tokens served cached at $0.30) but it is caching a prefix that is 1.5x more
+expensive to miss and feeding an output that is 1.5x more expensive per token
+and 3.6x larger.
+
+### Answer quality is a genuine dead heat - which is the interesting part
+
+Scored against figures this project has already independently established, not
+by impression. Across all 40 replies, both backends were **40/40**: the
+calibrated 2023/2024 GDD totals (3,576 / 4,058), zero occurrences of the raw
+uncalibrated figures (2,853 / 3,619) the GDD entry above was written about, the
+correct 8.38 kPa peak VPD, the correct 2,104 GDD for 2026, an honest "no
+irrigation data" on the no-data question with no figure invented, and a warm
+non-bare refusal with no fabricated labour cost on the RLS question. Tone,
+persona and the three-part structure held on both.
+
+**The scoring metric's own limitation, stated rather than glossed:** the two
+truncated Kimi replies still PASS every correctness check, because the
+scratchpad computed the right numbers before running out of room. "Contains the
+right figures" and "is a usable answer" are different claims, and only the
+former is automatable here. The truncation column above is the one that
+captures the difference.
+
+### RLS is provider-independent by construction, and that was checked both ways
+
+The structural argument: the model never touches the database. It emits a tool
+NAME and an ARGUMENTS object, and `index.ts` hands both to the same `runTool()`
+against the same RLS-scoped `ctx.supabase` - never `ctx.supabaseAdmin`. Nothing
+provider-specific sits between the model's choice and Postgres, and the Phase 1
+build deliberately shares `buildSystemPrompt`, `TOOLS` and `runTool` verbatim so
+that stays true by construction rather than by convention.
+
+Verified anyway, at both layers:
+
+1. **The tool layer, directly.** Identical calls with identical arguments,
+   operator client vs customer client: `get_labour_summary` 18 rows vs **0**,
+   `get_vessels` 92 vs **0**, `get_lot_analyses` 50 vs **0**; the shared tools
+   (`get_derived_series`, `get_anomalies`, `get_series`) byte-identical by md5
+   across both roles. The differing cells are what give the matching cells
+   meaning - this is not passing because RLS is inert on this data.
+2. **The model layer, end to end.** Asked as a customer for labour cost and tank
+   contents, neither backend called an operator-only tool at all (both honoured
+   the system prompt's access note), and neither invented a figure. Kimi went
+   further and offered alternatives via the shared tools; Claude declined in a
+   single turn with no tool call. Both acceptable; Kimi's costs extra latency.
+
+Note these are two INDEPENDENT layers and both were exercised: the model
+declining is a courtesy, the tool layer returning zero rows is the enforcement.
+Check 1 is the one that would still hold if a future model ignored the prompt.
+
+### Honest gaps in this verification
+
+- **`index.ts` itself was never executed.** No Deno on this machine, so the
+  edited function was checked with `tsc --noResolve` (clean apart from
+  unresolvable Deno/npm specifiers) and its loop was reproduced in the harness
+  against the real `kimi.ts` and `tools.ts` - but the deployed function has not
+  been run. The flag defaults to `anthropic`, so deploying is behaviour-neutral,
+  but "deployed and exercised" is not a claim this work has earned.
+- **No browser check.** Every prior round in this file that found something a
+  DB/Node-level check could not have found, found it in a real browser. The
+  non-streaming Kimi path changes the *timing* of the SSE events the frontend
+  consumes, not their shape, and that reasoning has not been confirmed against
+  real Chrome.
+- **The throwaway customer had no `customer_block_access` row**, so the
+  block-scoping dimension of RLS was not exercised - only the operator-only and
+  estate-level cases. Real soil data is estate-level anyway (see the ERA5-Land
+  entries above), so `get_series` returning identical rows for both roles is
+  correct here, not a gap in the check - but it is not evidence about
+  block-scoped access either.
+- **`get_anomalies` returned 0 rows for both roles** on the test date, which per
+  this file's own standing rule ("0 rows is ambiguous, not proof") is a weak
+  cell in the RLS table. The five other tools carry that check.
+- **`kimi-k3-fast` was not measured.** At +50% on an already-1.5x price it would
+  have to be dramatically faster to change the recommendation, and the
+  truncation problem is not a speed problem.
+
+### Recommendation: do not proceed to a provider abstraction or an operator toggle
+
+Kimi K3 answers this app's questions correctly, in the right persona, with the
+right figures, and respects the access model. The integration is genuinely
+straightforward - one new file, a config flag, no frontend change. If the
+question were "can it be done", the answer is yes and it is already done.
+
+But the reason to do it has not survived measurement. It is **1.8x more
+expensive**, **2.4-5.3x slower**, truncates on **2/20** real questions (and
+**3/3** on the heaviest one at the shipped ceiling), leaks its scratchpad into
+the user-visible answer when it does, and would need Phase 2 streaming work
+just to reach parity with what the chat does today. The one lever that would
+normally be tried against truncation - more `max_tokens` - was measured and
+makes latency worse without fixing it, the same trap this file already
+documents for the other model.
+
+Concretely: keep `spike/kimi-integration` unmerged as the record that the
+adapter works and what it costs, and revisit only if the motivation changes
+from cost/quality (where Kimi loses on cost and ties on quality) to something
+this measurement did not weigh - data residency, vendor independence, or
+fine-tuning on this estate's own data, which is the one thing an open-weights
+model on Fireworks can offer that the current setup cannot.
+
+RULE: when evaluating a second model provider, price it and time it against the
+incumbent BEFORE building the adapter - both were available from the vendor's
+own pricing page and a single API call, and both pointed the other way from the
+assumption the work started under. And do not carry a provider-specific
+diagnostic across: `thinking_tokens` is the right field for detecting runaway
+reasoning on Sonnet 5 and the WRONG one on Kimi, which spends its runaway in
+`content` where that counter cannot see it.

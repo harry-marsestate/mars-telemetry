@@ -592,7 +592,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
         <div class="chat-model" id="chatModelRow" style="display:none">
           <span class="chat-model-label">Model</span>
           <select id="chatModelSelect">
-            <option value="claude">Claude</option>
+            <option value="claude">Sonnet 5</option>
             <option value="kimi">Kimi K3</option>
           </select>
         </div>
@@ -731,7 +731,13 @@ function intervalToMs(interval) {
 
 async function getSeries({ metric, scope, vintage, range, end, agg }) {
   const bucket = RANGE_BUCKETS[range];
-  const endDate = end || endOfReal(vintage);
+  // seriesEndReal(), not endOfReal(): this fallback is only ever exercised by
+  // getLatestValue() (no caller passes `end` otherwise -- buildSeriesReal
+  // always does), whose whole point is "the true latest real value for this
+  // vintage" -- endOfReal()'s harvest-peak snapshot for an archived vintage
+  // would silently answer that as of ~25 Sep instead of the real season's
+  // actual end, the same root cause as the chart-range bug above.
+  const endDate = end || seriesEndReal(vintage);
   const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
 
   const { data, error } = await sb.rpc('series_bucketed', {
@@ -758,7 +764,8 @@ async function getSeries({ metric, scope, vintage, range, end, agg }) {
 }
 
 async function getDerivedSeries({ field, vintage, range, end }) {
-  const endDate = end || endOfReal(vintage);
+  // seriesEndReal(), not endOfReal() -- see getSeries()'s comment above.
+  const endDate = end || seriesEndReal(vintage);
   const bucket = RANGE_BUCKETS[range];
   const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
   const { data, error } = await sb.from('daily_derived')
@@ -768,7 +775,29 @@ async function getDerivedSeries({ field, vintage, range, end }) {
     .lte('day', endDate.toISOString())
     .order('day');
   if (error) { console.error('getDerivedSeries error:', error); return { points: [], stale: true }; }
-  return { points: data.map(r => ({ t: r.day, v: r[field] })), stale: false };
+  // Gap-fill to one row per calendar day across [startDate, endDate], the
+  // same guarantee series_bucketed() already provides for sensor metrics
+  // (confirmed live: a generate_series-backed RPC call always returns
+  // exactly the requested bucket count, v:null for anything missing) --
+  // this plain eq/gte/lte select has no such padding, so a window that's
+  // only PARTLY real (CURRENT extended to the shared compare-mode axis end,
+  // see seriesEndReal's own comment) silently returns fewer rows than a
+  // fully-covered vintage's call for the identical range. lineChart assumes
+  // every series in a comparison has the same point count -- it indexes
+  // sets[0].pts.length against every other series -- so a shorter array
+  // throws reading .v on an out-of-bounds element. Confirmed live: a real
+  // 2022+2026 GDD/DTR/VPD/ET0 comparison threw exactly this before this fix.
+  const byDay = new Map((data ?? []).map(r => [String(r.day).slice(0, 10), r[field]]));
+  const points = [];
+  for (
+    let d = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate()));
+    d <= endDate;
+    d.setUTCDate(d.getUTCDate() + 1)
+  ) {
+    const key = d.toISOString().slice(0, 10);
+    points.push({ t: d.toISOString(), v: byDay.get(key) ?? null });
+  }
+  return { points, stale: false };
 }
 
 /* Role for panel-visibility gating. Deliberately calls the existing
@@ -1140,6 +1169,44 @@ function endOfReal(v, align){
   const fs=fermSeason(v);
   const d=doyDate(v, Math.round((fs.sd+fs.ed)/2)); d.setHours(14,0,0,0); return d;
 }
+/* The right edge of a TIME-SERIES query window -- distinct from endOf()/
+   endOfReal() above, which anchor single-MOMENT "snapshot" reads (the
+   current wind/solar reading, the "as of" filter-bar label, fermAnchor,
+   the anomaly RULES) to a representative in-season instant and were never
+   meant to answer "how much data exists for this vintage". A series wants
+   the vintage's actual data EXTENT instead: real and mock data both cover
+   Apr 1-Oct 31 for every vintage (see the growing-season boundary comment
+   above), so an archived vintage's chart should show all of it -- not stop
+   at endOf()'s harvest-peak snapshot (confirmed the single-vintage cause:
+   fermSeason(2022)'s midpoint is literally 25 Sep 2022) or at today's
+   real-world date (the multi-vintage cause, below).
+   align:true (compare mode) broadcasts the SAME end to every selected
+   vintage, CURRENT included, so lineChart's shared index-based axis stays
+   meaningful -- it labels and titles every series' tooltip off sets[0]
+   alone (see lineChart's mousemove handler), which is only honest if every
+   series' end maps to the same month/day. Compare mode always includes at
+   least one archived vintage (VINTAGES has exactly one CURRENT value), and
+   Oct 31 is never earlier than any in-season "today", so the shared
+   reference simplifies to Oct 31 unconditionally, for every vintage in the
+   comparison -- CURRENT's own real/mock data will simply read null past
+   today on that shared axis, which is the correct, expected result of
+   comparing an in-progress season against a complete one, not a bug to
+   route around. This is why the old align branch (map today into each
+   vintage's year) capped a 2022+2026 comparison at "26/28 Jul" regardless
+   of 2022 being long complete -- confirmed directly against the commit
+   that introduced it (315202a), whose own verification note says exactly
+   that ("comparing 2022 vs 2023 GDD shows both vintages over the same
+   'aligned to 26 Jul' window"), for two vintages that are BOTH archived. */
+function seriesEnd(v, align){
+  if(!align && v===CURRENT) return new Date(NOW);
+  return new Date(v, 9, 31, 23, 59, 59, 999);
+}
+// Real-data mirror of seriesEnd() -- same reasoning, anchored to MOCK_NOW
+// instead of the live-ticking NOW for the same reason endOfReal() is.
+function seriesEndReal(v, align){
+  if(!align && v===CURRENT) return new Date(MOCK_NOW);
+  return new Date(v, 9, 31, 23, 59, 59, 999);
+}
 // Shared tab-level scroll offset for 30D/1Y-range panels -- 1D/5D always
 // show the fixed recent window, no scroll UI, this is a no-op for them.
 // Wraps whatever anchor endOf/endOfReal already computed, so it composes
@@ -1154,7 +1221,7 @@ function applyScroll(anchor, v, range, scrollDays){
 }
 /* getter(date, vintage) -> number | null ; agg: 'mean' | 'sum' | 'last' */
 function buildSeries(getter, v, range, opts={}){
-  const r=RANGES[range], end=opts.end||applyScroll(endOf(v,opts.align),v,range,opts.scrollDays), pts=[], agg=opts.agg||'mean';
+  const r=RANGES[range], end=opts.end||applyScroll(seriesEnd(v,opts.align),v,range,opts.scrollDays), pts=[], agg=opts.agg||'mean';
   for(let i=r.n-1;i>=0;i--){
     const d=new Date(end.getTime()-i*r.stepH*36e5);
     let val;
@@ -1181,7 +1248,7 @@ function buildSeries(getter, v, range, opts={}){
    simulating. metric/scope match your METRICS keys and block IDs. */
 async function buildSeriesReal(metric, scope, v, range, opts={}){
   const r = RANGES[range];
-  const end = opts.end || applyScroll(endOfReal(v, opts.align), v, range, opts.scrollDays);
+  const end = opts.end || applyScroll(seriesEndReal(v, opts.align), v, range, opts.scrollDays);
   const result = await getSeries({ metric, scope, vintage: v, range, end, agg: opts.agg });
   const pts = result.points.map(p => {
     const d = new Date(p.t);
@@ -1193,7 +1260,7 @@ async function buildSeriesReal(metric, scope, v, range, opts={}){
    dbt view directly (gdd/dtr/vpd/et0 aren't in sensor_readings). */
 async function buildDerivedSeriesReal(field, v, range, opts={}){
   const r = RANGES[range];
-  const end = opts.end || applyScroll(endOfReal(v, opts.align), v, range, opts.scrollDays);
+  const end = opts.end || applyScroll(seriesEndReal(v, opts.align), v, range, opts.scrollDays);
   const result = await getDerivedSeries({ field, vintage: v, range, end });
   return result.points.map(p => {
     const d = new Date(p.t);
@@ -2938,11 +3005,20 @@ function buildVintageGroup(tab){
 }
 
 /* The two vintage-derived meta lines. They travel with the control, so on
-   winery they render in the Harvest strip rather than the page-wide bar. */
+   winery they render in the Harvest strip rather than the page-wide bar.
+   "as of" always describes the PRIMARY vintage's own true state -- seriesEnd
+   (align:false, always) rather than endOf: today if it's CURRENT, the real
+   full season end otherwise -- regardless of whether it's also being
+   compared against another vintage right now. That's deliberately NOT the
+   same value the compare-mode CHARTS anchor to when primary is CURRENT
+   (seriesEnd(CURRENT, true) extends to Oct 31 so every series in a
+   comparison shares one axis, see seriesEnd's own comment) -- this label
+   would be actively wrong if it borrowed that value, since 2026 never has
+   real data past today no matter what it's compared against. */
 function buildVintageMeta(tab){
   const st=state[tab];
   const meta=el('div','fmeta');
-  meta.innerHTML=`<div class="fmeta-txt">as of ${dstr(endOf(primV(tab), st.vintages.length>1))} ${primV(tab)}</div>
+  meta.innerHTML=`<div class="fmeta-txt">as of ${dstr(seriesEnd(primV(tab), false))} ${primV(tab)}</div>
      <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`;
   return meta;
 }
@@ -2990,7 +3066,7 @@ function renderFilters(tab){
   meta.innerHTML = tab==='vineyard'
     ? `<div class="live ${live?'on':'off'}"><span class="pulse"></span>${live?'Live feed':'Archive · '+primV(tab)}</div>
        <div class="fmeta-txt">${st.blocks.length} of 3 blocks · ${fmt(acresOf(selB(tab)),2)} acres</div>
-       <div class="fmeta-txt">as of ${dstr(endOf(primV(tab), st.vintages.length>1))} ${primV(tab)}</div>
+       <div class="fmeta-txt">as of ${dstr(seriesEnd(primV(tab), false))} ${primV(tab)}</div>
        <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`
     : `<div class="live on"><span class="pulse"></span>Cellar sensors live</div>`;
   host.appendChild(meta);
@@ -3004,9 +3080,10 @@ let vineyardOverviewCache = null; // {ids, cur, prev, other}
 
 /* Seasonal norm: mean air_temp across whichever archived vintages actually
    have data for the ±SEASONAL_NORM_WINDOW_DAYS window around the day-of-
-   year `anchorDate` falls on. anchorDate is endOfReal(v) for whichever
-   vintage is primary, so this tracks the same "current" the rest of the
-   app uses -- moves correctly as MOCK_NOW/the season advances. Returns the
+   year `anchorDate` falls on. anchorDate is seriesEndReal(v) for whichever
+   vintage is primary -- matching getLatestValue's own anchor for `t` above,
+   so the norm this compares `t` against is centred on the same date `t` was
+   actually read at, not a separately-computed one. Returns the
    contributing-vintage count alongside the value so the caller can label
    it honestly (e.g. "avg of 2 prior seasons") rather than implying a fixed
    baseline regardless of actual sample size.
@@ -3104,7 +3181,12 @@ async function overviewStats(tab, c){
     const sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
     const dry = valid.length ? [...valid].sort((a,b)=>a.v-b.v)[0] : null;
     const tAir = th.byKey.get('air_temp_high')?.threshold ?? 92;
-    const norm = (t!=null && t<=tAir) ? await getSeasonalNorm('air_temp','estate', endOfReal(vv)) : null;
+    // seriesEndReal(vv), matching `t` above (getLatestValue, now anchored the
+    // same way): endOfReal(vv) would anchor an archived vintage's "normal for
+    // this time of year" window to its harvest-peak snapshot while `t` itself
+    // now reflects the vintage's true latest reading -- comparing a real Oct
+    // reading against a "normal for late Sept" baseline, silently mismatched.
+    const norm = (t!=null && t<=tAir) ? await getSeasonalNorm('air_temp','estate', seriesEndReal(vv)) : null;
     return {t, soilByBlock, sm, dry, g, vp, dt, rh, norm};
   }
 
@@ -3291,7 +3373,11 @@ function makePanel(p, c){
         const rng=state.range[p.id];
         const scrollable = rng==='30D' || rng==='1Y';
         const sd=state.scrollDays[p.id]||0;
-        const anchor=applyScroll(endOf(c.primary,c.compare), c.primary, rng, sd);
+        // seriesEnd(), not endOf(): this label/enabled-state must mirror
+        // whatever the panel's own series actually anchors to (buildSeries*
+        // now use seriesEnd/seriesEndReal), or the scroll control would show
+        // a stale "as of" date next to a chart that extends further.
+        const anchor=applyScroll(seriesEnd(c.primary,c.compare), c.primary, rng, sd);
         const apr1=new Date(c.primary,3,1);
         const atStart=anchor<=apr1;
         back.classList.toggle('disabled', !scrollable||atStart);
@@ -3701,6 +3787,14 @@ let chipsExpanded = true;
 // wire only: supabase/functions/chat/index.ts re-derives role from the JWT
 // and ignores this value from any non-operator account.
 let chatModelProvider = 'claude';
+let chatRole = null; // set in initChat -- gates the per-message model attribution tag to operators only
+
+// Wire values match modelProvider/`done.provider` exactly (server-authoritative,
+// see the `done` event below) -- kept as its own map rather than reusing the
+// dropdown's own option text, since the two have different failure surfaces if
+// they drift (dropdown mislabeling is cosmetic; this one is a factual claim
+// about which model actually wrote a given reply).
+const MODEL_LABELS = { claude: 'Sonnet 5', kimi: 'Kimi K3' };
 
 const LOG=$('#chatlog');
 function addMsg(who, html){
@@ -3883,6 +3977,7 @@ async function ask(q){
   addMsg('u',`<p>${escapeHtml(q)}</p>`);
   const t=addMsg('a','<div class="typing"><i></i><i></i><i></i></div>');
   const tx=t.querySelector('.msg-tx');
+  const who=t.querySelector('.msg-who'); // attribution tag, filled in once `done.provider` is known -- operator only
 
   // BUILD-THEN-COMMIT. chatHistory is not touched until a `done` event actually
   // arrives, replacing the old push-then-pop(). That made "never persist a
@@ -3959,6 +4054,15 @@ async function ask(q){
   if(done && !failed){
     // The ONLY success path, and the only place chatHistory is written.
     chatHistory=pending.concat(done.appended||[]);
+    // `done.provider` is the model that ACTUALLY answered -- set server-side
+    // after the fact, never the requested `chatModelProvider` -- so a Kimi
+    // request that silently fell back to Claude correctly reads "Sonnet 5"
+    // here, matching the fallback note (if any) appended in the reply body
+    // below rather than contradicting it. Operator-only, same gate as the
+    // dropdown itself; customers never had a choice for this to disclose.
+    if(chatRole==='operator' && done.provider){
+      who.textContent = 'Mars Telemetry · '+(MODEL_LABELS[done.provider]||done.provider);
+    }
     tx.innerHTML = renderReply(buf||'(no response)')
       + (done.truncated?'<p class="msg-note">Cut off before I could finish — ask me to continue if you’d like the rest.</p>':'');
   } else if(buf){
@@ -4028,6 +4132,7 @@ const CUSTOMER_SUGGESTIONS = [
 // conversation.
 async function initChat(session, role){
   chatHistory = [];
+  chatRole = role; // gates the per-message model attribution tag in ask()
   LOG.innerHTML = '';
 
   // Per-conversation, not persisted -- resets to Claude on every new chat

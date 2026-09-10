@@ -195,7 +195,12 @@ export default {
               );
               if (attempt.ok) {
                 for (const e of attempt.events) send(e);
-                send({ type: "done", appended: attempt.appended, truncated: false });
+                // `provider` is the model that ACTUALLY answered, for
+                // web/index.html's per-message attribution tag -- always the
+                // real outcome, never the requested `modelProvider`, which is
+                // exactly why this is set here rather than echoed back from
+                // the request body.
+                send({ type: "done", appended: attempt.appended, truncated: false, provider: "kimi" });
                 return;
               }
 
@@ -392,10 +397,16 @@ export default {
               // `truncated` rides on the done event rather than being concatenated
               // onto the reply the way it used to be: by this point the text has
               // already been streamed, so the note has to be appended client-side.
+              // `provider` is always "claude" at this point in the function --
+              // this loop is reached either because CHAT_MODEL_PROVIDER/the
+              // operator toggle picked Claude to begin with, or because Kimi
+              // just failed above and this is the mandatory fallback -- both
+              // cases mean Claude is the model that actually wrote `content`.
               send({
                 type: "done",
                 appended: newTurns,
                 truncated: stopReason === "max_tokens",
+                provider: "claude",
               });
               return;
             }

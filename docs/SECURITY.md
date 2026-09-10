@@ -2617,6 +2617,20 @@ turn), 5 trials/condition at the shipped `max_tokens:4000`:
 | `reasoning_effort:"medium"` | 1/5 | 0/5 | 1,653-4,000 | 37.0-70.5s |
 | `thinking.budget_tokens:1024` | 3/4 (aborted early) | 3/4 | up to 4,000 | 67.8-85.5s |
 
+**One non-monotonic result, flagged rather than left for someone to trip
+over.** `medium`'s wall-clock and output-token FLOORS (37.0s / 1,653 tok) sit
+ABOVE baseline's floor (31.5s / 1,529 tok) - medium's fastest trial was slower
+than baseline's fastest trial, even though medium clearly beats baseline on
+the metrics that actually matter (1/5 vs 3/5 truncated, 0/5 vs 3/5 leaked).
+Plausible but unconfirmed hypothesis: baseline's two non-truncated trials
+happened to get a short, low-reasoning answer "for free" with whatever
+unconstrained default Fireworks applies when the field is omitted, while
+`medium` spends a real, consistent reasoning budget on every trial including
+ones that would have been fast anyway - raising the floor even as it lowers
+the failure rate. Not investigated further: the ship decision never turned on
+this number, since `low` was the one condition that won outright on every
+axis that mattered.
+
 `"low"` is the one condition that eliminated both failure modes in this
 sample, and it did so while also being 2-3x faster and using a fraction of the
 output tokens - the opposite of every `max_tokens`-only lever both this
@@ -2712,6 +2726,22 @@ verification actually checked rather than inferring from answer tone or
 latency alone. An operator explicitly picking `"claude"` and a customer
 sending no `modelProvider` at all both also confirmed Claude's shape,
 so neither existing behaviour nor the explicit opt-out regressed.
+
+**Gap in this proof, stated rather than papered over: the SSE-shape signature
+is external behavioural evidence, not the server's own account of what it
+did.** The stronger, more direct proof - the deployed function's own
+`"chat: usage"` log line, which only ever gets written from inside
+`attemptKimi()` - was not pulled for this round. The installed Supabase CLI
+(2.111.0) has no `functions logs` subcommand, and the Management API's
+log-query endpoint needs a personal access token this session does not have
+and should not extract from the OS keychain to get. Two precisely-timestamped
+requests were fired to leave an exact, small window for whoever has dashboard
+access to check directly: the crafted customer `modelProvider:"kimi"` request
+ran 2026-09-10T15:13:09.865Z-15:13:15.788Z, immediately followed by an
+operator control request (same question, same flag) at
+15:13:15.789Z-15:13:22.148Z. Confirming NO `"chat: usage"` line with
+`provider:"kimi"` in the first window, and one in the second, would close this
+gap directly; a CLI/token limitation blocked pulling it from this session.
 
 ### Browser check: throwaway operator and customer, real deployed function
 

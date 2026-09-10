@@ -2797,3 +2797,35 @@ token-delta stream, one whole-turn lump), that structural difference is a
 free, unfakeable way to verify which one actually answered a given request
 in production - reach for it before reasoning from tone, latency, or trusting
 the client-supplied selector alone.
+
+## getDerivedSeries() never gap-padded missing days - latent until a query window could legitimately span a data-free region
+
+Found live while verifying a fix that widened archived-vintage chart
+ranges (git log covers that fix's own commit; this entry is just the bug it
+exposed). `series_bucketed()`, the RPC behind sensor metrics
+(`getSeries()`), pads every requested bucket via `generate_series` -
+confirmed live: a window reaching past 2026's real data returned exactly the
+requested row count, `v:null` for anything missing. `getDerivedSeries()`
+(the `daily_derived` path behind GDD/DTR/VPD/ET0) has no such padding - a
+plain `eq/gte/lte` select that returns only the rows that exist.
+
+Harmless as long as every vintage's query window stayed entirely inside real
+data, which every prior anchor happened to guarantee. It stopped being
+harmless the moment a window could legitimately span a mix of real and
+not-yet-real data (CURRENT extended to a shared compare-mode axis end) - the
+short vintage returned fewer rows than the others, and `lineChart` (which
+indexes every series against `sets[0].pts.length`) threw reading `.v` off an
+out-of-bounds element. Reproduced live on a real 2022+2026 GDD/DTR/VPD/ET0
+comparison.
+
+Fixed by gap-filling `getDerivedSeries()` to one row per calendar day across
+`[start, end]`, `v:null` for anything missing - matching
+`series_bucketed()`'s own guarantee rather than adding a second, different
+convention.
+
+RULE: any chart code that assumes every series in a comparison has the same
+point count is trusting whatever guarantee the data-fetching layer provides
+- confirm that guarantee is uniform across every provider feeding that code
+(here, two different real-data fetch functions, only one of which actually
+padded gaps) rather than inferring it from cases that happened to never
+exercise the difference.

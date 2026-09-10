@@ -216,11 +216,24 @@ export interface KimiTurn {
 // time and no `error` event ever sent.
 const KIMI_TIMEOUT_MS = 180_000;
 
+// Confirmed live against the real answer-turn failure (two-vintage question,
+// full RLS tool loop, 5 trials): `reasoning_effort` is a genuine Fireworks
+// field -- an unrelated nonsense field 400s with "Extra inputs are not
+// permitted", this one is accepted -- and unlike raising max_tokens (which
+// only made latency worse, see docs/SECURITY.md), it structurally bounds the
+// failure this app actually has. Baseline (no param) truncated 3/5 and leaked
+// its scratchpad into the visible answer 3/5; "low" was 0/5 on both, faster
+// (14-28s vs 31-81s) and cheaper (665-1109 output tokens vs up to the 4000
+// ceiling). "medium" still truncated 1/5. `thinking.budget_tokens` (the
+// Anthropic-shaped alternative, also confirmed real -- rejected only for
+// being under Fireworks' 1024 minimum) performed no better than baseline.
+export const KIMI_REASONING_EFFORT = "low";
+
 export async function callKimi(
   apiKey: string,
   system: string,
   messages: Anthropic.MessageParam[],
-  opts: { model?: string; maxTokens?: number } = {},
+  opts: { model?: string; maxTokens?: number; reasoningEffort?: string } = {},
 ): Promise<KimiTurn> {
   let res: Response;
   try {
@@ -234,6 +247,7 @@ export async function callKimi(
       body: JSON.stringify({
         model: opts.model ?? KIMI_MODEL,
         max_tokens: opts.maxTokens ?? KIMI_MAX_TOKENS,
+        reasoning_effort: opts.reasoningEffort ?? KIMI_REASONING_EFFORT,
         messages: toOpenAIMessages(system, messages),
         tools: toOpenAITools(),
       }),

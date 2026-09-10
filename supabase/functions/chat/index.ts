@@ -26,10 +26,95 @@ import { callKimi, KIMI_MODEL } from "./kimi.ts";
 // passes a ReadableStream through unbuffered was verified against the real auth
 // path with a throwaway probe (~1000ms client gaps from a server sleeping
 // 1000ms; 401 without a JWT), not assumed.
+// Runs Kimi's full tool loop in isolation, buffering every SSE event instead
+// of sending it immediately. The hard requirement (docs/SECURITY.md) is that
+// an operator on Kimi must never see a blank reply or a max_tokens failure --
+// tuning (reasoning_effort:"low", see kimi.ts) makes that rare, not
+// impossible, so nothing reaches the browser until the WHOLE attempt (every
+// tool iteration) is confirmed to have produced a genuine, complete answer. A
+// failure at any point -- truncation, a thrown error, a timeout -- discards
+// the buffer entirely; the caller re-runs the same question against Claude
+// from scratch. Partial Kimi tool results are deliberately never reused: a
+// failed run may have incomplete results, and correctness matters more than
+// the extra cost/latency of a clean re-run.
+type KimiAttempt =
+  | { ok: true; events: Record<string, unknown>[]; appended: Anthropic.MessageParam[] }
+  | { ok: false; reason: string };
+
+async function attemptKimi(
+  supabase: Parameters<typeof runTool>[0],
+  kimiApiKey: string,
+  systemPrompt: string,
+  conversation: Anthropic.MessageParam[],
+  maxIterations: number,
+): Promise<KimiAttempt> {
+  const events: Record<string, unknown>[] = [];
+  const newTurns: Anthropic.MessageParam[] = [];
+  let sawText = false;
+
+  try {
+    for (let i = 0; i < maxIterations; i++) {
+      const turn = await callKimi(kimiApiKey, systemPrompt, [...conversation, ...newTurns]);
+      console.log("chat: usage " + JSON.stringify({
+        turn: i,
+        provider: "kimi",
+        model: KIMI_MODEL,
+        input: turn.usage.input,
+        cache_read: turn.usage.cached,
+        cache_write: 0,
+        output: turn.usage.output,
+        thinking: turn.usage.reasoning,
+        stop: turn.stopReason,
+      }));
+
+      const content = turn.content;
+      const stopReason = turn.stopReason;
+      for (const b of content) {
+        if (b.type === "text" && b.text) {
+          sawText = true;
+          events.push({ type: "text", text: b.text });
+        }
+      }
+      newTurns.push({ role: "assistant", content });
+
+      const toolUses = content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+      if (stopReason === "tool_use" || (stopReason === "max_tokens" && toolUses.length)) {
+        const status = describeToolCalls(toolUses);
+        if (status) events.push({ type: "tool", text: status });
+
+        const toolResults: Anthropic.ToolResultBlockParam[] = [];
+        for (const block of toolUses) {
+          const result = await runTool(supabase, block.name, block.input as Record<string, unknown>);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: result.content,
+            is_error: result.isError,
+          });
+        }
+        newTurns.push({ role: "user", content: toolResults });
+        continue;
+      }
+
+      // A genuinely terminal turn. max_tokens here (no tool_use left to run)
+      // is exactly the answer-turn scratchpad-leak failure docs/SECURITY.md
+      // measured -- not something to show the operator, something to recover
+      // from via the fallback below.
+      if (stopReason === "max_tokens") return { ok: false, reason: "max_tokens" };
+      if (!sawText) return { ok: false, reason: "no_text" };
+      return { ok: true, events, appended: newTurns };
+    }
+    return { ok: false, reason: "max_iterations" };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: msg.includes("timed out") ? "timeout" : "error" };
+  }
+}
+
 export default {
   fetch: withSupabase({ auth: ["user"] }, async (req, ctx) => {
     try {
-      const { messages } = await req.json();
+      const { messages, modelProvider } = await req.json();
       if (!Array.isArray(messages) || messages.length === 0) {
         return Response.json({ error: "messages required" }, { status: 400 });
       }
@@ -53,12 +138,24 @@ export default {
       if (profileErr) console.error("chat: could not resolve caller profile", profileErr);
       const displayName = resolveDisplayName(role, profile?.first_name ?? null, profile?.last_name ?? null);
 
-      // Deploy-time config, read once per request -- deliberately NOT a
-      // per-request or operator-facing toggle yet (Phase 1). Anything other
-      // than the exact string "kimi" is the existing Anthropic path, so a typo
-      // or an unset secret fails safe onto what ships today rather than onto a
-      // half-configured second provider.
-      const provider = Deno.env.get("CHAT_MODEL_PROVIDER") === "kimi" ? "kimi" : "anthropic";
+      // CHAT_MODEL_PROVIDER is the deploy-time default (unset/anything but
+      // "kimi" fails safe onto what ships today). `modelProvider` on the
+      // request body is the Phase 2 operator toggle from web/index.html's
+      // model dropdown -- but it is client-controlled JSON, so it can only
+      // ever SELECT "kimi", never grant it: gated on `role`, the exact same
+      // check resolveDisplayName/buildSystemPrompt already use elsewhere in
+      // this function, resolved above via the SECURITY DEFINER
+      // current_role_name() RPC keyed off auth.uid(), not anything the caller
+      // supplied. A customer or pending account crafting
+      // `modelProvider:"kimi"` directly against this endpoint still gets
+      // "anthropic" -- confirmed live (docs/SECURITY.md), not just reasoned
+      // about, since the frontend hides the control but does not enforce it.
+      const deployProvider = Deno.env.get("CHAT_MODEL_PROVIDER") === "kimi" ? "kimi" : "anthropic";
+      const provider = modelProvider === "kimi" && role === "operator"
+        ? "kimi"
+        : modelProvider === "claude"
+          ? "anthropic"
+          : deployProvider;
       const kimiApiKey = Deno.env.get("KIMI_API_KEY");
       if (provider === "kimi" && !kimiApiKey) {
         console.error("chat: CHAT_MODEL_PROVIDER=kimi but KIMI_API_KEY is unset");
@@ -85,155 +182,138 @@ export default {
           const send = (event: Record<string, unknown>) =>
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
           let sawText = false;
+          let usedFallback = false;
 
           try {
-            for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-              // Both providers reduce to the same two values: an
-              // Anthropic-shaped content block array and a stop_reason. Tool
-              // execution, the status line, the honest-fallback and `appended`
-              // therefore stay single-implementation below, and the SSE events
-              // the frontend consumes are identical either way. Only the API
-              // call, the tool-schema translation and the response parsing
-              // differ -- buildSystemPrompt, TOOLS and runTool are shared
-              // verbatim, which is what makes the RLS behaviour provider-
-              // independent by construction rather than by convention.
-              let content: Anthropic.ContentBlockParam[];
-              let stopReason: string | null;
-
-              if (provider === "kimi") {
-                // Non-streaming for Phase 1. Fireworks does stream (confirmed
-                // live: standard OpenAI `chat.completion.chunk` SSE, with
-                // reasoning on its own `delta.reasoning_content` channel and
-                // tool-call arguments arriving as fragments to be reassembled
-                // by index), but none of that fits the Anthropic SDK stream
-                // handle this loop is written against -- see docs/SECURITY.md
-                // for the scoping decision. The envelope is unchanged; the
-                // answer just arrives as one `text` event instead of many.
-                const turn = await callKimi(
-                  kimiApiKey as string,
-                  systemPrompt,
-                  [...conversation, ...newTurns],
-                );
-                console.log("chat: usage " + JSON.stringify({
-                  turn: i,
-                  provider: "kimi",
-                  model: KIMI_MODEL,
-                  input: turn.usage.input,
-                  // Fireworks caches the prefix automatically -- there is no
-                  // cache_control to place and no separate write charge, so
-                  // this reports its hit count and a structural zero rather
-                  // than pretending the Anthropic breakpoint model applies.
-                  cache_read: turn.usage.cached,
-                  cache_write: 0,
-                  output: turn.usage.output,
-                  thinking: turn.usage.reasoning,
-                  stop: turn.stopReason,
-                }));
-                content = turn.content;
-                stopReason = turn.stopReason;
-                for (const b of content) {
-                  if (b.type === "text" && b.text) {
-                    sawText = true;
-                    send({ type: "text", text: b.text });
-                  }
-                }
-              } else {
-                const params: Anthropic.MessageStreamParams = {
-                  model: "claude-sonnet-5",
-                  // Sonnet 5 runs adaptive thinking even with no `thinking` param, and
-                  // budget_tokens (the old way to reserve thinking separately) is
-                  // REMOVED on this model -- so thinking and the answer text compete
-                  // for one shared max_tokens pool, with no way to partition it.
-                  //
-                  // `effort` is the lever that actually bounds thinking DEPTH, and it
-                  // is doing the real work here -- not max_tokens. Measured live
-                  // (throwaway operator, real data, this exact loop; 39 trials):
-                  //   - At the old 2048 with default effort, a two-vintage comparison
-                  //     spent the ENTIRE budget on thinking (2048/2048) and returned
-                  //     no text at all.
-                  //   - Raising max_tokens alone made it WORSE, not better: at 8000,
-                  //     thinking simply expanded to fill the new ceiling (7,999 and
-                  //     8,000 tokens observed), still returned blank on 2/11 trials,
-                  //     and pushed one model call to 67.6s. The heaviest question
-                  //     (5 vintages + a broad ask) failed 2/2 at 73.7s and 80.6s.
-                  //     Adaptive thinking has no fixed appetite to "leave room" for.
-                  //   - effort:"low" bounds it hard: peak thinking 0-400 tokens across
-                  //     8 trials spanning every question shape, 0/8 truncated, and
-                  //     two-vintage latency fell from 26-59s to 10.9-12.0s. The heavy
-                  //     probe passed 2/2 at 22.3-27.5s, peaking at 896 thinking
-                  //     tokens. Answer quality held: same three-part structure, same
-                  //     figures (both effort levels independently reported 2024's GDD
-                  //     ~27% above 2023's).
-                  // 4000 is ~1.85x the largest total output ever observed under this
-                  // config (2,156 tokens, heavy probe) -- real headroom without
-                  // re-inviting the runaway. Step to effort:"medium" (measured: adds
-                  // ~6-8s on two-vintage, still 0/6 truncated) if answers ever read as
-                  // too shallow. The honest-fallback below stays as the backstop.
-                  max_tokens: 4000,
-                  system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
-                  tools: TOOLS,
-                  messages: withCacheBreakpoint([...conversation, ...newTurns]),
-                };
-
-                // `output_config.effort` postdates this project's pinned SDK types
-                // (@anthropic-ai/sdk ^0.70, which is 0.70.1 -- the field lands in the
-                // 0.124 types), but the API accepts and honors it today: verified by
-                // direct measurement, with a clean dose-response across the three
-                // levels (default -> 1,189-8,000 thinking tokens, medium -> 398-687,
-                // low -> 0-400). Cast here rather than bumping the SDK 54 minor
-                // versions under a live feature -- insights-scan shares the same pin.
-                // If that pin is ever raised, delete the cast and move the field into
-                // the typed object above.
-                const modelStream = anthropic.messages.stream(
-                  { ...params, output_config: { effort: "low" } } as Anthropic.MessageStreamParams,
-                );
-
-                // finalMessage().usage DROPS output_tokens_details on this SDK
-                // version -- confirmed directly: the raw message_delta event carries
-                // {"output_tokens_details":{"thinking_tokens":33}} while
-                // finalMessage() reports no such field at all. docs/SECURITY.md's
-                // rule for this model says to verify thinking spend with exactly
-                // that field, so it has to be captured off the raw event or the
-                // check silently reports nothing forever.
-                let thinkingTokens = 0;
-                modelStream.on("streamEvent", (e) => {
-                  if (e.type === "message_delta") {
-                    const t = (e.usage as { output_tokens_details?: { thinking_tokens?: number } } | undefined)
-                      ?.output_tokens_details?.thinking_tokens;
-                    if (typeof t === "number") thinkingTokens = t;
-                  }
-                });
-                // Text is forwarded from every turn, not only the terminal one. In
-                // 39+ measured trials a tool_use turn emitted no text at all, so
-                // this is near-theoretical -- but if one ever does, showing what
-                // the model actually said beats the old behaviour of silently
-                // discarding it.
-                modelStream.on("text", (delta: string) => {
-                  if (delta) { sawText = true; send({ type: "text", text: delta }); }
-                });
-
-                const response = await modelStream.finalMessage();
-
-                // Counts only, no content. Cache effectiveness is invisible from the
-                // response body, and `cache_read_input_tokens` is the one field that
-                // separates "the breakpoint below is working" from "we are silently
-                // paying full price for the whole history on every turn" -- a
-                // regression there is otherwise completely silent. Logged per model
-                // turn so it is checkable in production, not only in a harness.
-                const usage = response.usage;
-                console.log("chat: usage " + JSON.stringify({
-                  turn: i,
-                  input: usage.input_tokens,
-                  cache_read: usage.cache_read_input_tokens ?? 0,
-                  cache_write: usage.cache_creation_input_tokens ?? 0,
-                  output: usage.output_tokens,
-                  thinking: thinkingTokens,
-                  stop: response.stop_reason,
-                }));
-
-                content = response.content;
-                stopReason = response.stop_reason;
+            if (provider === "kimi") {
+              const attempt = await attemptKimi(
+                ctx.supabase,
+                kimiApiKey as string,
+                systemPrompt,
+                conversation,
+                MAX_TOOL_ITERATIONS,
+              );
+              if (attempt.ok) {
+                for (const e of attempt.events) send(e);
+                send({ type: "done", appended: attempt.appended, truncated: false });
+                return;
               }
+
+              // Mandatory fallback (docs/SECURITY.md): re-run the SAME
+              // question against Claude, from scratch, below -- capped at
+              // once per question by construction, since everything past
+              // this point is the plain, non-fallback Claude path (if Claude
+              // itself also fails, that's the existing honest-fallback/error
+              // handling already in this file, not a further retry loop).
+              // Logged with shape, not content, so real frequency is visible
+              // in production without putting question text in logs.
+              const lastMsg = conversation[conversation.length - 1];
+              console.error("chat: kimi failed, falling back to claude", {
+                reason: attempt.reason,
+                questionChars: typeof lastMsg?.content === "string"
+                  ? lastMsg.content.length
+                  : JSON.stringify(lastMsg?.content ?? "").length,
+                priorTurns: conversation.length,
+              });
+              usedFallback = true;
+            }
+
+            for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+              const params: Anthropic.MessageStreamParams = {
+                model: "claude-sonnet-5",
+                // Sonnet 5 runs adaptive thinking even with no `thinking` param, and
+                // budget_tokens (the old way to reserve thinking separately) is
+                // REMOVED on this model -- so thinking and the answer text compete
+                // for one shared max_tokens pool, with no way to partition it.
+                //
+                // `effort` is the lever that actually bounds thinking DEPTH, and it
+                // is doing the real work here -- not max_tokens. Measured live
+                // (throwaway operator, real data, this exact loop; 39 trials):
+                //   - At the old 2048 with default effort, a two-vintage comparison
+                //     spent the ENTIRE budget on thinking (2048/2048) and returned
+                //     no text at all.
+                //   - Raising max_tokens alone made it WORSE, not better: at 8000,
+                //     thinking simply expanded to fill the new ceiling (7,999 and
+                //     8,000 tokens observed), still returned blank on 2/11 trials,
+                //     and pushed one model call to 67.6s. The heaviest question
+                //     (5 vintages + a broad ask) failed 2/2 at 73.7s and 80.6s.
+                //     Adaptive thinking has no fixed appetite to "leave room" for.
+                //   - effort:"low" bounds it hard: peak thinking 0-400 tokens across
+                //     8 trials spanning every question shape, 0/8 truncated, and
+                //     two-vintage latency fell from 26-59s to 10.9-12.0s. The heavy
+                //     probe passed 2/2 at 22.3-27.5s, peaking at 896 thinking
+                //     tokens. Answer quality held: same three-part structure, same
+                //     figures (both effort levels independently reported 2024's GDD
+                //     ~27% above 2023's).
+                // 4000 is ~1.85x the largest total output ever observed under this
+                // config (2,156 tokens, heavy probe) -- real headroom without
+                // re-inviting the runaway. Step to effort:"medium" (measured: adds
+                // ~6-8s on two-vintage, still 0/6 truncated) if answers ever read as
+                // too shallow. The honest-fallback below stays as the backstop.
+                max_tokens: 4000,
+                system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+                tools: TOOLS,
+                messages: withCacheBreakpoint([...conversation, ...newTurns]),
+              };
+
+              // `output_config.effort` postdates this project's pinned SDK types
+              // (@anthropic-ai/sdk ^0.70, which is 0.70.1 -- the field lands in the
+              // 0.124 types), but the API accepts and honors it today: verified by
+              // direct measurement, with a clean dose-response across the three
+              // levels (default -> 1,189-8,000 thinking tokens, medium -> 398-687,
+              // low -> 0-400). Cast here rather than bumping the SDK 54 minor
+              // versions under a live feature -- insights-scan shares the same pin.
+              // If that pin is ever raised, delete the cast and move the field into
+              // the typed object above.
+              const modelStream = anthropic.messages.stream(
+                { ...params, output_config: { effort: "low" } } as Anthropic.MessageStreamParams,
+              );
+
+              // finalMessage().usage DROPS output_tokens_details on this SDK
+              // version -- confirmed directly: the raw message_delta event carries
+              // {"output_tokens_details":{"thinking_tokens":33}} while
+              // finalMessage() reports no such field at all. docs/SECURITY.md's
+              // rule for this model says to verify thinking spend with exactly
+              // that field, so it has to be captured off the raw event or the
+              // check silently reports nothing forever.
+              let thinkingTokens = 0;
+              modelStream.on("streamEvent", (e) => {
+                if (e.type === "message_delta") {
+                  const t = (e.usage as { output_tokens_details?: { thinking_tokens?: number } } | undefined)
+                    ?.output_tokens_details?.thinking_tokens;
+                  if (typeof t === "number") thinkingTokens = t;
+                }
+              });
+              // Text is forwarded from every turn, not only the terminal one. In
+              // 39+ measured trials a tool_use turn emitted no text at all, so
+              // this is near-theoretical -- but if one ever does, showing what
+              // the model actually said beats the old behaviour of silently
+              // discarding it.
+              modelStream.on("text", (delta: string) => {
+                if (delta) { sawText = true; send({ type: "text", text: delta }); }
+              });
+
+              const response = await modelStream.finalMessage();
+
+              // Counts only, no content. Cache effectiveness is invisible from the
+              // response body, and `cache_read_input_tokens` is the one field that
+              // separates "the breakpoint below is working" from "we are silently
+              // paying full price for the whole history on every turn" -- a
+              // regression there is otherwise completely silent. Logged per model
+              // turn so it is checkable in production, not only in a harness.
+              const usage = response.usage;
+              console.log("chat: usage " + JSON.stringify({
+                turn: i,
+                input: usage.input_tokens,
+                cache_read: usage.cache_read_input_tokens ?? 0,
+                cache_write: usage.cache_creation_input_tokens ?? 0,
+                output: usage.output_tokens,
+                thinking: thinkingTokens,
+                stop: response.stop_reason,
+              }));
+
+              const content: Anthropic.ContentBlockParam[] = response.content;
+              const stopReason: string | null = response.stop_reason;
 
               newTurns.push({ role: "assistant", content });
 
@@ -292,6 +372,21 @@ export default {
                     ? "That answer needed more room than I had to work with -- try narrowing the question (a specific block, vintage, or metric) and I'll try again."
                     : "I wasn't able to put together an answer for that -- try rephrasing the question.",
                 });
+              }
+
+              // Fallback disclosure: appended after the answer is known (good
+              // or honestly degraded), as its own small text event plus into
+              // `newTurns` so it persists in the replayed conversation
+              // history -- the operator should always see plainly that Kimi
+              // failed and this reply came from the backup model, never find
+              // out silently.
+              if (usedFallback) {
+                const note = "\n\n*(answered via backup model due to a processing issue)*";
+                send({ type: "text", text: note });
+                const last = newTurns[newTurns.length - 1];
+                if (last.role === "assistant" && Array.isArray(last.content)) {
+                  last.content = [...last.content, { type: "text", text: note }];
+                }
               }
 
               // `truncated` rides on the done event rather than being concatenated

@@ -2585,3 +2585,171 @@ assumption the work started under. And do not carry a provider-specific
 diagnostic across: `thinking_tokens` is the right field for detecting runaway
 reasoning on Sonnet 5 and the WRONG one on Kimi, which spends its runaway in
 `content` where that counter cannot see it.
+
+## Kimi K3 Phase 2: `reasoning_effort` structurally fixes the answer-turn leak, and a mandatory Claude fallback covers what tuning doesn't
+
+Built on `feat/kimi-operator-toggle` (off `spike/kimi-integration`), overriding
+the Phase 1 recommendation above at the user's explicit direction: cost is not
+a concern, and the requirement is that an operator using Kimi must never see a
+blank reply or a max_tokens failure, full stop. Since tuning alone cannot
+promise zero, the design is tuning PLUS a mandatory automatic fallback to
+Claude, plus an operator-only, server-enforced toggle so this is opt-in rather
+than a deploy-wide change.
+
+### `reasoning_effort` is a real Fireworks field, and it fixes the actual failure
+
+Checked structurally, not just tried: an unrelated nonsense field on a real
+Fireworks request 400s with `"Extra inputs are not permitted, field: ..."`, so
+the API's field validation is strict enough that an ACCEPTED field is a
+genuine signal, not a silently-ignored one. `reasoning_effort` was accepted.
+`thinking:{type:"enabled",budget_tokens:N}` (the Anthropic-shaped alternative)
+is also real - rejected only for being under Fireworks' 1024-token minimum,
+not for being unrecognised - but measurement below shows it doesn't help here.
+
+Measured against the same real failure Phase 1 documented (two-vintage
+question, full RLS tool loop, real ~57KB of tool results landing on the answer
+turn), 5 trials/condition at the shipped `max_tokens:4000`:
+
+| condition | truncated | scratchpad leaked into answer | output tokens | wall clock |
+|---|---|---|---|---|
+| baseline (no param) | 3/5 | 3/5 | 1,529-4,000 (hits ceiling) | 31.5-81.7s |
+| `reasoning_effort:"low"` | **0/5** | **0/5** | 665-1,109 | 14.2-28.6s |
+| `reasoning_effort:"medium"` | 1/5 | 0/5 | 1,653-4,000 | 37.0-70.5s |
+| `thinking.budget_tokens:1024` | 3/4 (aborted early) | 3/4 | up to 4,000 | 67.8-85.5s |
+
+`"low"` is the one condition that eliminated both failure modes in this
+sample, and it did so while also being 2-3x faster and using a fraction of the
+output tokens - the opposite of every `max_tokens`-only lever both this
+project's models have shown so far (raising the ceiling here, and on Sonnet 5
+per the `output_config.effort` entry above, only ever bought more room for the
+runaway to fill, not less runaway). Shipped as `kimi.ts`'s
+`KIMI_REASONING_EFFORT`, sent on every Kimi request.
+
+**Honest limit on this number.** 5 trials/condition on one question shape is
+enough to show the effect is real and structural (the mechanism - bounding
+reasoning depth directly rather than bounding the shared token pool it
+competes in - explains why it works where `max_tokens` didn't), not enough to
+claim a precise failure rate. That is exactly what the mandatory fallback
+below exists to make not matter: the operator-visible guarantee does not rest
+on this number being small, it rests on every failure being caught.
+
+The planned system-prompt-instruction A/B (Part 1.2 of the brief this round
+worked from) was not run: once `reasoning_effort:"low"` measured 0/5 on both
+failure modes on the known-worst case, there was no remaining gap for a
+prompt-level mitigation to close, and the user asked to keep verification to
+1-2 questions rather than exhaustively covering every combination.
+
+### The mandatory fallback: buffer the whole Kimi attempt, discard-and-redo-on-Claude on any failure
+
+`attemptKimi()` (`supabase/functions/chat/index.ts`) runs Kimi's complete
+tool-calling loop - every iteration, not just the first - buffering SSE events
+in memory instead of sending them to the browser. Nothing reaches the client
+until the WHOLE attempt is known to have ended in a genuine, complete answer.
+Three ways to fail, all handled the same way: a terminal `max_tokens` turn (the
+scratchpad-leak shape), a thrown error (network/HTTP), or the existing 180s
+`callKimi` timeout maturing into a thrown error. Any of the three discards the
+buffer entirely and falls through to the SAME code path a plain
+`CHAT_MODEL_PROVIDER=anthropic` request already takes - a fresh Claude run
+from scratch against the original conversation, never Kimi's partial tool
+results (a failed run's results may be incomplete, and correctness matters
+more than the cost of redoing the tool calls). A small disclosure -
+`"(answered via backup model due to a processing issue)"` - is appended to the
+reply and to `newTurns` so it survives in the replayed history, not just the
+one screen. Capped at once per question by construction: the fallback branch
+only runs when `provider==="kimi"`, and everything past it is the ordinary,
+non-fallback Claude path, so a Claude failure after a Kimi failure hits the
+same pre-existing `catch`/`error` event this file already had, not a second
+retry.
+
+**Verified functionally against the real RLS path** (real `tools.ts`/`kimi.ts`,
+real throwaway operator, reproduced in the harness the same way every prior
+round in this file was, since Node cannot execute `index.ts` itself - Deno-only
+imports):
+1. Normal Kimi success: no fallback, real answer, unchanged from Phase 1.
+2. Forced truncation (a wrapped `callKimi` that reports `max_tokens` on the
+   first genuinely terminal, non-tool-call turn): fallback fires, Claude
+   answers the same question from scratch, disclosure note appended.
+3. Forced hard error (a wrapped `callKimi` that throws): same result.
+
+**Verified against the real deployed function**, not just the harness
+reproduction: a live HTTP request to the deployed `chat` function with
+`modelProvider:"kimi"` as the throwaway operator returned exactly ONE `text`
+SSE event (Kimi's non-streaming shape - a whole turn arrives as one chunk),
+confirming the request genuinely reached Kimi and not just the harness's
+stand-in for it.
+
+### The operator toggle: per-request, not deploy-wide, and enforced server-side
+
+`web/index.html` gained a `<select>` in the chat header (`Model: Claude / Kimi
+K3`), hidden by default and shown only when `initChat()`'s role is
+`'operator'` - reset to `"claude"` on every new chat (per-conversation, not
+persisted to `user_profiles`; no stated need yet to remember it across
+sessions, and persisting an experimental-model preference by default seemed
+like the wrong default to ship first). The selection rides on the existing
+`sb.functions.invoke('chat', ...)` call as `modelProvider`.
+
+This is client-controlled JSON and therefore not trusted. `index.ts` gates it
+on `role`, resolved the same way the rest of this function already does (the
+SECURITY DEFINER `current_role_name()` RPC keyed off `auth.uid()`) - the EXACT
+check `resolveDisplayName`/`buildSystemPrompt` already use to split
+operator/customer behaviour, not a new mechanism:
+
+```
+const provider = modelProvider === "kimi" && role === "operator" ? "kimi"
+  : modelProvider === "claude" ? "anthropic"
+  : deployProvider; // CHAT_MODEL_PROVIDER env, unset in production today
+```
+
+**Confirmed live, not just reasoned about, that a customer cannot select Kimi
+by crafting the request directly** (bypassing the UI, which only hides the
+control): a real HTTP request to the deployed function as the throwaway
+customer, JWT and all, with `modelProvider:"kimi"` explicitly set, was
+answered with 17 `text` SSE events - Claude's many-small-token-delta shape,
+not Kimi's one-lump shape. The same request as the throwaway operator returned
+1 event. This is a structural signature (streaming vs. non-streaming, not
+something either backend can fake by coincidence), and it is what the
+verification actually checked rather than inferring from answer tone or
+latency alone. An operator explicitly picking `"claude"` and a customer
+sending no `modelProvider` at all both also confirmed Claude's shape,
+so neither existing behaviour nor the explicit opt-out regressed.
+
+### Browser check: throwaway operator and customer, real deployed function
+
+`web/index.html` served locally against the live deployed project (no local
+Supabase available), throwaway accounts, hard-reloaded per this file's
+standing browser-check rule.
+
+- Operator: `MODEL` row visible under the chat subtitle, `Kimi K3` selectable,
+  asking a real question produced a real, fully-rendered three-part answer
+  (Answer first / detail bullets / gold "Takeaway") - not blank, not
+  truncated. Console showed only the pre-existing, already-documented
+  `getThresholds()` startup-race 401 (see that entry above) and one unrelated
+  404 from serving the file with a plain local static server - neither related
+  to this round's changes.
+- Customer: no `MODEL` row anywhere in the DOM (not just visually hidden -
+  confirmed via `isVisible()`), same pre-existing console noise, no new
+  errors.
+
+**Not covered this round, by explicit scope decision** (the user asked for 1-2
+questions and working functionality over exhaustive coverage, not a gap
+discovered late): a live, real-Kimi-truncation-forced browser screenshot of
+the disclosure note (proven instead via the harness's forced-failure cases
+above, which exercise the identical `attemptKimi`-then-Claude code shape), the
+220+-case markdown-adversarial-suite re-run against real Kimi output
+specifically, and a 20-trial operator-visible-failure-rate battery. The
+mechanism that would make that battery's answer "zero" - the fallback catching
+every failure before it reaches the browser - is what cases 2 and 3 above
+verify directly; a large-N battery would measure the fallback's overhead
+(latency, cost) more precisely, not whether it engages, which is what those
+cases already establish.
+
+RULE: when a vendor's API rejects unknown fields with a real 400 (checked
+directly, not assumed), that rejection is a feature for exactly this kind of
+investigation - an ACCEPTED undocumented-in-the-brief field is trustworthy
+evidence that it exists and does something, not something to verify only via
+its downstream effect. And when building a fallback between two providers
+that share a streaming envelope but differ in how they fill it (one
+token-delta stream, one whole-turn lump), that structural difference is a
+free, unfakeable way to verify which one actually answered a given request
+in production - reach for it before reasoning from tone, latency, or trusting
+the client-supplied selector alone.

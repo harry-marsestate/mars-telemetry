@@ -377,6 +377,13 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .chat-hd{padding:4px 0 18px; border-bottom:1px solid var(--line); margin-bottom:18px}
 .chat-ttl{font-family:var(--display); font-size:31px; font-weight:400; letter-spacing:.01em}
 .chat-sub{font-family:var(--mono); font-size:10.5px; color:var(--muted-2); margin-top:8px; letter-spacing:.03em}
+.chat-model{margin-top:10px; display:flex; align-items:center; gap:8px}
+.chat-model-label{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); letter-spacing:.08em; text-transform:uppercase}
+.chat-model select{
+  background:var(--ink-3); border:1px solid var(--line); border-radius:3px;
+  color:var(--cream); font-family:var(--ui); font-size:12px; padding:5px 9px;
+}
+.chat-model select:focus{outline:none; border-color:var(--gold-dim)}
 .chat-log{flex:1; min-height:0; overflow-y:auto; padding-right:10px; display:flex; flex-direction:column; gap:20px}
 .chat-log::-webkit-scrollbar{width:5px}
 .chat-log::-webkit-scrollbar-thumb{background:var(--line-2); border-radius:3px}
@@ -578,6 +585,17 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
       <div class="chat-hd">
         <div class="chat-ttl">Ask the estate</div>
         <div class="chat-sub">Vineyard and winery telemetry &middot; Blocks 1&ndash;3 &middot; Vintages 2022&ndash;2026</div>
+        <!-- Operator-only, hidden by default; shown from initChat() only when
+             role==='operator'. Cosmetic gate ONLY -- the real enforcement is
+             server-side in supabase/functions/chat/index.ts, since a customer
+             could otherwise select this via a direct, crafted request. -->
+        <div class="chat-model" id="chatModelRow" style="display:none">
+          <span class="chat-model-label">Model</span>
+          <select id="chatModelSelect">
+            <option value="claude">Claude</option>
+            <option value="kimi">Kimi K3</option>
+          </select>
+        </div>
       </div>
       <div class="chat-log" id="chatlog"></div>
       <div class="chip-toggle" id="chipToggle"><span>Suggestions</span><span id="chipChevron">&#9652;</span></div>
@@ -3677,6 +3695,12 @@ let rz; addEventListener('resize',()=>{clearTimeout(rz); rz=setTimeout(()=>{
 let chatHistory = []; // Anthropic-shaped {role, content} turns, held client-side -- the chat function is stateless and expects full history every call
 let chatUserId = null; // tracks which authenticated user the visible chat belongs to
 let chipsExpanded = true;
+// Operator-only model choice, per-conversation (reset in initChat, never
+// persisted to user_profiles -- simplest default for a Phase 1 toggle with no
+// stated need to remember it across sessions). Cosmetic on this side of the
+// wire only: supabase/functions/chat/index.ts re-derives role from the JWT
+// and ignores this value from any non-operator account.
+let chatModelProvider = 'claude';
 
 const LOG=$('#chatlog');
 function addMsg(who, html){
@@ -3887,7 +3911,7 @@ async function ask(q){
   };
   const schedule=()=>{ if(frame===null) frame=requestAnimationFrame(paint); };
 
-  const {data, error} = await sb.functions.invoke('chat', {body:{messages:pending}});
+  const {data, error} = await sb.functions.invoke('chat', {body:{messages:pending, modelProvider:chatModelProvider}});
   if(error){
     let message=error.message;
     if(error.context && typeof error.context.json==='function'){
@@ -4005,6 +4029,16 @@ const CUSTOMER_SUGGESTIONS = [
 async function initChat(session, role){
   chatHistory = [];
   LOG.innerHTML = '';
+
+  // Per-conversation, not persisted -- resets to Claude on every new chat
+  // (initChat runs on first sign-in and on a real user change, see the note
+  // above this function). Visibility is cosmetic; index.ts enforces role
+  // server-side regardless of what this branch does.
+  chatModelProvider = 'claude';
+  const modelRow = $('#chatModelRow'), modelSelect = $('#chatModelSelect');
+  modelSelect.value = 'claude';
+  modelRow.style.display = role==='operator' ? '' : 'none';
+  modelSelect.onchange = () => { chatModelProvider = modelSelect.value; };
 
   // Same operator/customer split as the server-side persona
   // (resolveDisplayName() in supabase/functions/chat/index.ts) -- these

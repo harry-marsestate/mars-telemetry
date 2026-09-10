@@ -2743,6 +2743,20 @@ operator control request (same question, same flag) at
 `provider:"kimi"` in the first window, and one in the second, would close this
 gap directly; a CLI/token limitation blocked pulling it from this session.
 
+**Closed: confirmed directly against the real dashboard logs by the user**,
+not inferred from the SSE-shape signature alone. The customer window
+(2026-09-10T15:13:09.865Z-15:13:15.788Z) shows a `"chat: usage"` line with NO
+`provider` field at all - the Claude/Anthropic code path, which never tags
+itself with one, only Kimi's branch does. The operator window
+(15:13:15.789Z-15:13:22.148Z) shows a `"chat: usage"` line WITH
+`"provider":"kimi","model":"accounts/fireworks/models/kimi-k3"`. This is the
+server's own account of what it did, not external behavioural evidence of
+it - `attemptKimi()` was never even invoked for the crafted customer request,
+confirmed at the log line that only that function ever writes. Both proofs
+(the SSE-shape signature above and this log confirmation) now agree, so the
+customer-gating guarantee rests on direct evidence at two independent layers,
+not one.
+
 ### Browser check: throwaway operator and customer, real deployed function
 
 `web/index.html` served locally against the live deployed project (no local

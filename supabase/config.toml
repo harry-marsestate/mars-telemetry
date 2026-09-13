@@ -32,3 +32,9 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/insights-scan/deno.json"
 entrypoint = "./functions/insights-scan/index.ts"
+
+[functions.ingest-climate-2026]
+enabled = true
+verify_jwt = false
+import_map = "./functions/ingest-climate-2026/deno.json"
+entrypoint = "./functions/ingest-climate-2026/index.ts"

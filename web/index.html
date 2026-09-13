@@ -1541,7 +1541,7 @@ const SECTIONS = [
      category too until its "Measured" line (shortwave_radiation) did
      flip real for 2022-2025 -- its kind stays 'procedural' since 2026's
      mock generator is still a genuine client-side formula, but
-     getDataSourceLabel's REAL_CLIMATE_VINTAGES branch intercepts it
+     getDataSourceLabel's SOLAR_LABEL_REAL_VINTAGES branch intercepts it
      before this comment's claim would otherwise apply. UV stays mock
      indefinitely (confirmed unfixable, no real source exists).
    Flipping any metric from mock to real later (or narrowing which
@@ -1576,27 +1576,142 @@ const DATA_SOURCES = {
   fruit:             {kind:'procedural', detail:'Simulated weigh-tag record'},
 };
 
-// Vintages backed by real Open-Meteo/ERA5 data for air_temp/soil_moisture/
-// soil_temp/gdd_cumulative_calibrated/dtr_f (real-climate-data project, Phase 1-3,
-// 2026-08-25). Deliberately explicit, not inferred from `vintage!==CURRENT`
-// -- 2026 will eventually become archived too, but stays mock until its
-// own backfill happens (no same-year Grapegrowers report exists for it
-// yet, per that project's own scoping decision). Update this set by hand
-// if/when that changes -- don't let the check drift back to an implicit
-// archived-means-real assumption, which would silently start claiming
-// real data the day 2026 stops being CURRENT.
-const REAL_CLIMATE_VINTAGES = new Set([2022,2023,2024,2025]);
+// Per-metric real-vintage coverage for air_temp/humidity/precipitation/
+// soil_moisture/soil_temp, dynamically derived -- real-2026-climate-
+// ingestion project, 2026-09-13. Replaces the old hardcoded
+// REAL_CLIMATE_VINTAGES = {2022,2023,2024,2025} set (which required
+// hand-editing the day a future backfill made 2026 real, and could never
+// express "real for this metric but not that one," even though
+// ingest-climate-2026's own daily runs already show air_temp/humidity/
+// precipitation and soil_moisture/soil_temp landing through different
+// real-as-of dates for 2026 -- ERA5-Land's soil variables publish with a
+// longer lag than plain ERA5 surface variables). Mirrors insights-scan's
+// realVintagesByMetric() (supabase/functions/insights-scan/metrics.ts):
+// same real_metric_vintage_counts() RPC and metric_derivation table, so
+// there is one server-side source of truth for "which vintages are real
+// per metric," not two hardcoded copies drifting apart.
+//
+// Populated ONCE per session (refreshRealClimateVintages(), called from
+// runSessionGate() before showDashboard()), not per panel render --
+// unlike insights-scan's weekly batch job, every affected panel calls
+// isRealClimateVintage() on every render, so an RPC round-trip per call
+// would be a real, measurable slowdown. Falls back to the old known-real
+// set (2022-2025) if the fetch fails or hasn't resolved yet, so a
+// transient network error degrades to "at least as good as the prior
+// hardcoded behavior," never to "everything looks mock."
+const REAL_CLIMATE_RAW_METRICS = ['air_temp','humidity','precipitation','soil_moisture','soil_temp'];
+const MIN_ROWS_FOR_REAL_CLIMATE_VINTAGE = 100; // matches insights-scan's MIN_RAW_ROWS_FOR_REAL_EXISTENCE
+let realClimateByMetric = new Map(REAL_CLIMATE_RAW_METRICS.map(m => [m, new Set([2022,2023,2024,2025])]));
+let realClimateDerivationInputs = null; // metric_derivation rows, fetched once alongside
+
+// Bridges this file's derived-metric column names (gdd_cumulative_calibrated,
+// dtr_f) to metric_derivation's own key names (gdd_day, dtr) -- naming
+// only. WHICH raw metrics each one depends on is read live from
+// metric_derivation below, not hardcoded a third time (see
+// insights_engine.sql's own et0_in comment on why a hardcoded copy of
+// this mapping has drifted from the real formula before).
+const DERIVED_METRIC_KEY_MAP = { gdd_cumulative_calibrated: 'gdd_day', dtr_f: 'dtr', vpd_kpa: 'vpd_kpa' };
+
+async function refreshRealClimateVintages(){
+  try{
+    const [{data: counts, error: countsErr}, {data: derivation, error: derivationErr}, {data: asOf, error: asOfErr}] = await Promise.all([
+      sb.rpc('real_metric_vintage_counts', {p_metrics: REAL_CLIMATE_RAW_METRICS, p_vintages: VINTAGES}),
+      sb.from('metric_derivation').select('metric_key, derived_from'),
+      sb.rpc('real_climate_as_of_2026'),
+    ]);
+    if(countsErr || derivationErr){
+      console.error('refreshRealClimateVintages: falling back to last-known-real set', countsErr||derivationErr);
+    } else {
+      const byMetric = new Map(REAL_CLIMATE_RAW_METRICS.map(m => [m, new Set()]));
+      (counts||[]).forEach(row => {
+        if(Number(row.n) >= MIN_ROWS_FOR_REAL_CLIMATE_VINTAGE) byMetric.get(row.metric_key)?.add(row.vintage);
+      });
+      realClimateByMetric = byMetric;
+      realClimateDerivationInputs = derivation || [];
+    }
+    // real_climate_as_of_2026() returns null until every in-scope metric has
+    // landed at least one real row -- a query failure is logged and leaves
+    // realClimateAsOf2026 at whatever it already was (null at boot, or the
+    // last successful value), same "never advance past the last successful
+    // read" rule ingest-climate-2026 applies on the write side.
+    if(asOfErr) console.error('refreshRealClimateVintages: real_climate_as_of_2026 failed', asOfErr);
+    else realClimateAsOf2026 = asOf;
+  }catch(err){
+    console.error('refreshRealClimateVintages: unexpected error, falling back to last-known-real set', err);
+  }
+}
+
+// True iff `metricKey` (a raw metric in REAL_CLIMATE_RAW_METRICS, or one
+// of gdd_cumulative_calibrated/dtr_f/vpd_kpa) has real data for `vintage`.
+// Derived metrics are real iff EVERY raw input metric_derivation declares
+// for them is real for that vintage -- same rule realVintagesByMetric()
+// applies server-side.
+function isRealClimateVintage(metricKey, vintage){
+  if(realClimateByMetric.has(metricKey)) return realClimateByMetric.get(metricKey).has(vintage);
+  const derivedKey = DERIVED_METRIC_KEY_MAP[metricKey];
+  if(!derivedKey) return false;
+  if(!realClimateDerivationInputs) return vintage!==CURRENT; // pre-fetch fallback, matches the old hardcoded set
+  const inputs = realClimateDerivationInputs.filter(d=>d.metric_key===derivedKey).map(d=>d.derived_from);
+  return inputs.length>0 && inputs.every(inp => realClimateByMetric.get(inp)?.has(vintage));
+}
+
+// Vintages with an anchored/borrowed vintage_climate_calibration scalar
+// (20260824000000_climate_calibration_schema.sql) -- unlike raw sensor
+// availability, this requires a real, manual anchoring process (a
+// same-year Napa Valley Grapegrowers report) and can't be inferred from
+// row counts, so it stays a hand-maintained set, same convention as
+// IRRIGATION_REAL_VINTAGES/REAL_FRUIT_VINTAGES below. 2026 has no row
+// yet -- deliberately not estimated provisionally (real-2026-climate-
+// ingestion project's own scoping decision) -- so its GDD stays labeled
+// uncalibrated even once its underlying air_temp goes real.
+const CALIBRATED_GDD_VINTAGES = new Set([2022,2023,2024,2025]);
+
+// Solar stays OUT of scope for the real-2026-climate-ingestion project
+// (see supabase/functions/ingest-climate-2026's own comment) -- this is
+// deliberately still the old, static, hand-maintained set, not wired
+// into isRealClimateVintage(). Already known to overclaim relative to
+// renderSolar()'s actual implementation (100% client-side mock, every
+// vintage, real ERA5 shortwave_radiation rows notwithstanding) -- a
+// separate, already-flagged mismatch, unchanged and out of scope here.
+const SOLAR_LABEL_REAL_VINTAGES = new Set([2022,2023,2024,2025]);
+
+// Latest real date ingest-climate-2026 has actually landed for 2026,
+// read via real_climate_as_of_2026() -- null until every in-scope metric
+// has at least one real row. Deliberately NOT NOW (the ticking demo
+// clock) or MOCK_NOW (the seeded mock data's fixed anchor): see
+// vineyardAsOfDate() below, the filter bar's only consumer.
+let realClimateAsOf2026 = null;
+
+// The vineyard filter bar's "as of" badge, for CURRENT specifically:
+// the real latest date ingest-climate-2026 has actually landed, not
+// today (seriesEnd's NOW) or the seeded mock data's fixed MOCK_NOW
+// anchor -- real-2026-climate-ingestion project's own display
+// requirement. Falls back to seriesEnd()'s prior behavior if the real
+// date hasn't been fetched yet (still null; e.g. mid-boot) or if
+// real_climate_as_of_2026() itself returns null (no real 2026 row has
+// landed for every in-scope metric yet), so the badge always shows
+// something rather than going blank. Archived vintages are untouched --
+// seriesEnd(v,false) already returns that vintage's real Oct 31 season
+// end for them, which needed no "as of" ambiguity to begin with.
+function vineyardAsOfDate(v){
+  if(v===CURRENT && realClimateAsOf2026) return new Date(realClimateAsOf2026+'T00:00:00');
+  return seriesEnd(v, false);
+}
 
 // Vintages backed by real Mars Vineyard Farming irrigation records
 // (Track 2, event-level data from Mars Irrigation 2023/2024.xlsx,
 // source_system 'farm_irrigation_log'). Deliberately its own set, not
-// REAL_CLIMATE_VINTAGES -- irrigation's real coverage is narrower: 2022
+// derived from isRealClimateVintage()/REAL_CLIMATE_RAW_METRICS --
+// irrigation's real coverage is narrower and unrelated to climate: 2022
 // has no source file at all, and 2025 is annual-totals-only (its own
 // summary tile, not this daily-series metric), so both stay mock here.
+// Irrigation stays out of scope for the real-2026-climate-ingestion
+// project -- see ingest-climate-2026's own comment -- so this set is
+// unchanged by that work.
 const IRRIGATION_REAL_VINTAGES = new Set([2023,2024]);
 
 // Vintages backed by real InnoVint grower receipts (weigh-tag fruit intake).
-// Its own set, not REAL_CLIMATE_VINTAGES or IRRIGATION_REAL_VINTAGES: receipt
+// Its own set, not isRealClimateVintage()/IRRIGATION_REAL_VINTAGES: receipt
 // coverage is 2022-2024 only. 2025 has zero receipts (verified by sweeping
 // /growerReceipts for 2015-2027), so it stays mock even though it IS a real
 // climate vintage. Explicit by hand -- never let this drift to
@@ -1617,34 +1732,47 @@ const REAL_FRUIT_VINTAGES = new Set([2022,2023,2024]);
 function getDataSourceLabel(metricKey, vintage){
   const s = DATA_SOURCES[metricKey];
   if(!s) return '';
-  if(REAL_CLIMATE_VINTAGES.has(vintage)){
-    if(metricKey==='air_temp' || metricKey==='humidity' || metricKey==='precipitation') return 'Open-Meteo (ERA5)';
-    if(metricKey==='soil_moisture' || metricKey==='soil_temp') return 'Open-Meteo (ERA5-Land), surface 0-7cm';
-    // GDD and DTR were one branch, both claiming Grapegrowers calibration.
-    // Only GDD actually reads a calibrated column, so the shared claim was
-    // false for DTR -- split rather than left overclaiming for one metric.
-    if(metricKey==='gdd_cumulative_calibrated') return 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports';
-    // dtr_f is the RAW column and says so. daily_derived.dtr_f_calibrated
-    // exists but is NOT displayed: the scalar behind it was solved against
-    // Grapegrowers GDD *totals*, and no published DTR reference exists to
-    // anchor it, so unlike GDD it has no independent validation. The live
-    // dtr_low threshold (21°F) is also tuned to this raw distribution
-    // (real p10 = 20.8). See docs/SECURITY.md.
-    if(metricKey==='dtr_f') return 'Open-Meteo (ERA5), uncalibrated daily max − min';
-    // "daily average" wasn't said anywhere before this, which was a real
-    // gap independent of the (now-removed) peak chart panel -- a user had
-    // no way to know this line under-represents afternoon stress. Same
-    // 'solar' pattern just below already does exactly this kind of
-    // disambiguating suffix. This wording stands on its own, unrelated to
-    // the vpdpeak panel removal -- see docs/SECURITY.md.
-    if(metricKey==='vpd_kpa') return 'Derived metric · from Open-Meteo (ERA5) air temperature and humidity, daily average';
-    // Solar's own real coverage is partial, unlike the metrics above: only
-    // shortwave_radiation (the "Measured" line) is real -- UV stays a hard,
-    // unfixable gap (Open-Meteo's uv_index returns all-null historically),
-    // confirmed and accepted as permanent mock. A bare "Open-Meteo (ERA5)"
-    // here would overclaim the UV portion is real too; says so explicitly.
-    if(metricKey==='solar') return 'Open-Meteo (ERA5) · UV stays simulated';
+  if((metricKey==='air_temp' || metricKey==='humidity' || metricKey==='precipitation') && isRealClimateVintage(metricKey, vintage))
+    return 'Open-Meteo (ERA5)';
+  if((metricKey==='soil_moisture' || metricKey==='soil_temp') && isRealClimateVintage(metricKey, vintage))
+    return 'Open-Meteo (ERA5-Land), surface 0-7cm';
+  // GDD and DTR were one branch, both claiming Grapegrowers calibration.
+  // Only GDD actually reads a calibrated column, so the shared claim was
+  // false for DTR -- split rather than left overclaiming for one metric.
+  // Real-2026-climate-ingestion project: GDD's real branch now splits
+  // again, on CALIBRATED_GDD_VINTAGES -- 2026 can be real (once its
+  // underlying air_temp is) without being calibrated (no same-year
+  // Grapegrowers report exists yet), and claiming the Grapegrowers anchor
+  // for an uncalibrated column would be exactly the kind of subtitle
+  // overclaim this project has already had to walk back once (see
+  // docs/SECURITY.md's GDD/DTR calibration entry).
+  if(metricKey==='gdd_cumulative_calibrated' && isRealClimateVintage(metricKey, vintage)){
+    return CALIBRATED_GDD_VINTAGES.has(vintage)
+      ? 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports'
+      : 'Open-Meteo (ERA5), uncalibrated — no Napa Valley Grapegrowers report yet';
   }
+  // dtr_f is the RAW column and says so. daily_derived.dtr_f_calibrated
+  // exists but is NOT displayed: the scalar behind it was solved against
+  // Grapegrowers GDD *totals*, and no published DTR reference exists to
+  // anchor it, so unlike GDD it has no independent validation. The live
+  // dtr_low threshold (21°F) is also tuned to this raw distribution
+  // (real p10 = 20.8). See docs/SECURITY.md.
+  if(metricKey==='dtr_f' && isRealClimateVintage(metricKey, vintage)) return 'Open-Meteo (ERA5), uncalibrated daily max − min';
+  // "daily average" wasn't said anywhere before this, which was a real
+  // gap independent of the (now-removed) peak chart panel -- a user had
+  // no way to know this line under-represents afternoon stress. Same
+  // 'solar' pattern just below already does exactly this kind of
+  // disambiguating suffix. This wording stands on its own, unrelated to
+  // the vpdpeak panel removal -- see docs/SECURITY.md.
+  if(metricKey==='vpd_kpa' && isRealClimateVintage(metricKey, vintage)) return 'Derived metric · from Open-Meteo (ERA5) air temperature and humidity, daily average';
+  // Solar's own real coverage is partial, unlike the metrics above: only
+  // shortwave_radiation (the "Measured" line) is real -- UV stays a hard,
+  // unfixable gap (Open-Meteo's uv_index returns all-null historically),
+  // confirmed and accepted as permanent mock. A bare "Open-Meteo (ERA5)"
+  // here would overclaim the UV portion is real too; says so explicitly.
+  // Stays on the static SOLAR_LABEL_REAL_VINTAGES set -- solar is out of
+  // scope for the real-2026-climate-ingestion project.
+  if(metricKey==='solar' && SOLAR_LABEL_REAL_VINTAGES.has(vintage)) return 'Open-Meteo (ERA5) · UV stays simulated';
   if(metricKey==='fruit' && REAL_FRUIT_VINTAGES.has(vintage)) return 'InnoVint grower receipts · weigh-tag intake records';
   if(metricKey==='irrigation_volume' && IRRIGATION_REAL_VINTAGES.has(vintage)) return 'Mars Vineyard Farming records';
   if(s.kind==='weather') return vintage===CURRENT
@@ -2004,23 +2132,26 @@ async function vSets(c, getterOrMetric, color, name, opts={}){
 }
 
 /* Soil moisture/temperature: real data is estate-level (block_id=null)
-   for 2022-2025 -- ERA5-Land's ~11km grid can't distinguish the estate's
-   three blocks. Mock data stays genuinely per-block (SP-01/02/03) for
-   2026. vSets can't express this: it takes one getter shape per call,
-   but compare mode can mix a real and a mock vintage in the same chart,
-   each needing a different query shape. This picks the right shape per
-   vintage, matching compare mode's existing one-line-per-vintage
-   convention rather than vSets's single-shape-per-call one. */
+   for whichever vintages isRealClimateVintage(metric, v) says are real
+   (2022-2025 always; 2026 once ingest-climate-2026 has landed >=100 real
+   rows for this metric) -- ERA5-Land's ~11km grid can't distinguish the
+   estate's three blocks. Mock data stays genuinely per-block
+   (SP-01/02/03) for whichever vintages aren't real yet. vSets can't
+   express this: it takes one getter shape per call, but compare mode can
+   mix a real and a mock vintage in the same chart, each needing a
+   different query shape. This picks the right shape per vintage,
+   matching compare mode's existing one-line-per-vintage convention
+   rather than vSets's single-shape-per-call one. */
 async function soilSets(c, metric){
   if(c.compare){
     return Promise.all(c.vintages.map(async v => ({
       name: String(v), color: VCOLOR[v],
-      pts: REAL_CLIMATE_VINTAGES.has(v)
+      pts: isRealClimateVintage(metric, v)
         ? await buildSeriesReal(metric, 'estate', v, c.range, {align:c.align, scrollDays:c.scrollDays})
         : await meanSeriesReal(metric, c.blocks, v, c.range, {align:c.align, scrollDays:c.scrollDays})
     })));
   }
-  if(REAL_CLIMATE_VINTAGES.has(c.primary)){
+  if(isRealClimateVintage(metric, c.primary)){
     return [{name:'Estate', color:'#C6A961', pts: await buildSeriesReal(metric, 'estate', c.primary, c.range, {scrollDays:c.scrollDays})}];
   }
   return Promise.all(c.blocks.map(async id=>({name:B(id).label, color:B(id).color,
@@ -3066,7 +3197,7 @@ function renderFilters(tab){
   meta.innerHTML = tab==='vineyard'
     ? `<div class="live ${live?'on':'off'}"><span class="pulse"></span>${live?'Live feed':'Archive · '+primV(tab)}</div>
        <div class="fmeta-txt">${st.blocks.length} of 3 blocks · ${fmt(acresOf(selB(tab)),2)} acres</div>
-       <div class="fmeta-txt">as of ${dstr(seriesEnd(primV(tab), false))} ${primV(tab)}</div>
+       <div class="fmeta-txt">as of ${dstr(vineyardAsOfDate(primV(tab)))} ${primV(tab)}</div>
        <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`
     : `<div class="live on"><span class="pulse"></span>Cellar sensors live</div>`;
   host.appendChild(meta);
@@ -4444,6 +4575,13 @@ async function runSessionGate(){
   if(role==='pending' || role===null){ showPendingOnly(); return; }
   if(session.user.id !== chatUserId){ chatUserId = session.user.id; initChat(session, role); }
   await updateHeaderForSession(session, role);
+  // Must resolve before showDashboard()'s synchronous renderTab() calls --
+  // every panel that calls isRealClimateVintage()/vineyardAsOfDate() reads
+  // whatever refreshRealClimateVintages() last populated, not a fresh
+  // per-render fetch (see that function's own comment on why: it runs on
+  // every affected panel's every render, unlike insights-scan's weekly
+  // batch job). One RPC round-trip per session-gate pass, not per panel.
+  await refreshRealClimateVintages();
   showDashboard();
 }
 

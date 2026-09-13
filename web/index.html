@@ -731,13 +731,19 @@ function intervalToMs(interval) {
 
 async function getSeries({ metric, scope, vintage, range, end, agg }) {
   const bucket = RANGE_BUCKETS[range];
-  // seriesEndReal(), not endOfReal(): this fallback is only ever exercised by
-  // getLatestValue() (no caller passes `end` otherwise -- buildSeriesReal
-  // always does), whose whole point is "the true latest real value for this
-  // vintage" -- endOfReal()'s harvest-peak snapshot for an archived vintage
-  // would silently answer that as of ~25 Sep instead of the real season's
-  // actual end, the same root cause as the chart-range bug above.
-  const endDate = end || seriesEndReal(vintage);
+  // realClimateSeriesEnd(), not seriesEndReal(): this fallback is only ever
+  // exercised by getLatestValue() (no caller passes `end` otherwise --
+  // buildSeriesReal always does), whose whole point is "the true latest
+  // real value for this vintage." seriesEndReal() alone would answer that
+  // with MOCK_NOW (frozen 28 Jul 2026) for any real-for-2026 metric
+  // (air_temp, humidity, soil_moisture) -- the exact stale-tile bug this
+  // fix closes (current-vintage-date-range-freshness, 2026-09-13).
+  // realClimateSeriesEnd() falls through to seriesEndReal() unchanged for
+  // any metric NOT confirmed real for CURRENT (cellar_temp/cellar_rh),
+  // and endOfReal()'s harvest-peak snapshot for an archived vintage would
+  // separately have answered ~25 Sep instead of the real season's actual
+  // end, the same root cause as the chart-range bug above.
+  const endDate = end || realClimateSeriesEnd(metric, vintage);
   const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
 
   const { data, error } = await sb.rpc('series_bucketed', {
@@ -764,8 +770,10 @@ async function getSeries({ metric, scope, vintage, range, end, agg }) {
 }
 
 async function getDerivedSeries({ field, vintage, range, end }) {
-  // seriesEndReal(), not endOfReal() -- see getSeries()'s comment above.
-  const endDate = end || seriesEndReal(vintage);
+  // realClimateSeriesEnd(), not seriesEndReal() -- see getSeries()'s
+  // comment above; same fix, same reasoning, keyed on `field` here
+  // (gdd_cumulative_calibrated/dtr_f/vpd_kpa/et0_in) instead of `metric`.
+  const endDate = end || realClimateSeriesEnd(field, vintage);
   const bucket = RANGE_BUCKETS[range];
   const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
   const { data, error } = await sb.from('daily_derived')
@@ -1248,7 +1256,14 @@ function buildSeries(getter, v, range, opts={}){
    simulating. metric/scope match your METRICS keys and block IDs. */
 async function buildSeriesReal(metric, scope, v, range, opts={}){
   const r = RANGES[range];
-  const end = opts.end || applyScroll(seriesEndReal(v, opts.align), v, range, opts.scrollDays);
+  // realClimateSeriesEnd(), not seriesEndReal() -- current-vintage-date-
+  // range-freshness fix, 2026-09-13. The single choke point every real-
+  // climate panel's CURRENT-vintage chart range flows through (vSets/
+  // soilSets both call buildSeriesReal with their own metric key intact);
+  // a no-op for irrigation_volume/cellar_temp/cellar_rh, still 100%
+  // simulated for 2026 and confirmed unaffected. See realClimateSeriesEnd's
+  // own comment for the full reasoning.
+  const end = opts.end || applyScroll(realClimateSeriesEnd(metric, v, opts.align), v, range, opts.scrollDays);
   const result = await getSeries({ metric, scope, vintage: v, range, end, agg: opts.agg });
   const pts = result.points.map(p => {
     const d = new Date(p.t);
@@ -1260,7 +1275,9 @@ async function buildSeriesReal(metric, scope, v, range, opts={}){
    dbt view directly (gdd/dtr/vpd/et0 aren't in sensor_readings). */
 async function buildDerivedSeriesReal(field, v, range, opts={}){
   const r = RANGES[range];
-  const end = opts.end || applyScroll(seriesEndReal(v, opts.align), v, range, opts.scrollDays);
+  // realClimateSeriesEnd(), not seriesEndReal() -- same fix as
+  // buildSeriesReal above, keyed on `field`.
+  const end = opts.end || applyScroll(realClimateSeriesEnd(field, v, opts.align), v, range, opts.scrollDays);
   const result = await getDerivedSeries({ field, vintage: v, range, end });
   return result.points.map(p => {
     const d = new Date(p.t);
@@ -1609,8 +1626,12 @@ let realClimateDerivationInputs = null; // metric_derivation rows, fetched once 
 // only. WHICH raw metrics each one depends on is read live from
 // metric_derivation below, not hardcoded a third time (see
 // insights_engine.sql's own et0_in comment on why a hardcoded copy of
-// this mapping has drifted from the real formula before).
-const DERIVED_METRIC_KEY_MAP = { gdd_cumulative_calibrated: 'gdd_day', dtr_f: 'dtr', vpd_kpa: 'vpd_kpa' };
+// this mapping has drifted from the real formula before). et0_in added
+// (current-vintage-date-range-freshness fix, 2026-09-13) -- the prior
+// merge's map covered only the three metrics getDataSourceLabel branches
+// on; et0_in needs the same real/mock lookup for its CHART range (see
+// realClimateSeriesEnd below), even though its subtitle stays generic.
+const DERIVED_METRIC_KEY_MAP = { gdd_cumulative_calibrated: 'gdd_day', dtr_f: 'dtr', vpd_kpa: 'vpd_kpa', et0_in: 'et0_in' };
 
 async function refreshRealClimateVintages(){
   try{
@@ -1697,6 +1718,70 @@ function vineyardAsOfDate(v){
   if(v===CURRENT && realClimateAsOf2026) return new Date(realClimateAsOf2026+'T00:00:00');
   return seriesEnd(v, false);
 }
+
+// current-vintage-date-range-freshness fix (2026-09-13): the prior merge
+// wired realClimateAsOf2026 into vineyardAsOfDate() (the filter bar's
+// label) but not into the CHART query ranges themselves -- those still
+// went through seriesEndReal(), whose v===CURRENT branch returns the
+// permanently-frozen MOCK_NOW (28 Jul 2026), the fixed anchor the seeded
+// mock data was originally built against. Confirmed live: the filter bar
+// already said "as of 7 Sep 2026" while every real-climate chart's own
+// rightmost tick stopped at 25-27 Jul. This is that fix, applied at the
+// four generic real-data-series functions (buildSeriesReal,
+// buildDerivedSeriesReal, and their getSeries/getDerivedSeries fallbacks)
+// rather than at each panel's render call -- every real-climate panel
+// (vSets/soilSets included) already threads its own metric/field key
+// through those functions, so patching the shared choke point covers all
+// of them with no per-panel change needed.
+//
+// Metric-aware BY DESIGN: seriesEndReal() itself is UNCHANGED, and this
+// function delegates straight back to it whenever `metricKey` isn't one
+// of the vintages/metrics isRealClimateVintage() confirms are real for
+// CURRENT. irrigation_volume/cellar_temp/cellar_rh (still 100% simulated
+// for 2026) are NOT in REAL_CLIMATE_RAW_METRICS or DERIVED_METRIC_KEY_MAP,
+// so isRealClimateVintage() correctly returns false for them and this
+// function is a no-op for their charts -- confirmed live, see this
+// commit's own verification notes.
+//
+// align (compare mode) is also unaffected on purpose: seriesEndReal(v,true)
+// already broadcasts a shared Oct-31 axis to every vintage in a
+// comparison, CURRENT included, so real 2026 data simply reads however
+// far it actually extends on that shared axis -- there was never a
+// "stuck in July" bug in compare mode, only in the single-vintage path.
+function realClimateSeriesEnd(metricKey, v, align){
+  if(align || v!==CURRENT || !isRealClimateVintage(metricKey, v) || !realClimateAsOf2026)
+    return seriesEndReal(v, align);
+  // Matches MOCK_NOW's own time-of-day convention (14:20 Pacific) rather
+  // than midnight, so a scroll/range window computed from this end lines
+  // up on the same clock as the rest of this vintage's real data.
+  return new Date(realClimateAsOf2026+'T14:20:00-07:00');
+}
+
+// Sibling to realClimateSeriesEnd() for callers with no single specific
+// metric in mind (anomalies_eval evaluates several real climate rules in
+// one RPC call) -- same underlying date, gated the same way (all 5
+// REAL_CLIMATE_RAW_METRICS being real for CURRENT is exactly what a
+// non-null realClimateAsOf2026 already means), but falls back to
+// endOfReal() (MOCK_NOW) rather than seriesEnd()'s NOW, since this feeds
+// a real-data RPC parameter, not a display label.
+function realClimateAsOfInstant(v){
+  return (v===CURRENT && realClimateAsOf2026) ? new Date(realClimateAsOf2026+'T14:20:00-07:00') : endOfReal(v);
+}
+
+// Panel id -> the metric/field key isRealClimateVintage()/
+// realClimateSeriesEnd() should check for it, used ONLY by makePanel()'s
+// per-panel scroll "as of" label (see updateScrollUI() below) -- panel
+// definitions don't otherwise expose a plain metric-key field (it's
+// embedded inside each panel's own sub:/render: closures). Deliberately
+// covers exactly the 9 real-climate panels and nothing else: any panel
+// id NOT in this map falls through to today's unchanged seriesEnd()
+// behavior, which is what keeps irrig/cellart/cellarh (still simulated)
+// unaffected without needing their own explicit exclusion.
+const CLIMATE_PANEL_METRIC = {
+  airtemp:'air_temp', rh:'humidity', precip:'precipitation',
+  soilmoist:'soil_moisture', soiltemp:'soil_temp',
+  gdd:'gdd_cumulative_calibrated', dtr:'dtr_f', vpd:'vpd_kpa', et0:'et0_in',
+};
 
 // Vintages backed by real Mars Vineyard Farming irrigation records
 // (Track 2, event-level data from Mars Irrigation 2023/2024.xlsx,
@@ -2882,6 +2967,29 @@ async function renderAnomalies(box, ctx, tab){
     // real-data query -- would land after the seeded data's actual
     // range). endOfReal() is the documented real-data mirror, anchored to
     // MOCK_NOW -- the same value already passed to the RPC below.
+    //
+    // Deliberately NOT advanced to realClimateAsOfInstant(v) here, unlike
+    // the chart-range fix elsewhere in this commit (current-vintage-date-
+    // range-freshness, 2026-09-13) -- investigated and left unchanged on
+    // purpose. anomalies_eval() takes ONE p_as_of for its entire call,
+    // shared across every enabled vineyard-tab rule in one query,
+    // including wind_high (anomaly_thresholds.data_status mislabels it
+    // 'real'; confirmed live this session -- and in the real/mock data
+    // audit earlier this session -- that wind_speed has no real source
+    // for ANY vintage, 100% mock 2022-2026). wind_high's own
+    // window_hours=1 freshness gate (recorded_at >= p_as_of - 1h,
+    // confirmed live against anomaly_thresholds) currently passes only
+    // because mock wind data and MOCK_NOW sit within an hour of each
+    // other by construction. Advancing p_as_of into September while
+    // wind's mock rows stay frozen at 28 Jul would silently and
+    // permanently disable wind_high -- a real behavior change for a
+    // still-simulated metric this fix must not cause. Properly fixing
+    // this needs either a per-rule as-of (a server-side anomalies_eval
+    // signature change, out of scope for a frontend chart-range fix) or
+    // correcting wind_high's data_status upstream first -- flagged as a
+    // follow-up, not fixed here. Same reasoning covers fetchIrrigationGaps
+    // below: irrigation_volume is explicitly still-simulated for 2026 and
+    // must not be affected either.
     const asOf = endOfReal(v);
     // All three real-data calls run concurrently (not RPC-then-fetches) and
     // degrade independently -- a timeout in any one (seen in practice:
@@ -2895,7 +3003,13 @@ async function renderAnomalies(box, ctx, tab){
     const [rpcResult, gapsResult, gddResult] = await Promise.allSettled([
       sb.rpc('anomalies_eval', { p_vintage: v, p_as_of: asOf.toISOString() }),
       fetchIrrigationGaps(v, ctx.blocks, asOf),
-      fetchGddAsOf(v, asOf)
+      // realClimateSeriesEnd(), not the shared `asOf`: the veraison-window
+      // rule reads daily_derived.gdd_cumulative_calibrated directly via
+      // fetchGddAsOf -- no shared RPC parameter, no freshness-window
+      // entanglement with any still-mock metric (unlike the RPC/irrigation
+      // calls above), so it's both safe and correct to advance alongside
+      // the GDD chart fix.
+      fetchGddAsOf(v, realClimateSeriesEnd('gdd_cumulative_calibrated', v, ctx.align))
     ]);
     let rpcHits = [];
     if(rpcResult.status==='fulfilled' && !rpcResult.value.error){
@@ -3211,10 +3325,10 @@ let vineyardOverviewCache = null; // {ids, cur, prev, other}
 
 /* Seasonal norm: mean air_temp across whichever archived vintages actually
    have data for the ±SEASONAL_NORM_WINDOW_DAYS window around the day-of-
-   year `anchorDate` falls on. anchorDate is seriesEndReal(v) for whichever
-   vintage is primary -- matching getLatestValue's own anchor for `t` above,
-   so the norm this compares `t` against is centred on the same date `t` was
-   actually read at, not a separately-computed one. Returns the
+   year `anchorDate` falls on. anchorDate is realClimateSeriesEnd('air_temp', v)
+   for whichever vintage is primary -- matching getLatestValue's own anchor
+   for `t` above, so the norm this compares `t` against is centred on the
+   same date `t` was actually read at, not a separately-computed one. Returns the
    contributing-vintage count alongside the value so the caller can label
    it honestly (e.g. "avg of 2 prior seasons") rather than implying a fixed
    baseline regardless of actual sample size.
@@ -3312,12 +3426,19 @@ async function overviewStats(tab, c){
     const sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
     const dry = valid.length ? [...valid].sort((a,b)=>a.v-b.v)[0] : null;
     const tAir = th.byKey.get('air_temp_high')?.threshold ?? 92;
-    // seriesEndReal(vv), matching `t` above (getLatestValue, now anchored the
-    // same way): endOfReal(vv) would anchor an archived vintage's "normal for
-    // this time of year" window to its harvest-peak snapshot while `t` itself
-    // now reflects the vintage's true latest reading -- comparing a real Oct
-    // reading against a "normal for late Sept" baseline, silently mismatched.
-    const norm = (t!=null && t<=tAir) ? await getSeasonalNorm('air_temp','estate', seriesEndReal(vv)) : null;
+    // realClimateSeriesEnd('air_temp', vv), matching `t` above
+    // (getLatestValue, now anchored the same way via getSeries's own fix --
+    // current-vintage-date-range-freshness, 2026-09-13): plain
+    // seriesEndReal(vv) would anchor CURRENT to MOCK_NOW (frozen 28 Jul)
+    // while `t` itself now reflects the vintage's true latest real reading,
+    // comparing a real Sept air-temp reading against a "normal for late
+    // Jul" baseline -- silently mismatched, the same failure mode the
+    // comment this replaces was written to avoid in the first place.
+    // endOfReal(vv) would separately mis-anchor an ARCHIVED vintage's
+    // "normal for this time of year" window to its harvest-peak snapshot;
+    // realClimateSeriesEnd() falls through to seriesEndReal() unchanged
+    // for any non-CURRENT vintage, so that case is untouched.
+    const norm = (t!=null && t<=tAir) ? await getSeasonalNorm('air_temp','estate', realClimateSeriesEnd('air_temp', vv)) : null;
     return {t, soilByBlock, sm, dry, g, vp, dt, rh, norm};
   }
 
@@ -3508,7 +3629,22 @@ function makePanel(p, c){
         // whatever the panel's own series actually anchors to (buildSeries*
         // now use seriesEnd/seriesEndReal), or the scroll control would show
         // a stale "as of" date next to a chart that extends further.
-        const anchor=applyScroll(seriesEnd(c.primary,c.compare), c.primary, rng, sd);
+        //
+        // CLIMATE_PANEL_METRIC[p.id], when present, routes this through
+        // realClimateSeriesEnd() instead -- current-vintage-date-range-
+        // freshness fix, 2026-09-13. Confirmed live: this label previously
+        // stayed a hardcoded seriesEnd()/NOW-anchored "as of 28 Jul" next to
+        // real-climate charts whose own data (via buildSeriesReal's now-fixed
+        // realClimateSeriesEnd()) already extends into September -- the
+        // exact "control disagrees with the chart it controls" bug this
+        // session's investigation flagged as a risk to avoid reintroducing.
+        // Panels NOT in CLIMATE_PANEL_METRIC (irrig/cellart/cellarh, still
+        // simulated for 2026) fall through to the unchanged seriesEnd() call
+        // below, so their scroll label/enabled-state is untouched by this fix.
+        const climateMetric = CLIMATE_PANEL_METRIC[p.id];
+        const anchor = climateMetric
+          ? applyScroll(realClimateSeriesEnd(climateMetric, c.primary, c.compare), c.primary, rng, sd)
+          : applyScroll(seriesEnd(c.primary,c.compare), c.primary, rng, sd);
         const apr1=new Date(c.primary,3,1);
         const atStart=anchor<=apr1;
         back.classList.toggle('disabled', !scrollable||atStart);

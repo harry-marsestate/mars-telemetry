@@ -2829,3 +2829,51 @@ point count is trusting whatever guarantee the data-fetching layer provides
 (here, two different real-data fetch functions, only one of which actually
 padded gaps) rather than inferring it from cases that happened to never
 exercise the difference.
+
+## Real-2026 charts stuck at 28 Jul - MOCK_NOW, not NOW, and only partially wired by the ingestion project
+
+Reported as "charts still show late July" after the real-2026-climate-
+ingestion project (see that commit) had already landed real September data
+and fixed the filter bar's "as of" badge via `real_climate_as_of_2026()`.
+Initial hypothesis was `NOW`, the live-ticking demo clock - wrong: `NOW`
+only ever drives mock-only ranges (`seriesEnd()`). The actual cause was
+`MOCK_NOW`, a separate constant permanently frozen at
+`2026-07-28T14:20:00-07:00`, which `seriesEndReal()` still returns
+unconditionally for CURRENT - and `buildSeriesReal()`/`buildDerivedSeriesReal()`
+(every real-climate panel's fetcher) anchor their query window to
+`seriesEndReal()`, not the new real-as-of date. The ingestion project wired
+`real_climate_as_of_2026()` into the filter bar's label only; the chart
+query path was a separate, only-partially-updated code path. Confirmed live
+before fixing: filter bar said "7 Sep 2026" while GDD/DTR/soil chart
+rightmost ticks sat at 25-27 Jul.
+
+Fixed with `realClimateSeriesEnd(metricKey, v, align)`, a metric-aware
+mirror of `seriesEndReal()` (see git log for the full commit) - delegates
+to it unchanged unless `isRealClimateVintage()` confirms that specific
+metric is real for CURRENT, in which case it returns
+`realClimateAsOf2026` instead. Patched at the shared choke points every
+real panel already flows through (`getSeries`/`getDerivedSeries`'s
+`getLatestValue` fallback, `buildSeriesReal`, `buildDerivedSeriesReal`),
+not per panel.
+
+Deliberately NOT fixed, flagged as a follow-up: `renderAnomalies()`'s
+vineyard-tab `anomalies_eval()` call takes ONE `p_as_of` shared across
+every enabled rule in that RPC, including `wind_high` -
+`anomaly_thresholds.data_status` mislabels it `'real'` but it's confirmed
+100% mock, no real source for any vintage. `wind_high`'s `window_hours=1`
+freshness gate currently passes only because mock wind data and
+`MOCK_NOW` sit within an hour of each other by construction - advancing
+`p_as_of` would silently and permanently disable it, a real behavior
+change for a still-simulated metric this fix must not cause. Needs either
+a per-rule as-of (an `anomalies_eval()` signature change) or correcting
+`wind_high`'s `data_status` upstream first, before it's safe to touch.
+`fetchIrrigationGaps()` shares the same reasoning (irrigation is
+explicitly still-mock for 2026) and was also left on the old anchor; the
+veraison-window client rule (`fetchGddAsOf`) has no such entanglement and
+was safely advanced alongside the chart fix.
+
+RULE: when a follow-up project wires a new live value into one consumer
+(here, a display label), grep every OTHER consumer of the value it
+replaced (here, every `seriesEndReal()` caller) before calling the project
+done - a label and the chart it describes silently drifting apart is the
+same failure shape this file has already recorded more than once.

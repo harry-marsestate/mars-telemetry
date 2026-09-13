@@ -2877,3 +2877,66 @@ RULE: when a follow-up project wires a new live value into one consumer
 replaced (here, every `seriesEndReal()` caller) before calling the project
 done - a label and the chart it describes silently drifting apart is the
 same failure shape this file has already recorded more than once.
+
+## Account-level real-only data mode - two real bugs found building the single source of truth
+
+Adds `user_profiles.data_mode` (admin-settable) and `domain_reality()`,
+one SECURITY DEFINER RPC both web/index.html and
+supabase/functions/chat/tools.ts call to decide whether a domain/vintage
+is real or simulated - see the branch's own commit for the full
+domain-by-domain design and live verification evidence (panel-by-panel,
+role-independence, chat via Kimi).
+
+**Bug 1: irrigation_volume misclassified by reusing the wrong threshold.**
+`real_metric_vintage_counts()`'s existing `>=100`-row bar (built for
+insights-scan/web/index.html's real-vintage chart-range logic) answers
+"enough real data for a meaningful season chart," not "does real-only
+mode have anything real to show." Real irrigation coverage is sparse
+event-log data - 53 rows (2023) and 51 rows (2024), confirmed live - so
+reusing that threshold in `domain_reality()` would have wrongly
+classified a genuinely-real irrigation vintage as simulated. Fixed by
+switching to existence-based classification (`>=1` real row) for every
+sensor_readings-backed domain, matching this session's own
+harvest_receipts decision (sparse real data still counts as real, no
+minimum-row-count threshold that wasn't asked for) applied uniformly
+rather than as a one-off special case.
+
+**Bug 2: `.maybeSingle()` on an unfiltered `user_profiles` select throws
+for an ADMIN caller.** `own_profile_read` (`id = auth.uid()`) narrows to
+one row for a non-admin, but an admin session ALSO matches
+`admin_reads_all_profiles` (`using (is_admin_user())`, no row
+restriction), and Postgres RLS combines multiple permissive policies
+with OR - an admin's unfiltered select returns every profile, and
+`.maybeSingle()` throws `PGRST116` ("multiple rows returned") instead of
+resolving to that admin's own row. Confirmed live (an admin session's
+own data_mode read failed this way; the same query pattern already
+existed, unnoticed, in `chat/index.ts`'s first_name/last_name lookup).
+Fixed with `current_data_mode()`, a new SECURITY DEFINER RPC keyed off
+`auth.uid()` inside the function body - mirrors `current_role_name()`'s
+exact pattern, so there is no RLS row-visibility question to have in the
+first place, on either the frontend or the chat backend. The identical
+pre-existing bug in `chat/index.ts`'s name lookup was deliberately left
+as-is: a speculative `ctx.supabase.auth.getUser()`-based fix broke the
+live chat response entirely and was reverted, and fixing it properly
+needs its own investigation, not a rushed follow-on to an unrelated task.
+
+**Deliberate exception, not an oversight: solar is fixed `false` in
+`domain_reality()` for every vintage, despite real `open_meteo_era5`
+`shortwave_radiation` rows existing in `sensor_readings` for 2022-2025.**
+`renderSolar()` has never read that real data for any vintage (confirmed
+this session) - real-only mode's contract is about what a user is
+actually shown, not what happens to sit unused in a table, so trusting
+raw row existence here would have let the solar panel render as "real"
+in real-only mode while still displaying 100% client-side mock output.
+The now-corrected `SOLAR_LABEL_REAL_VINTAGES` set (which made the same
+mistake in the subtitle, independently) was removed in the same change.
+
+**Known open item, not resolved:** only Kimi was used for live chat
+verification (Anthropic credits were exhausted mid-session, confirmed
+via direct error-message capture, unrelated to this feature). `runTool()`
+takes the same `dataMode`/`domainReality` regardless of which loop calls
+it, and the system-prompt addition is provider-agnostic, so the
+Claude/Anthropic streaming path is architecturally low-risk - but it has
+NOT been live-verified for this feature and should be spot-checked once
+Anthropic credits are available, not assumed to work from the Kimi
+result alone.

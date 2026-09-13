@@ -12,6 +12,62 @@ const CURRENT_VINTAGE = 2026;
 // MOCK_NOW until the Phase 7 TODO to remove the override is done.
 const MOCK_NOW = "2026-07-28T14:20:00-07:00";
 
+// real-only-data-mode project (2026-09-13): every vintage this app knows
+// about, mirroring web/index.html's own VINTAGES constant -- used to
+// bulk-fetch domain_reality() once per chat request (see index.ts),
+// covering every vintage a tool call could plausibly ask about.
+export const ALL_VINTAGES = [2022, 2023, 2024, 2025, 2026];
+
+// domain -> Set<real vintage>, built from domain_reality() -- the SAME
+// server-side RPC web/index.html calls (see
+// supabase/migrations/20260913150000_real_only_data_mode.sql), so this
+// file and the frontend share one source of truth for "is X real" rather
+// than maintaining a second, independent classification here.
+export type DomainReality = Map<string, Set<number>>;
+
+// deno-lint-ignore no-explicit-any
+export async function fetchDomainReality(supabase: any, vintages: number[] = ALL_VINTAGES): Promise<DomainReality> {
+  const { data, error } = await supabase.rpc("domain_reality", { p_vintages: vintages });
+  if (error) {
+    console.error("chat: domain_reality failed, real-only gating disabled this request", error);
+    return new Map();
+  }
+  const byDomain: DomainReality = new Map();
+  // deno-lint-ignore no-explicit-any
+  (data as any[] ?? []).forEach((row) => {
+    if (!byDomain.has(row.domain)) byDomain.set(row.domain, new Set());
+    if (row.is_real) byDomain.get(row.domain)!.add(row.vintage);
+  });
+  return byDomain;
+}
+
+function isDomainReal(reality: DomainReality, domain: string, vintage: number): boolean {
+  // Fails open (real=true) on a domain domain_reality() doesn't know
+  // about, or when the RPC itself failed above -- same "don't silently
+  // hide data from an 'all'-mode account" convention web/index.html's
+  // isDomainReal() uses. A real-only account only loses gating for that
+  // one request in a genuine RPC failure, never the reverse.
+  return reality.get(domain)?.has(vintage) ?? true;
+}
+
+// The distinct, non-error result shape every gated tool returns instead
+// of the actual (simulated) data, when real-only mode blocks a request --
+// isError:false is deliberate: this isn't a query failure, it's a
+// legitimate answer ("this exists, but it's simulated, and this account
+// can't see simulated data"), and the model needs to explain it as such
+// rather than reporting an error or claiming no data exists. See
+// buildSystemPrompt()'s real-only-mode note in index.ts for how the
+// model is told to read this field.
+function realOnlyBlockedResult(description: string): ToolResult {
+  return {
+    content: JSON.stringify({
+      real_only_mode_blocked: true,
+      message: `This account is set to real-data-only mode. ${description} is simulated, not real, so it has been withheld rather than returned.`,
+    }),
+    isError: false,
+  };
+}
+
 export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_series",
@@ -112,22 +168,34 @@ function formatErrorForModel(error: { message: string }): ToolResult {
   return { content: `Query failed: ${error.message}`, isError: true };
 }
 
+// dataMode/domainReality: real-only-data-mode project (2026-09-13).
+// Resolved ONCE per chat request in index.ts (not per tool call) and
+// threaded through here -- domain_reality() is cheap but there's no
+// reason to re-fetch it on every tool invocation within one turn, same
+// "once per request/session, not per call" convention
+// refreshRealClimateVintages()/refreshDataMode() already use client-side.
 // deno-lint-ignore no-explicit-any
-export async function runTool(supabase: any, name: string, input: Record<string, unknown>): Promise<ToolResult> {
+export async function runTool(
+  supabase: any,
+  name: string,
+  input: Record<string, unknown>,
+  dataMode: string,
+  domainReality: DomainReality,
+): Promise<ToolResult> {
   try {
     switch (name) {
       case "get_series":
-        return await getSeries(supabase, input);
+        return await getSeries(supabase, input, dataMode, domainReality);
       case "get_derived_series":
-        return await getDerivedSeries(supabase, input);
+        return await getDerivedSeries(supabase, input, dataMode, domainReality);
       case "get_anomalies":
-        return await getAnomalies(supabase, input);
+        return await getAnomalies(supabase, input, dataMode, domainReality);
       case "get_lot_analyses":
         return await getLotAnalyses(supabase, input);
       case "get_vessels":
         return await getVessels(supabase, input);
       case "get_labour_summary":
-        return await getLabourSummary(supabase, input);
+        return await getLabourSummary(supabase, input, dataMode);
       default:
         return { content: `Unknown tool: ${name}`, isError: true };
     }
@@ -138,7 +206,7 @@ export async function runTool(supabase: any, name: string, input: Record<string,
 }
 
 // deno-lint-ignore no-explicit-any
-async function getSeries(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
+async function getSeries(supabase: any, input: Record<string, unknown>, dataMode: string, domainReality: DomainReality): Promise<ToolResult> {
   const { metric, block, vintage, start, end, bucket_hours, agg } = input as {
     metric: string; block?: string; vintage?: number; start: string; end: string; bucket_hours: number; agg?: string;
   };
@@ -150,6 +218,26 @@ async function getSeries(supabase: any, input: Record<string, unknown>): Promise
   }
   if (!(bucket_hours > 0)) {
     return { content: "bucket_hours must be a positive number.", isError: true };
+  }
+
+  // Real-only-data-mode gate (2026-09-13). No explicit `vintage` param
+  // doesn't mean "no vintage" -- start/end are real calendar timestamps,
+  // so the vintage(s) touched are derived from their years. Checks EVERY
+  // year the requested range spans (usually one, since a growing season
+  // runs Apr-Oct within a single calendar year) -- if real-only mode is
+  // on and ANY touched year is simulated for this metric, the whole
+  // request is blocked rather than silently returning a partial series.
+  if (dataMode === "real_only") {
+    const years = vintage != null
+      ? [vintage]
+      : Array.from(
+        { length: new Date(endMs).getUTCFullYear() - new Date(startMs).getUTCFullYear() + 1 },
+        (_, i) => new Date(startMs).getUTCFullYear() + i,
+      );
+    const simulatedYears = years.filter((y) => !isDomainReal(domainReality, metric, y));
+    if (simulatedYears.length) {
+      return realOnlyBlockedResult(`${metric} for ${simulatedYears.join(", ")}`);
+    }
   }
   const bucketCount = (endMs - startMs) / (bucket_hours * 3600_000);
   if (bucketCount > MAX_SERIES_BUCKETS) {
@@ -180,8 +268,26 @@ async function getSeries(supabase: any, input: Record<string, unknown>): Promise
 }
 
 // deno-lint-ignore no-explicit-any
-async function getDerivedSeries(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
+async function getDerivedSeries(supabase: any, input: Record<string, unknown>, dataMode: string, domainReality: DomainReality): Promise<ToolResult> {
   const { vintage, start_date, end_date } = input as { vintage: number; start_date?: string; end_date?: string };
+
+  // Real-only-data-mode gate (2026-09-13). All five fields are checked
+  // (not just gdd) since they're each independently classified by
+  // domain_reality() -- gdd_cumulative_calibrated/dtr_f depend on
+  // air_temp only, vpd_kpa/vpd_peak_kpa on air_temp AND humidity, et0_in
+  // on air_temp only. All five happen to share the same real/mock status
+  // per vintage today (their raw inputs move in lockstep), but this
+  // doesn't assume that stays true. Whole-response block, not a per-
+  // field strip -- matches web/index.html's own whole-panel granularity
+  // rather than returning a JSON row array with some columns silently
+  // missing.
+  if (dataMode === "real_only") {
+    const fields = ["gdd_cumulative_calibrated", "dtr_f", "vpd_kpa", "vpd_peak_kpa", "et0_in"];
+    const simulatedFields = fields.filter((f) => !isDomainReal(domainReality, f, vintage));
+    if (simulatedFields.length) {
+      return realOnlyBlockedResult(`${simulatedFields.join(", ")} for ${vintage}`);
+    }
+  }
 
   let query = supabase
     .from("daily_derived")
@@ -233,15 +339,43 @@ async function getDerivedSeries(supabase: any, input: Record<string, unknown>): 
   return { content: JSON.stringify(rounded), isError: false };
 }
 
+// This tool never passes p_tab, so anomalies_eval() always runs its
+// default 'vineyard' rule set -- these are exactly that rule set's
+// metric_key values (see supabase/migrations/20260831000001_anomalies_eval_materialized_cte.sql's
+// anomaly_thresholds join), bridged to domain_reality()'s domain names.
+// Mirrors web/index.html's renderAnomalies() RULE_METRIC_DOMAIN exactly
+// -- same reasoning: anomalies_eval()'s rule set isn't filtered upstream
+// (wind_high is data_status='real' in anomaly_thresholds but confirmed
+// 100% mock; see docs/SECURITY.md), so hits are filtered here, per-row,
+// by metric_key, rather than blocking the whole tool.
+const RULE_METRIC_DOMAIN: Record<string, string> = {
+  air_temp: "air_temp", dtr: "dtr_f", humidity: "humidity", soil_moisture: "soil_moisture",
+  vpd: "vpd_kpa", vpd_peak: "vpd_peak_kpa", wind_speed: "wind_speed",
+  gdd: "gdd_cumulative_calibrated", et0: "et0_in",
+};
+
 // deno-lint-ignore no-explicit-any
-async function getAnomalies(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
+async function getAnomalies(supabase: any, input: Record<string, unknown>, dataMode: string, domainReality: DomainReality): Promise<ToolResult> {
   const { vintage, as_of } = input as { vintage?: number; as_of?: string };
   const p_vintage = vintage ?? CURRENT_VINTAGE;
   const p_as_of = as_of ?? (p_vintage === CURRENT_VINTAGE ? MOCK_NOW : `${p_vintage}-12-31T23:59:59Z`);
 
   const { data, error } = await supabase.rpc("anomalies_eval", { p_vintage, p_as_of });
   if (error) return formatErrorForModel(error);
-  return { content: JSON.stringify(data), isError: false };
+  // deno-lint-ignore no-explicit-any
+  let rows = data as any[];
+  let filteredNote = "";
+  if (dataMode === "real_only") {
+    const before = rows.length;
+    rows = rows.filter((row) => {
+      const domain = RULE_METRIC_DOMAIN[row.metric_key];
+      return !domain || isDomainReal(domainReality, domain, p_vintage);
+    });
+    if (rows.length < before) {
+      filteredNote = `\n\n(${before - rows.length} rule${before - rows.length === 1 ? "" : "s"} omitted: this account is real-only and that data is simulated for ${p_vintage}.)`;
+    }
+  }
+  return { content: JSON.stringify(rows) + filteredNote, isError: false };
 }
 
 // deno-lint-ignore no-explicit-any
@@ -290,8 +424,18 @@ async function getVessels(supabase: any, input: Record<string, unknown>): Promis
 }
 
 // deno-lint-ignore no-explicit-any
-async function getLabourSummary(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
+async function getLabourSummary(supabase: any, input: Record<string, unknown>, dataMode: string): Promise<ToolResult> {
   const { vintage, block_id } = input as { vintage?: number; block_id?: string };
+
+  // Real-only-data-mode gate (2026-09-13). labour is 100% simulated for
+  // every vintage -- no real work-records source has been ingested yet
+  // (a separate, not-yet-scoped future effort) -- so this is an
+  // unconditional block, not a per-vintage domain_reality() lookup like
+  // every other gated tool. Skips the query entirely rather than running
+  // it only to discard the result.
+  if (dataMode === "real_only") {
+    return realOnlyBlockedResult("Vineyard labor hours and cost");
+  }
 
   let query = supabase
     .from("labour_summary")

@@ -1,7 +1,7 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { TOOLS, runTool } from "./tools.ts";
+import { DomainReality, fetchDomainReality, runTool, TOOLS } from "./tools.ts";
 import { callKimi, KIMI_MODEL } from "./kimi.ts";
 
 // RAG chat for Mars Estate/Mars Telemetry. ctx.supabase is RLS-scoped to the
@@ -47,6 +47,8 @@ async function attemptKimi(
   systemPrompt: string,
   conversation: Anthropic.MessageParam[],
   maxIterations: number,
+  dataMode: string,
+  domainReality: DomainReality,
 ): Promise<KimiAttempt> {
   const events: Record<string, unknown>[] = [];
   const newTurns: Anthropic.MessageParam[] = [];
@@ -84,7 +86,7 @@ async function attemptKimi(
 
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
         for (const block of toolUses) {
-          const result = await runTool(supabase, block.name, block.input as Record<string, unknown>);
+          const result = await runTool(supabase, block.name, block.input as Record<string, unknown>, dataMode, domainReality);
           toolResults.push({
             type: "tool_result",
             tool_use_id: block.id,
@@ -131,12 +133,45 @@ export default {
       }
 
       // Personalization only -- not fatal if it fails, unlike role resolution above.
+      //
+      // NOTE: this bare .maybeSingle() (no explicit id filter) has the
+      // same latent multi-row risk for an admin caller that
+      // current_data_mode() below was built specifically to avoid (see
+      // that RPC's comment) -- own_profile_read narrows correctly for a
+      // non-admin, but an admin also matches admin_reads_all_profiles
+      // (no row restriction), and RLS combines permissive policies with
+      // OR. Pre-existing, unrelated to this change, and left as-is here
+      // (a speculative ctx.supabase.auth.getUser()-based fix was tried
+      // and reverted after it broke the chat response entirely in live
+      // testing -- not safe to fix under this task without further
+      // investigation into why that approach failed).
       const { data: profile, error: profileErr } = await ctx.supabase
         .from("user_profiles")
         .select("first_name, last_name")
         .maybeSingle();
       if (profileErr) console.error("chat: could not resolve caller profile", profileErr);
       const displayName = resolveDisplayName(role, profile?.first_name ?? null, profile?.last_name ?? null);
+      // real-only-data-mode project (2026-09-13): resolved once per
+      // request (not per tool call), same reasoning as `role` above.
+      // current_data_mode() (SECURITY DEFINER, keyed off auth.uid()
+      // inside the function body, mirroring current_role_name()'s exact
+      // pattern) rather than a raw table select -- no caller-supplied id
+      // needed, no RLS row-visibility ambiguity to have in the first
+      // place (see the profile query's own comment just above for what
+      // that ambiguity looks like when it isn't sidestepped). Defaults
+      // to 'all' on a missing/failed read, same fail-open-to-normal-
+      // behavior convention web/index.html's refreshDataMode() uses -- a
+      // transient failure here should never silently hide real data from
+      // a normal account.
+      const { data: dataModeResult, error: dataModeErr } = await ctx.supabase.rpc("current_data_mode");
+      if (dataModeErr) console.error("chat: could not resolve caller data_mode", dataModeErr);
+      const dataMode = dataModeResult || "all";
+      // domain_reality() is SECURITY DEFINER (see that migration) -- safe
+      // to call through ctx.supabase (RLS-scoped, never
+      // ctx.supabaseAdmin, per this file's own header comment) exactly
+      // like current_role_name() above; it answers a caller-independent
+      // question about the data itself, not anything RLS should filter.
+      const domainReality: DomainReality = await fetchDomainReality(ctx.supabase);
 
       // CHAT_MODEL_PROVIDER is the deploy-time default (unset/anything but
       // "kimi" fails safe onto what ships today). `modelProvider` on the
@@ -164,7 +199,7 @@ export default {
 
       const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY") });
 
-      const systemPrompt = buildSystemPrompt(role, displayName);
+      const systemPrompt = buildSystemPrompt(role, displayName, dataMode);
       const conversation: Anthropic.MessageParam[] = messages;
       const newTurns: Anthropic.MessageParam[] = [];
 
@@ -192,6 +227,8 @@ export default {
                 systemPrompt,
                 conversation,
                 MAX_TOOL_ITERATIONS,
+                dataMode,
+                domainReality,
               );
               if (attempt.ok) {
                 for (const e of attempt.events) send(e);
@@ -350,7 +387,7 @@ export default {
 
                 const toolResults: Anthropic.ToolResultBlockParam[] = [];
                 for (const block of toolUses) {
-                  const result = await runTool(ctx.supabase, block.name, block.input as Record<string, unknown>);
+                  const result = await runTool(ctx.supabase, block.name, block.input as Record<string, unknown>, dataMode, domainReality);
                   toolResults.push({
                     type: "tool_result",
                     tool_use_id: block.id,
@@ -562,7 +599,7 @@ function resolveDisplayName(role: string, firstName: string | null, lastName: st
   return role === "operator" ? firstName : (lastName ? `${firstName} ${lastName}` : firstName);
 }
 
-function buildSystemPrompt(role: string, displayName: string | null): string {
+function buildSystemPrompt(role: string, displayName: string | null, dataMode: string): string {
   const shared = `You are a professional winemaker and viticulturist speaking on behalf of Mars Estate, a 7.35-acre Cabernet Sauvignon-dominant estate at roughly 2,200 ft on Howell Mountain, Napa Valley. You help estate operators and customers understand the vineyard and winery's real data -- climate, soil, irrigation, fermentation, lab chemistry, and harvest records -- by answering their questions using the tools available to you.
 
 Always structure your answer in three parts, in this order:
@@ -590,5 +627,16 @@ You only ever know what your tools return. If a tool returns no data for a quest
 
   const accessNote = `\n\nTools backed by RLS policies enforce access automatically -- get_lot_analyses, get_vessels, and get_labour_summary are operator-only and will return zero rows for a customer or pending user. Don't call an operator-only tool for a non-operator and then act surprised by the empty result -- you already know their role from this prompt.`;
 
-  return `${shared}\n\n${toneBlock}${accessNote}`;
+  // real-only-data-mode project (2026-09-13). Only added when it applies
+  // -- the existing "you only know what your tools return, say so
+  // plainly" instruction above already covers a tool returning genuinely
+  // no data, but a real_only_mode_blocked result is a different case
+  // (data exists, but is withheld) that reads as an error or as missing
+  // data without this: without this note the model has no way to know
+  // that shape carries an explicit reason, not just an absence.
+  const realOnlyNote = dataMode === "real_only"
+    ? `\n\nThis account is set to real-data-only mode. Any tool result containing "real_only_mode_blocked": true means the data exists but is simulated, not real, and has been withheld because of this account's setting -- read its "message" field and explain that plainly (e.g. "labour costs for 2026 are simulated data, and this account is set to show only real data, so I can't report a figure there"). Never describe that as "no data exists" or as an error -- it's neither.`
+    : "";
+
+  return `${shared}\n\n${toneBlock}${accessNote}${realOnlyNote}`;
 }

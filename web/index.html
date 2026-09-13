@@ -1552,15 +1552,16 @@ const SECTIONS = [
      above (MOCK_NOW) -- a real pipeline swap will make these real with
      no panel-level changes needed.
    - 'procedural': pure client-side hash/noise formulas with no table
-     at all (wind, irrigation-by-block, labour, fruit) -- there is no
-     pending pipeline for these; becoming real means new instrumentation
-     or a new integration, not a data-source flip. solar was in this
-     category too until its "Measured" line (shortwave_radiation) did
-     flip real for 2022-2025 -- its kind stays 'procedural' since 2026's
-     mock generator is still a genuine client-side formula, but
-     getDataSourceLabel's SOLAR_LABEL_REAL_VINTAGES branch intercepts it
-     before this comment's claim would otherwise apply. UV stays mock
-     indefinitely (confirmed unfixable, no real source exists).
+     at all (wind, solar, irrigation-by-block, labour, fruit) -- there is
+     no pending pipeline for these; becoming real means new
+     instrumentation or a new integration, not a data-source flip. Solar
+     was PREVIOUSLY believed to have flipped real for 2022-2025 (its
+     "Measured" shortwave_radiation line) -- corrected in the real-only-
+     data-mode project, 2026-09-13: real ERA5 shortwave_radiation rows do
+     exist in sensor_readings for those vintages, but renderSolar() has
+     never read them, for any vintage, so the actual displayed data was
+     always 100% mock regardless of what the label claimed. UV stays mock
+     indefinitely either way (confirmed unfixable, no real source exists).
    Flipping any metric from mock to real later (or narrowing which
    vintages count as "sensors pending") means editing this table, not
    hunting through every panel's sub: string. */
@@ -1687,14 +1688,107 @@ function isRealClimateVintage(metricKey, vintage){
 // uncalibrated even once its underlying air_temp goes real.
 const CALIBRATED_GDD_VINTAGES = new Set([2022,2023,2024,2025]);
 
-// Solar stays OUT of scope for the real-2026-climate-ingestion project
-// (see supabase/functions/ingest-climate-2026's own comment) -- this is
-// deliberately still the old, static, hand-maintained set, not wired
-// into isRealClimateVintage(). Already known to overclaim relative to
-// renderSolar()'s actual implementation (100% client-side mock, every
-// vintage, real ERA5 shortwave_radiation rows notwithstanding) -- a
-// separate, already-flagged mismatch, unchanged and out of scope here.
-const SOLAR_LABEL_REAL_VINTAGES = new Set([2022,2023,2024,2025]);
+// SOLAR_LABEL_REAL_VINTAGES removed (real-only-data-mode project,
+// 2026-09-13) -- it claimed 2022-2025 had real "Measured" solar data,
+// but renderSolar() has never read real data for ANY vintage (100%
+// client-side sample()/clearSky() mock, confirmed in this session's
+// real/mock audit and independently by domain_reality()'s own solar
+// override, which answers false for every vintage on purpose despite
+// real open_meteo_era5 shortwave_radiation rows existing in
+// sensor_readings for 2022-2025 -- see that migration's comment).
+// getDataSourceLabel('solar', ...) now always falls through to
+// DATA_SOURCES.solar's plain 'procedural' kind below, same as every
+// other always-simulated metric -- no more special-cased branch to
+// drift stale a second time.
+
+// Real-only data mode (real-only-data-mode project, 2026-09-13): an
+// admin-settable per-account flag (user_profiles.data_mode) that hides
+// simulated data from an account entirely, rather than trusting a
+// subtitle/label alone -- this session's audit found several of those
+// labels overclaiming realness in the past (GDD, DTR, ET0, and solar
+// above). dataMode/domainRealCache are fetched ONCE per session
+// (refreshDataMode(), called from runSessionGate() alongside
+// refreshRealClimateVintages() -- same "once per session, not per
+// render" reasoning). domain_reality() is the ONE server-side interface
+// both this file and supabase/functions/chat/tools.ts call -- see that
+// migration for the full domain-by-domain reasoning (existence-based,
+// SECURITY DEFINER for role-independence, solar fixed false despite real
+// underlying rows).
+let dataMode = 'all';
+let domainRealCache = null; // Map<domain, Set<vintage>>, built from domain_reality()
+
+async function refreshDataMode(){
+  try{
+    // current_data_mode() RPC, not a bare `select data_mode from
+    // user_profiles` relying on RLS alone to narrow to one row --
+    // own_profile_read (id = auth.uid()) does that for a non-admin
+    // caller, but an admin ALSO matches admin_reads_all_profiles (using
+    // (is_admin_user()), no row restriction), and Postgres RLS combines
+    // multiple permissive policies with OR. Confirmed live: an admin
+    // session's unfiltered select returned all 15 profiles, and
+    // .maybeSingle() threw PGRST116 ("multiple rows returned") instead
+    // of resolving to that admin's own row. The RPC (SECURITY DEFINER,
+    // keyed off auth.uid() inside the function body, mirroring
+    // current_role_name()'s exact pattern) has no such ambiguity to
+    // begin with -- no caller-supplied id, no RLS row-visibility
+    // question at all.
+    const [{data: mode, error: profileErr}, {data: reality, error: realityErr}] = await Promise.all([
+      sb.rpc('current_data_mode'),
+      sb.rpc('domain_reality', {p_vintages: VINTAGES}),
+    ]);
+    if(profileErr) console.error('refreshDataMode: could not read data_mode, defaulting to "all"', profileErr);
+    else dataMode = mode || 'all';
+
+    if(realityErr){
+      console.error('refreshDataMode: domain_reality failed, real-only gating disabled this session', realityErr);
+      domainRealCache = null;
+    } else {
+      const byDomain = new Map();
+      (reality||[]).forEach(row => {
+        if(!byDomain.has(row.domain)) byDomain.set(row.domain, new Set());
+        if(row.is_real) byDomain.get(row.domain).add(row.vintage);
+      });
+      domainRealCache = byDomain;
+    }
+  }catch(err){
+    console.error('refreshDataMode: unexpected error, defaulting to "all"/gating disabled', err);
+    dataMode = 'all';
+    domainRealCache = null;
+  }
+}
+
+// True iff `domain` has real data for `vintage`, per domain_reality().
+// Defaults to true (permissive -- i.e. "don't block") if the cache
+// hasn't loaded or errored, matching this project's established
+// fail-open-to-prior-behavior convention (see isRealClimateVintage's own
+// pre-fetch fallback) -- a transient failure here should never silently
+// hide data from an 'all'-mode account, only fail to gate a real-only
+// one for that one session.
+function isDomainReal(domain, vintage){
+  if(!domainRealCache) return true;
+  return domainRealCache.get(domain)?.has(vintage) ?? true;
+}
+
+// The single gating check every panel/tile render path calls: true iff
+// this account is in real-only mode AND at least one of `vintages` is
+// simulated for `domain`. Takes an array (not a single vintage) so
+// compare-mode panels can be gated too -- whole-panel granularity means
+// a compare-mode chart mixing one real and one simulated vintage is
+// blocked entirely rather than silently dropping just one line, matching
+// the never-simulated-data/never-a-blend rule this feature is built on.
+function realOnlyBlocked(domain, vintages){
+  if(dataMode!=='real_only') return false;
+  return vintages.some(v => !isDomainReal(domain, v));
+}
+
+// Shared "not available in real-only mode" empty state -- one copy,
+// reused by every panel this gates, rather than each writing its own
+// wording (which is exactly how DTR/GDD/solar's subtitles drifted
+// inconsistent from each other in the first place). Matches the winery
+// Patterns section's existing honest-empty-state tone.
+function realOnlyEmptyState(label){
+  return el('div','empty',`Not available in real-only mode — ${label} is simulated for this vintage.`);
+}
 
 // Latest real date ingest-climate-2026 has actually landed for 2026,
 // read via real_climate_as_of_2026() -- null until every in-scope metric
@@ -1783,6 +1877,30 @@ const CLIMATE_PANEL_METRIC = {
   gdd:'gdd_cumulative_calibrated', dtr:'dtr_f', vpd:'vpd_kpa', et0:'et0_in',
 };
 
+// Panel id -> domain_reality() domain name, used by makePanel()'s run()
+// closure (real-only-data-mode project, 2026-09-13) to gate EVERY data
+// panel, vineyard and winery alike -- a superset of CLIMATE_PANEL_METRIC
+// above (which exists for a narrower, unrelated purpose: the per-panel
+// scroll "as of" label). lot_analyses/vessels are included even though
+// domain_reality() always answers true for them (real-only mode has no
+// effect) -- listed for completeness/self-documentation, not because
+// gating is needed. 'map' and the anomalies panels are deliberately
+// absent: the block map is static estate config, not sensor data, and
+// the anomalies panel is handled separately (see renderAnomalies' own
+// real-only filtering) since a single anomalies_eval() call can mix
+// hits from several domains in one response -- whole-panel blocking
+// doesn't apply there the same way.
+const PANEL_DOMAIN = {
+  airtemp:'air_temp', rh:'humidity', precip:'precipitation',
+  soilmoist:'soil_moisture', soiltemp:'soil_temp',
+  gdd:'gdd_cumulative_calibrated', dtr:'dtr_f', vpd:'vpd_kpa', et0:'et0_in',
+  wind:'wind_speed', solar:'solar',
+  irrig:'irrigation_volume', irrigblk:'irrigation_volume',
+  labhours:'labour', labcost:'labour',
+  fruit:'harvest_receipts', ferm:'lot_analyses', tanks:'vessels',
+  cellart:'cellar_temp', cellarh:'cellar_rh',
+};
+
 // Vintages backed by real Mars Vineyard Farming irrigation records
 // (Track 2, event-level data from Mars Irrigation 2023/2024.xlsx,
 // source_system 'farm_irrigation_log'). Deliberately its own set, not
@@ -1845,19 +1963,16 @@ function getDataSourceLabel(metricKey, vintage){
   if(metricKey==='dtr_f' && isRealClimateVintage(metricKey, vintage)) return 'Open-Meteo (ERA5), uncalibrated daily max − min';
   // "daily average" wasn't said anywhere before this, which was a real
   // gap independent of the (now-removed) peak chart panel -- a user had
-  // no way to know this line under-represents afternoon stress. Same
-  // 'solar' pattern just below already does exactly this kind of
-  // disambiguating suffix. This wording stands on its own, unrelated to
-  // the vpdpeak panel removal -- see docs/SECURITY.md.
+  // no way to know this line under-represents afternoon stress. This
+  // wording stands on its own, unrelated to the vpdpeak panel removal --
+  // see docs/SECURITY.md.
   if(metricKey==='vpd_kpa' && isRealClimateVintage(metricKey, vintage)) return 'Derived metric · from Open-Meteo (ERA5) air temperature and humidity, daily average';
-  // Solar's own real coverage is partial, unlike the metrics above: only
-  // shortwave_radiation (the "Measured" line) is real -- UV stays a hard,
-  // unfixable gap (Open-Meteo's uv_index returns all-null historically),
-  // confirmed and accepted as permanent mock. A bare "Open-Meteo (ERA5)"
-  // here would overclaim the UV portion is real too; says so explicitly.
-  // Stays on the static SOLAR_LABEL_REAL_VINTAGES set -- solar is out of
-  // scope for the real-2026-climate-ingestion project.
-  if(metricKey==='solar' && SOLAR_LABEL_REAL_VINTAGES.has(vintage)) return 'Open-Meteo (ERA5) · UV stays simulated';
+  // No solar branch here (real-only-data-mode project, 2026-09-13,
+  // corrected a stale claim that 2022-2025 had real "Measured" solar
+  // data -- see SOLAR_LABEL_REAL_VINTAGES's removal comment above).
+  // renderSolar() has never read real data for any vintage; solar falls
+  // through to DATA_SOURCES.solar's plain 'procedural' kind below, same
+  // as every other always-simulated metric.
   if(metricKey==='fruit' && REAL_FRUIT_VINTAGES.has(vintage)) return 'InnoVint grower receipts · weigh-tag intake records';
   if(metricKey==='irrigation_volume' && IRRIGATION_REAL_VINTAGES.has(vintage)) return 'Mars Vineyard Farming records';
   if(s.kind==='weather') return vintage===CURRENT
@@ -2923,13 +3038,17 @@ const RULES = [
   // client-side, reading real data via fetchIrrigationGaps/fetchGddAsOf
   // rather than the mock irrigDay()/gddTo() generators the original dead
   // code used.
-  {tab:'vineyard', sev:'note', test:c=>{
+  // domain: real-only-data-mode gate (2026-09-13) -- renderAnomalies
+  // filters RULES by this field before evaluating, when set. Absent on
+  // every winery-tab rule below since that whole branch is gated at the
+  // panel level instead (100% mock -- TANKS-driven).
+  {tab:'vineyard', sev:'note', domain:'irrigation_volume', test:c=>{
      let worst=null;
      c.irrigationGaps.forEach((gap,id)=>{ if(!worst||gap>worst.gap) worst={id,gap}; });
      return worst && worst.gap>=7 && {t:'Irrigation interval lengthening',
        d:`${B(worst.id).label} has gone ${worst.gap} days since the last recorded set. The cycle here runs 7–10 days through July.`,
        m:'Note · next set likely due this week'};}},
-  {tab:'vineyard', sev:'note', test:c=>{
+  {tab:'vineyard', sev:'note', domain:'gdd_cumulative_calibrated', test:c=>{
      const g=c.gdd;
      return g!=null && g>1800 && g<HARVEST_BAND[0] && {t:'Veraison window',
        d:`At ${fmt(g,0)} GDD the estate is between veraison and the ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD picking band. Block 1 sits highest and colours first.`,
@@ -2960,6 +3079,7 @@ const RULES = [
 ];
 async function renderAnomalies(box, ctx, tab){
   let hits;
+  let nowBlockedMessage = null; // real-only-data-mode override for the "Now" section, winery only
   if(tab==='vineyard'){
     const v=ctx.primary;
     // endOfReal(v), not endOf(ctx.primary,ctx.align): endOf() anchors
@@ -3015,6 +3135,7 @@ async function renderAnomalies(box, ctx, tab){
     if(rpcResult.status==='fulfilled' && !rpcResult.value.error){
       rpcHits = rpcResult.value.data.map(row => ({
         sev: row.severity,
+        metricKey: row.metric_key,
         out: {
           t: row.title,
           d: (row.block_id ? B(row.block_id).label+' · ' : row.tank_id ? row.tank_id+' · ' : '')
@@ -3025,47 +3146,87 @@ async function renderAnomalies(box, ctx, tab){
     } else {
       console.error('vineyard anomalies_eval failed:', rpcResult.status==='rejected' ? rpcResult.reason : rpcResult.value.error);
     }
+    // Real-only-data-mode gate (2026-09-13): anomalies_eval's rule set is
+    // NOT filtered upstream (see the p_as_of comment above -- correcting
+    // that needs a server-side change, out of scope here), so wind_high
+    // hits (anomaly_thresholds.data_status mislabels wind_speed 'real';
+    // confirmed 100% mock) can appear in this result set alongside
+    // genuinely real hits. Filtered here, per-hit, by metric_key -- this
+    // doesn't touch the p_as_of/window_hours entanglement at all, it just
+    // drops any hit whose metric isn't real for this vintage before
+    // display, which is exactly the "never simulated data" contract
+    // without needing the whole panel blocked over one contaminated rule.
+    const RULE_METRIC_DOMAIN = {air_temp:'air_temp', dtr:'dtr_f', humidity:'humidity',
+      soil_moisture:'soil_moisture', vpd:'vpd_kpa', vpd_peak:'vpd_peak_kpa',
+      wind_speed:'wind_speed', gdd:'gdd_cumulative_calibrated', et0:'et0_in'};
+    if(dataMode==='real_only'){
+      rpcHits = rpcHits.filter(h => {
+        const dom = RULE_METRIC_DOMAIN[h.metricKey];
+        return !dom || isDomainReal(dom, v);
+      });
+    }
     const irrigationGaps = gapsResult.status==='fulfilled' ? gapsResult.value : new Map();
     const gdd = gddResult.status==='fulfilled' ? gddResult.value : null;
     if(gapsResult.status==='rejected') console.error('irrigation gap fetch failed:', gapsResult.reason);
     if(gddResult.status==='rejected') console.error('gdd fetch failed:', gddResult.reason);
     const c = {...ctx, end:endOf(ctx.primary,ctx.align), irrigationGaps, gdd};
-    const clientHits = RULES.filter(r=>r.tab===tab).map(r=>{
-      let out=null; try{out=r.test(c);}catch(e){}
-      return {sev:r.sev, out};}).filter(x=>x.out);
+    // Same gate for the two client-side vineyard rules, via each rule's
+    // own `domain` field (see RULES' definition) rather than array
+    // position -- irrigation-interval-lengthening reads irrigation_volume
+    // (simulated for 2022/2025/2026), veraison-window reads
+    // gdd_cumulative_calibrated (real for every vintage today, but
+    // checked the same way regardless of current data state).
+    const clientHits = RULES.filter(r=>r.tab===tab)
+      .filter(r => dataMode!=='real_only' || !r.domain || isDomainReal(r.domain, v))
+      .map(r=>{
+        let out=null; try{out=r.test(c);}catch(e){}
+        return {sev:r.sev, out};}).filter(x=>x.out);
     hits=[...rpcHits, ...clientHits];
   } else if(tab==='winery'){
     const v=ctx.primary;
-    // Fail-soft to match the vineyard branch above: anomalies_eval can hit
-    // the same initial-page-load-burst statement timeout here as it does for
-    // vineyard (confirmed live -- concurrent calls under load return 57014).
-    // Letting `error` propagate blanks the whole panel instead of just
-    // skipping the RPC-derived hits, the same class of bug the vineyard
-    // branch already avoids.
-    const { data, error } = await sb.rpc('anomalies_eval', {
-      p_vintage: v,
-      p_as_of: endOfReal(v).toISOString(),
-      p_tab: 'winery'
-    });
-    let rpcHits = [];
-    if(!error){
-      rpcHits = data.map(row => ({
-        sev: row.severity,
-        out: {
-          t: row.title,
-          d: (row.block_id ? B(row.block_id).label+' · ' : row.tank_id ? row.tank_id+' · ' : '')
-             + row.metric_key + ' ' + fmt(row.observed_value,2),
-          m: row.message
-        }
-      }));
+    // Real-only-data-mode gate (2026-09-13): every winery-tab anomaly
+    // rule -- RPC (ferment_hot/warm, brix_dry, all data_status='mock',
+    // confirmed) and client-side (RULES below, all TANKS-driven mock
+    // fermentation checks) alike -- is 100% simulated. Unlike vineyard's
+    // wind_high, there's no per-rule split to make: skip both fetches
+    // entirely rather than run them only to filter everything out, and
+    // say so explicitly in "Now" below rather than showing the same
+    // "all clear" a genuinely-checked-and-fine result would.
+    if(dataMode==='real_only'){
+      hits = [];
+      nowBlockedMessage = 'Not available in real-only mode — fermentation monitoring is simulated.';
     } else {
-      console.error('winery anomalies_eval failed:', error);
+      // Fail-soft to match the vineyard branch above: anomalies_eval can hit
+      // the same initial-page-load-burst statement timeout here as it does for
+      // vineyard (confirmed live -- concurrent calls under load return 57014).
+      // Letting `error` propagate blanks the whole panel instead of just
+      // skipping the RPC-derived hits, the same class of bug the vineyard
+      // branch already avoids.
+      const { data, error } = await sb.rpc('anomalies_eval', {
+        p_vintage: v,
+        p_as_of: endOfReal(v).toISOString(),
+        p_tab: 'winery'
+      });
+      let rpcHits = [];
+      if(!error){
+        rpcHits = data.map(row => ({
+          sev: row.severity,
+          out: {
+            t: row.title,
+            d: (row.block_id ? B(row.block_id).label+' · ' : row.tank_id ? row.tank_id+' · ' : '')
+               + row.metric_key + ' ' + fmt(row.observed_value,2),
+            m: row.message
+          }
+        }));
+      } else {
+        console.error('winery anomalies_eval failed:', error);
+      }
+      const c={...ctx, end:endOf(ctx.primary,ctx.align)};
+      const clientHits=RULES.filter(r=>r.tab===tab).map(r=>{
+        let out=null; try{out=r.test(c);}catch(e){}
+        return {sev:r.sev, out};}).filter(x=>x.out);
+      hits=[...rpcHits, ...clientHits];
     }
-    const c={...ctx, end:endOf(ctx.primary,ctx.align)};
-    const clientHits=RULES.filter(r=>r.tab===tab).map(r=>{
-      let out=null; try{out=r.test(c);}catch(e){}
-      return {sev:r.sev, out};}).filter(x=>x.out);
-    hits=[...rpcHits, ...clientHits];
   } else {
     const c={...ctx, end:endOf(ctx.primary,ctx.align)};
     hits=RULES.filter(r=>r.tab===tab).map(r=>{
@@ -3082,7 +3243,8 @@ async function renderAnomalies(box, ctx, tab){
   box.innerHTML='';
   const wrap=el('div','anom');
   wrap.innerHTML += `<div class="anom-sublabel">Now</div>`;
-  if(!hits.length) wrap.innerHTML+=`<div class="anom-clear">✓ &nbsp;All monitored parameters within range</div>`;
+  if(nowBlockedMessage) wrap.innerHTML+=`<div class="anom-clear">${escapeHtml(nowBlockedMessage)}</div>`;
+  else if(!hits.length) wrap.innerHTML+=`<div class="anom-clear">✓ &nbsp;All monitored parameters within range</div>`;
   else{
     const ord={alert:0,warn:1,note:2};
     hits.sort((a,b)=>ord[a.sev]-ord[b.sev]);
@@ -3371,32 +3533,38 @@ function formatVineyardTiles(cur, prev, other, th){
     const dd=now-prev[key];
     return {txt:`vs ${other}: ${dd>=0?'+':''}${fmt(dd, Math.abs(dd)<10?1:0)}`, up:dd>=0};
   };
-  const {t, sm, dry, g, vp, dt, rh, norm} = cur;
+  const {t, sm, dry, g, vp, dt, rh, norm, blocked} = cur;
   const dT=delta(t,'t'), dG=delta(g,'g'), dS=delta(sm,'sm');
   const tAir   = th?.byKey.get('air_temp_high')?.threshold ?? 92;
   const tHumid = th?.byKey.get('humidity_high')?.threshold ?? 88;
   const tSoil  = th?.byKey.get('soil_below_refill')?.threshold ?? 15;
   const tVpd   = th?.byKey.get('vpd_high')?.threshold ?? 3.1;
   const tDtr   = th?.byKey.get('dtr_low')?.threshold ?? 21;
+  // Real-only-data-mode gate (2026-09-13): a blocked tile's `d:` text
+  // says so explicitly rather than falling through to the same bare
+  // dash a genuine data gap would show -- those are different states
+  // (this one has real data withheld by account setting, not missing).
+  const REAL_ONLY_NOTE = 'Not available in real-only mode';
+  const gated = (dom, text) => blocked?.has(dom) ? REAL_ONLY_NOTE : text;
   return [
     {key:'t', l:'Air temperature · hourly', v:fmt(t,1), u:'°F',
-      d: dT ? dT.txt : (t==null ? '—' : (t>tAir?'above seasonal norm':
-          (norm?.value!=null ? `avg of ${norm.vintageCount} prior season${norm.vintageCount===1?'':'s'} ${fmt(norm.value,0)} °F` : '—'))),
+      d: gated('air_temp', dT ? dT.txt : (t==null ? '—' : (t>tAir?'above seasonal norm':
+          (norm?.value!=null ? `avg of ${norm.vintageCount} prior season${norm.vintageCount===1?'':'s'} ${fmt(norm.value,0)} °F` : '—')))),
       c: dT ? (dT.up?'wr':'up') : (t==null ? '' : (t>tAir?'dn':''))},
     {key:'rh', l:'Relative humidity · hourly', v:fmt(rh,0), u:'%',
-      d: rh==null ? '—' : (rh>tHumid?'mildew pressure':'normal'),
+      d: gated('humidity', rh==null ? '—' : (rh>tHumid?'mildew pressure':'normal')),
       c: rh==null ? '' : (rh>tHumid?'wr':'')},
     {key:'g', l:'GDD to date', v:fmt(g,0), u:'',
-      d: dG ? dG.txt : 'base 50 °F from 1 Apr',
+      d: gated('gdd_cumulative_calibrated', dG ? dG.txt : 'base 50 °F from 1 Apr'),
       c: dG ? (dG.up?'wr':'up') : ''},
     {key:'sm', l:'Soil moisture, avg · hourly', v:fmt(sm,1), u:'% VWC',
-      d: dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—'),
+      d: gated('soil_moisture', dS ? dS.txt : (dry ? 'driest '+B(dry.id).label+' · '+fmt(dry.v,1)+'%' : '—')),
       c: sm==null ? '' : (sm<tSoil?'dn':'')},
     {key:'vp', l:'VPD', v:fmt(vp,2), u:'kPa',
-      d: vp==null ? '—' : (vp>tVpd?'high vine stress':'within range'),
+      d: gated('vpd_kpa', vp==null ? '—' : (vp>tVpd?'high vine stress':'within range')),
       c: vp==null ? '' : (vp>tVpd?'wr':'up')},
     {key:'dt', l:'Diurnal range', v:fmt(dt,1), u:'°F',
-      d: dt==null ? '—' : (dt>=tDtr?'good acid retention':'compressed'),
+      d: gated('dtr_f', dt==null ? '—' : (dt>=tDtr?'good acid retention':'compressed')),
       c: dt==null ? '' : (dt>=tDtr?'up':'wr')}
   ];
 }
@@ -3408,19 +3576,29 @@ async function overviewStats(tab, c){
   const th = await getThresholds();
 
   async function vineyardSnapshot(vv){
+    // Real-only-data-mode gate (2026-09-13): each tile's fetch is skipped
+    // entirely (not just null-displayed) when this vintage is simulated
+    // for that domain -- `blocked` lets formatVineyardTiles() below tell
+    // "not available in real-only mode" apart from a genuine data gap,
+    // which would otherwise both render as a bare '—'. soil_moisture is
+    // checked once for the whole tile (its per-block average), matching
+    // how soilmoist's own panel gate works -- not per-block, since
+    // real-only status doesn't vary by block for this domain.
+    const blocked = new Set(['air_temp','humidity','gdd_cumulative_calibrated','vpd_kpa','dtr_f','soil_moisture']
+      .filter(dom => realOnlyBlocked(dom, [vv])));
     const [t, soilByBlock, g, vp, dt, rh] = await Promise.all([
-      getLatestValue({metric:'air_temp', scope:'estate', vintage:vv}),
-      Promise.all(ids.map(async id => ({id, v: await getLatestValue({metric:'soil_moisture', scope:id, vintage:vv})}))),
+      blocked.has('air_temp') ? null : getLatestValue({metric:'air_temp', scope:'estate', vintage:vv}),
+      blocked.has('soil_moisture') ? [] : Promise.all(ids.map(async id => ({id, v: await getLatestValue({metric:'soil_moisture', scope:id, vintage:vv})}))),
       // Calibrated, matching the GDD panel -- the "GDD to date" tile and the
       // chart must not quote two different numbers for the same metric.
-      getLatestDerivedValue({field:'gdd_cumulative_calibrated', vintage:vv}),
-      getLatestDerivedValue({field:'vpd_kpa', vintage:vv}),
+      blocked.has('gdd_cumulative_calibrated') ? null : getLatestDerivedValue({field:'gdd_cumulative_calibrated', vintage:vv}),
+      blocked.has('vpd_kpa') ? null : getLatestDerivedValue({field:'vpd_kpa', vintage:vv}),
       // dtr_f stays RAW: this tile's own good-acid-retention/compressed
       // verdict is decided against the dtr_low threshold (21°F), which is
       // tuned to the raw distribution. Switching only the displayed number
       // would flip verdicts without the threshold moving with it.
-      getLatestDerivedValue({field:'dtr_f', vintage:vv}),
-      getLatestValue({metric:'humidity', scope:'estate', vintage:vv})
+      blocked.has('dtr_f') ? null : getLatestDerivedValue({field:'dtr_f', vintage:vv}),
+      blocked.has('humidity') ? null : getLatestValue({metric:'humidity', scope:'estate', vintage:vv})
     ]);
     const valid = soilByBlock.filter(b=>b.v!=null);
     const sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
@@ -3439,7 +3617,7 @@ async function overviewStats(tab, c){
     // realClimateSeriesEnd() falls through to seriesEndReal() unchanged
     // for any non-CURRENT vintage, so that case is untouched.
     const norm = (t!=null && t<=tAir) ? await getSeasonalNorm('air_temp','estate', realClimateSeriesEnd('air_temp', vv)) : null;
-    return {t, soilByBlock, sm, dry, g, vp, dt, rh, norm};
+    return {t, soilByBlock, sm, dry, g, vp, dt, rh, norm, blocked};
   }
 
   const [cur, prev] = await Promise.all([
@@ -3508,6 +3686,18 @@ let wineryOverviewCache = null; // {t, rh}
 
 async function paintOverviewW(animate){
   const g=$('#ovg-winery'); if(!g) return;
+  // Real-only-data-mode gate (2026-09-13): cellar_temp/cellar_rh are
+  // fixed-always-simulated (see domain_reality()), so this tile is
+  // either fully blocked or fully normal, never per-vintage -- unlike
+  // the vineyard overview tiles, no partial/per-metric split is needed.
+  // wineryOverviewCache stays null when blocked, which also makes
+  // updateWineryTile() (the realtime-insert path) a safe no-op -- it
+  // already early-returns on !wineryOverviewCache.
+  if(realOnlyBlocked('cellar_temp', [CURRENT])){
+    wineryOverviewCache = null;
+    g.innerHTML = `<div class="stat" style="grid-column:1/-1"><div class="stat-d">Not available in real-only mode — cellar sensors are simulated.</div></div>`;
+    return;
+  }
   const [t, rh] = await Promise.all([
     getLatestValue({metric:'cellar_temp', scope:'cellar', vintage:CURRENT}),
     getLatestValue({metric:'cellar_rh', scope:'cellar', vintage:CURRENT})
@@ -3675,6 +3865,19 @@ function makePanel(p, c){
   const unitEl=hd.querySelector('.p-unit'); // passed to render() so a panel can
     // show a computed figure (e.g. "gal · 1,234/ac") instead of a static unit
   return {panel, body, run: async ()=>{
+    // Real-only-data-mode gate (2026-09-13): checked before p.render() is
+    // ever called, not after -- a blocked panel never runs its mock data
+    // path at all, so there's no risk of the "not available" state
+    // flashing simulated data first or a mock fetch running needlessly.
+    // c.vintages (not just c.primary) so a compare-mode chart mixing one
+    // real and one simulated vintage is blocked entirely -- see
+    // realOnlyBlocked()'s own comment.
+    const domain = PANEL_DOMAIN[p.id];
+    if(domain && realOnlyBlocked(domain, c.vintages)){
+      body.innerHTML='';
+      body.appendChild(realOnlyEmptyState(p.title));
+      return;
+    }
     try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); }
     catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); }
   }};
@@ -3911,6 +4114,16 @@ async function rerenderHarvestVintage(){
     // rerenderPanel('fruit')/panelRuns.fruit -- not just bypassed once here.
     const body=hd.parentElement.querySelector('.p-body');
     panelRuns.fruit=async()=>{
+      // Same real-only-data-mode gate as makePanel()'s run() closure --
+      // 'fruit' is harvest_receipts, real for 2022-2024 and simulated for
+      // 2025/2026 (see domain_reality()) -- this Harvest vintage dropdown
+      // is the one place a user can switch 'fruit' to a simulated vintage
+      // without a full renderTab(), so it needs the identical check.
+      if(realOnlyBlocked('harvest_receipts', c.vintages)){
+        body.innerHTML='';
+        body.appendChild(realOnlyEmptyState(fp.title));
+        return;
+      }
       try{ await fp.render(body,{...c, range:state.range.fruit||'5D', scrollDays:state.scrollDays.fruit||0}, unitEl); }
       catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(fp.id,err); }
     };
@@ -3933,6 +4146,17 @@ function refreshPanelRun(p, c){
   const body=hd.parentElement.querySelector('.p-body');
   const unitEl=hd.querySelector('.p-unit');
   panelRuns[p.id]=async()=>{
+    // Same real-only-data-mode gate as makePanel()'s run() closure --
+    // this rebuilds that exact closure for a scoped (block-filter-change)
+    // re-render, so it needs the identical check or a real-only account
+    // could see simulated soil/labour data reappear after touching a
+    // block chip. See makePanel()'s own comment for the full reasoning.
+    const domain = PANEL_DOMAIN[p.id];
+    if(domain && realOnlyBlocked(domain, c.vintages)){
+      body.innerHTML='';
+      body.appendChild(realOnlyEmptyState(p.title));
+      return;
+    }
     try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); }
     catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); }
   };
@@ -4717,7 +4941,9 @@ async function runSessionGate(){
   // per-render fetch (see that function's own comment on why: it runs on
   // every affected panel's every render, unlike insights-scan's weekly
   // batch job). One RPC round-trip per session-gate pass, not per panel.
-  await refreshRealClimateVintages();
+  // refreshDataMode() shares the same reasoning -- makePanel()'s run()
+  // closure calls realOnlyBlocked() on every render.
+  await Promise.all([refreshRealClimateVintages(), refreshDataMode()]);
   showDashboard();
 }
 
@@ -4987,18 +5213,21 @@ async function renderApproveForm(formHost, row, wrap){
 }
 
 /* User Management's "Accounts" tab -- edits an existing approved
-   account's first_name/last_name/is_admin. Reuses admin_manages_profiles
-   (same RLS path the approval flow already writes through) plus the
-   guard_self_admin_removal trigger, which is the actual enforcement --
-   the current-admin checkbox lock below is a client-side nicety on top
-   of that, not a substitute for it. */
+   account's first_name/last_name/is_admin/data_mode. Reuses
+   admin_manages_profiles (same RLS path the approval flow already writes
+   through) plus the guard_self_admin_removal trigger, which is the
+   actual enforcement -- the current-admin checkbox lock below is a
+   client-side nicety on top of that, not a substitute for it. No new
+   RLS needed for data_mode (real-only-data-mode project, 2026-09-13) --
+   row-level UPDATE access already covers any column on the row,
+   including one added after this comment was first written. */
 async function loadAccountsList(){
   const list=$('#accounts-list');
   list.innerHTML=`<div class="empty">Loading&hellip;</div>`;
 
   const { data: { session } } = await sb.auth.getSession();
   const { data: rows, error } = await sb.from('user_profiles')
-    .select('id, first_name, last_name, role, is_admin')
+    .select('id, first_name, last_name, role, is_admin, data_mode')
     .eq('status','approved')
     .order('first_name', {ascending:true, nullsFirst:false});
 
@@ -5050,6 +5279,11 @@ function renderAccountRow(list, row, email, currentUserId){
           <input type="checkbox" class="acct-admin-check" ${row.is_admin?'checked':''}> Grant admin privileges
         </label>
       </div>
+      <div class="fgroup">
+        <label class="flabel queue-admin-label" style="display:flex; align-items:center; gap:8px; cursor:pointer" title="Hides simulated data entirely -- panels/tools show a clear 'not available' state instead of mock data for any vintage/metric that isn't real.">
+          <input type="checkbox" class="acct-realonly-check" ${row.data_mode==='real_only'?'checked':''}> Real-only data mode
+        </label>
+      </div>
       <div class="auth-err acct-form-err"></div>
       <div class="queue-form-actions">
         <button type="button" class="out-b acct-save-btn">Save</button>
@@ -5062,6 +5296,7 @@ function renderAccountRow(list, row, email, currentUserId){
   const lastInput=wrap.querySelector('.acct-last-input');
   const adminCheck=wrap.querySelector('.acct-admin-check');
   const adminLabel=wrap.querySelector('.queue-admin-label');
+  const realOnlyCheck=wrap.querySelector('.acct-realonly-check');
   const formErr=wrap.querySelector('.acct-form-err');
   const saveBtn=wrap.querySelector('.acct-save-btn');
 
@@ -5085,7 +5320,8 @@ function renderAccountRow(list, row, email, currentUserId){
     }
     saveBtn.disabled=true; saveBtn.textContent='Saving…';
     const { error } = await sb.from('user_profiles').update({
-      first_name:first, last_name:last, is_admin:adminCheck.checked
+      first_name:first, last_name:last, is_admin:adminCheck.checked,
+      data_mode: realOnlyCheck.checked ? 'real_only' : 'all'
     }).eq('id', row.id);
     if(error){
       console.error('account save failed', error);

@@ -314,14 +314,38 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
    before it, since 92+ rows is far beyond anything this app has
    rendered in one table. Deliberately its own class, not reusing .out's
    overlay scroll fix (different context: in-page flow vs fixed overlay). */
-.tbl-scroll{max-height:360px; overflow-y:auto}
+/* .tbl-scroll/.lab-barlist share the same overlay-scrollbar fix and the
+   same thin-scrollbar convention as .chat-log/.chip-panel below (5px,
+   var(--line-2) thumb) -- neither reserved space nor styled the OS
+   scrollbar before, so on an overlay-scrollbar platform (confirmed live:
+   macOS default) the ~15px default thumb drew directly on top of the
+   rightmost column/value with no gutter. overflow-x:hidden also fixes a
+   CSS quirk specific to setting only overflow-y: an unset overflow-x
+   computes to 'auto' too (per spec, when one axis isn't 'visible' the
+   other stops being 'visible'), which was producing a spurious
+   horizontal scrollbar under .lab-barlist confirmed live in a harness
+   using the real data/rows -- there was nothing to scroll horizontally,
+   it was a side effect of the vertical-only intent never being stated
+   explicitly for the other axis. */
+.tbl-scroll{max-height:360px; overflow-y:auto; overflow-x:hidden; padding-right:10px}
 .tbl-scroll thead th{position:sticky; top:0; background:var(--ink-2); z-index:1}
-.lab-barlist{display:flex; flex-direction:column; gap:7px; max-height:360px; overflow-y:auto}
-.lab-bar-row{display:grid; grid-template-columns:minmax(84px,34%) 1fr 56px; align-items:center; gap:8px}
-.lab-bar-lbl{font-size:10.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.tbl-scroll::-webkit-scrollbar, .lab-barlist::-webkit-scrollbar{width:5px}
+.tbl-scroll::-webkit-scrollbar-thumb, .lab-barlist::-webkit-scrollbar-thumb{background:var(--line-2); border-radius:3px}
+.lab-barlist{display:flex; flex-direction:column; gap:9px; max-height:360px; overflow-y:auto; overflow-x:hidden; padding-right:10px}
+.lab-bar-row{display:grid; grid-template-columns:minmax(84px,34%) 1fr 60px; align-items:center; gap:8px}
+/* Both label and value now explicitly var(--mono) at the same size as
+   .tbl's cell text (10.5px) -- .lab-bar-val already had this; .lab-bar-lbl
+   didn't, so it was silently inheriting body's proportional --ui (Inter)
+   font instead, which renders visibly smaller/thinner than JetBrains Mono
+   at the identical 10.5px -- confirmed live side by side with the value
+   column next to it in the same row. That mismatch, not the px number
+   alone, was the main readability complaint; bumped to 11.5px on top of
+   the font fix for a genuinely comfortable size (still below strip-v's
+   16px, which is a single headline stat, not a 19-row dense list). */
+.lab-bar-lbl{font-family:var(--mono); font-size:11.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 .lab-bar-track{height:9px; background:rgba(255,255,255,.07); border-radius:2px; overflow:hidden}
 .lab-bar-fill{height:100%; border-radius:2px}
-.lab-bar-val{font-family:var(--mono); font-size:10.5px; text-align:right; color:var(--cream); white-space:nowrap}
+.lab-bar-val{font-family:var(--mono); font-size:11.5px; text-align:right; color:var(--cream); white-space:nowrap}
 .tbl-toggle{font-family:var(--mono); font-size:9.5px; color:var(--gold-dim); background:none; border:none; padding:10px 0 0; cursor:pointer; text-decoration:underline; text-underline-offset:2px; transition:color .16s}
 .tbl-toggle:hover{color:var(--gold)}
 .flag{color:var(--warn); cursor:help; margin-left:3px}

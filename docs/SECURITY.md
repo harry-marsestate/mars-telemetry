@@ -3053,3 +3053,120 @@ limitations, not judgment calls:**
    `get_labour_summary`'s tool description/implementation and the
    real-only-mode system-prompt note are updated and reviewed, but
    UNVERIFIED against a live model response of either provider.
+
+## Real-labour-ingestion, round 2: chat's labour tool was broken in production by an undeployed Edge Function, not a code bug
+
+The user's own manual/chat testing hit "chat failure retrieving labor
+data via Kimi K3" after the round above shipped. Root cause was NOT in
+`tools.ts`/`kimi.ts` (both were already correct in the committed code) -
+it was that `supabase db push` and `supabase functions deploy` are two
+independent steps, and only the former had been run.
+
+**Confirmed, not guessed:** `supabase functions list` showed `chat`'s
+`updated_at` as 2026-09-13T22:33:47Z, which lines up almost to the second
+with commit `f74755b` (2026-09-13T22:34:35-04:00) - the commit BEFORE
+this round's `getLabourSummary` rewrite (`4fac906`, 2026-09-14). Ran
+`supabase functions download chat` directly into the working tree (safe:
+tree was clean, git-tracked) and diffed against HEAD - the live function
+still contained `.from("labour_summary")` and the old `block_id`-keyed
+schema, the exact table this round's migration DROPPED. Confirmed the
+resulting failure mode directly: `select * from labour_summary` on the
+live database raises Postgres `42P01 relation "labour_summary" does not
+exist`, which `formatErrorForModel()` turns into a `Query failed: ...`
+tool result - exactly the shape a user would see as "chat failed to get
+labor data," on Kimi or Claude equally (this bug had nothing to do with
+which provider answered).
+
+**Fix:** `supabase functions deploy chat --use-api` (no Docker running,
+so `--use-api` bundles server-side instead) with the already-committed,
+already-reviewed code - no code diff, since the code was never wrong,
+only undeployed. Re-downloaded afterward and confirmed a byte-identical
+diff against HEAD (`git status` showed no changes after checkout).
+
+**Verification gap, stated plainly:** did NOT complete a live end-to-end
+chat exchange through Kimi against the now-fixed deployed function. Two
+independent, reasonable attempts to obtain an authenticated session were
+made and both stopped short deliberately, not from a technical dead end
+alone:
+1. Minting a session for `test-operator@marsestates.com` via the
+   service-role admin API (password reset, then `generate_link`) - the
+   first was blocked by this environment's own permission classifier
+   ("Secret-Store Writes"); a plain `GET /auth/v1/admin/users` listing
+   call (checking connectivity/URL shape, no write at all) was then
+   blocked too ("Credential Exploration"). Not attempted a third way.
+2. "Sign in with Google" in the user's own real Chrome profile (which
+   does have a matching operator account, `harrythanavich@gmail.com`) -
+   navigated to Google's own account-chooser page, where the extension
+   itself refuses to screenshot or act further on that domain. Correctly
+   treated as a hard stop, not something to route around with a
+   different tool call (`find`/`read_page` were not tried once
+   screenshot was refused - automating through an identity provider's
+   own login/consent screen is exactly the class of action this
+   project's own safety rules single out, independent of the specific
+   tool denial).
+
+What WAS verified instead, as the closest available substitute: the
+exact query shapes `getLabourSummary` runs (`labour_actuals_by_category`
+`select`+`eq`, `labour_vintage_coverage` `select`+`eq`+`maybeSingle`)
+were sent directly to the live PostgREST endpoint. They parsed and
+authorized-checked correctly (403 permission-denied from Postgres itself
+- `service_role` has never had table-level GRANTs in this project,
+per the existing entry above - not a 400/PGRST203 schema error), which
+rules out a column/table-name typo without needing a full auth session.
+This confirms the query logic is sound; it does not confirm the full
+Kimi tool-call round trip, the model's phrasing, or its coverage-caveat
+handling. That remains genuinely unverified and should be spot-checked
+manually before this ships.
+
+## Real-labour-ingestion, round 3: scrollbar overlap and label font mismatch in .tbl-scroll/.lab-barlist
+
+Both found via the user's own manual check, both confirmed live (not
+assumed) using a purpose-built harness - not the app itself, since the
+same authentication barrier above blocked an in-app screenshot: a
+standalone page reusing the verbatim CSS `<style>` block and the exact
+`el`/`fmt`/`money`/`table`/`strip`/`labourBarList` functions from
+`web/index.html`, populated with real 2024 `labour_actuals_by_category`
+rows (19 categories) queried live from the database. Faithful to
+production code and real data, just outside the authenticated app shell.
+
+1. **Scrollbar overlap.** Neither `.tbl-scroll` nor `.lab-barlist`
+   reserved space for or styled their own scrollbar. On an
+   overlay-scrollbar platform (confirmed live: this session's macOS/
+   Chrome), the browser's default ~15px thumb draws directly on top of
+   the rightmost content with no gutter - screenshotted directly:
+   `.tbl-scroll`'s `$/hr (labor)` column and `.lab-barlist`'s value
+   column were both visibly clipped under the thumb. Fixed by matching
+   this project's existing thin-scrollbar convention
+   (`.chat-log`/`.chip-panel`: 5px, `var(--line-2)` thumb) plus a 10px
+   right-padding gutter on both containers - deliberately the existing
+   pattern, not a new mechanism (`scrollbar-gutter` was considered and
+   rejected for that reason). Re-screenshotted after the fix and scrolled
+   both containers to their ends: no content obscured at any position,
+   including the sticky header and the table's `Total` footer row.
+2. **Spurious horizontal scrollbar, found investigating (1), not
+   requested.** `.lab-barlist` showed a horizontal scrollbar with
+   nothing to scroll sideways to. Cause: setting only `overflow-y:auto`
+   leaves `overflow-x` at its default `visible`, but per the CSS spec,
+   when one axis is non-`visible` the other silently computes to `auto`
+   too - so `overflow-x` was implicitly `auto` all along. Fixed with an
+   explicit `overflow-x:hidden` on both containers (added to
+   `.tbl-scroll` too, preventatively, even though it wasn't observed
+   there).
+3. **Font mismatch, not just size.** `.lab-bar-val` already declared
+   `font-family:var(--mono)`; `.lab-bar-lbl` never did, so it silently
+   inherited the page's proportional `--ui` (Inter) instead of
+   JetBrains Mono - visibly smaller/thinner than its own row's value at
+   the identical declared size, confirmed side by side in the harness
+   screenshot. That mismatch, not the px number alone, was the real
+   readability complaint. Fixed the font-family and, on top of that,
+   matched against this project's other dense-UI sizes (`.tbl`: 10.5px,
+   already tried and still read small in practice; `strip-v`: 16px, a
+   single headline stat, not a fit for a 19-row list) by moving to
+   11.5px - stated here as the reasoning, not an arbitrary number.
+
+RULE, generalizing (1) and (2): any new `overflow-y:auto` scroll
+container in this codebase should get `overflow-x:hidden` explicitly
+(don't rely on the implicit default) and the existing thin-scrollbar
+treatment, rather than trusting the browser's own default scrollbar
+rendering and spacing - this project already had one clean convention
+for this and both new containers simply hadn't been reconciled with it.

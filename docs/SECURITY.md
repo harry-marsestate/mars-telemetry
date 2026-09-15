@@ -26,7 +26,6 @@ Known dormant instances (RLS on, no policy, not yet reachable by any
 non-SECURITY-DEFINER path, so not currently broken - but WILL silently break
 the moment something queries them directly):
 - tanks, block_lots (tied to deferred ferm/tanks/fruit real-data work)
-- work_type_lookup (tied to deferred labour panel real-data work)
 - stg_sensor_readings (dbt staging table, should probably stay deny-all
   permanently - not meant for app access)
 
@@ -2940,3 +2939,117 @@ Claude/Anthropic streaming path is architecturally low-risk - but it has
 NOT been live-verified for this feature and should be spot-checked once
 Anthropic credits are available, not assumed to work from the Kimi
 result alone.
+
+## Real-labour-ingestion project: work_events/labour_summary (100% mock) replaced by labour_actuals
+
+Real labour data now exists (Silverado Hours Analysis invoices, 2023 and
+2024; the Mars Invoice Backup, labor + expenses, July 2026 only) and
+replaces the simulated pipeline entirely: `work_events`/`work_type_lookup`
+tables and the `labour_summary` view are DROPPED (not just emptied) - see
+below for the pre-drop dependency audit. New table `labour_actuals` (every
+field from every source row, `entry_kind in ('labor','expense')`) plus two
+views: `labour_actuals_by_category` (per vintage/job_category, labor_cost
+and expense_cost kept SEPARATE so `cost_per_hour` is never distorted by
+the categories that receive folded-in expenses - Fertilize, Disease
+Control, Irrigation, Other) and `labour_vintage_coverage` (per-vintage
+first/last month + month_count, so the frontend/chat can label 2023
+May-Dec, 2024 Jan-Dec, 2026 July-only honestly rather than implying
+comparable full-season totals).
+
+**Schema deviation from the original proposal, stated per its own "adjust
+if you find a better fit" allowance: added `source_row_id`.** Labour line
+items have no natural business key - confirmed multiple real rows share
+identical job_category/task/role/hours/rate on the same invoice - so
+unlike sensor_readings (metric_key+sensor_id+recorded_at) or irrigation
+(date+block_id), there was nothing to upsert on that wouldn't silently
+collapse two genuinely distinct rows into one. `source_row_id` (the row's
+position in its source sheet) paired with `source_file` gives every row a
+stable, idempotent identity instead. Verified idempotent directly: ran
+the backfill twice against the live database, second run produced
+identical row counts and totals for all four sources (no duplication).
+
+**Pre-drop dependency audit, done against the LIVE database, not a
+code-only search, before dropping anything (per this file's own
+"grants and RLS policies are two independent gates" discipline - a drop
+deserves the same rigor as a grant):** queried `pg_policies` (21 total
+policies in the db) for any `qual`/`with_check` mentioning any of the
+three names on ANY table - zero matches (sanity-checked the query
+mechanism itself first against a known reference, `accessible_blocks()`
+in `sensor_read`, to confirm it actually finds real hits). Queried every
+function body in `pg_proc` for the three names - the only hit was
+`domain_reality()`'s own descriptive comment text ("labour: work_events
+has no real_data_sources-registered source"), not a query; that comment
+is replaced by this project's own migration anyway. Queried `pg_views`
+for any definition referencing them - only `labour_summary` itself
+(built on `work_events`, one of the three being dropped together, so
+self-referential, not an external dependency). Zero foreign keys from
+any other table point at any of the three. Zero `pg_depend` dependents
+beyond the three themselves. Zero triggers. Grants present were only the
+standard `anon`/`authenticated`/`service_role`/`postgres` grants directly
+on these three tables. Conclusion: no other table's RLS or grants are
+affected, directly or indirectly, by this drop.
+
+**Bug caught while wiring this in, before it shipped:** the generic
+real-only-mode panel gate (`PANEL_DOMAIN` in `web/index.html`, feeding
+`realOnlyBlocked()`) assumes "not real for this vintage" always means
+"simulated data would otherwise be shown, so withhold it" - true for
+every other domain it covers, but no longer true for labour once its
+mock generator was deleted entirely. Left mapped, a real-only-mode
+account viewing 2022/2025 labour would have seen "...is simulated for
+this vintage," which is false - nothing simulated exists there to hide,
+it's a genuine, permanent absence (a third state, distinct from both
+real and simulated). Fixed by removing `labhours`/`labcost` from
+`PANEL_DOMAIN` entirely; both panels' own render logic already produces
+the correct result unconditionally (real data when it exists, an honest
+empty state when it doesn't), so the generic gate was actively wrong to
+apply here, not just redundant. The equivalent chat-side note
+(`get_labour_summary` never returns `real_only_mode_blocked` - see
+`chat/index.ts`'s real-only-mode system-prompt addition) was written
+alongside it for the same reason.
+
+**Verified against the live database after ingestion (not just the
+ingestion script's own self-check output) - every figure re-derived
+independently via direct SQL against `labour_actuals` and both views:**
+row counts/hours/amounts per vintage+entry_kind, the 2024 Farming/
+Development split, the Mars Invoice Labor division split, the expense
+category folding (Disease Control $3,217.3568, Fertilize $656.9472,
+Irrigation $231.84, Other $239.9488 - exact), `labour_actuals_by_category`
+spot-checked for correct `cost_per_hour` (confirmed dividing labor_cost
+only, e.g. Disease Control 2026: $4,839.04 labor / 72.24 hrs = $66.99,
+matching the view's own computed column - expense_cost's $3,217.3568 is
+excluded from that ratio as designed), `labour_vintage_coverage` (2023:
+May-Dec/8mo, 2024: Jan-Dec/12mo, 2026: Jul-Jul/1mo - exact), and the
+union job/task/role counts (19/61/15, plus the expected 20th category
+"Other" introduced by expense-folding) all computed fresh from the
+database, matching every value already confirmed against the parser
+dry-run and the source files themselves. `domain_reality('labour')`
+confirmed live: true for 2023/2024/2026, false for 2022/2025.
+
+**One flagged, non-blocking discrepancy in the source data itself:** the
+2024 file's own Summary tab narrative claims "24 monthly Silverado
+invoices," but its Raw Data tab contains only 20 distinct Invoice #
+values. Every numeric total (hours, amount, both Farming/Development
+splits) matches exactly - this is an inconsistency in the source file's
+own descriptive text, not a parsing error, and no checksum or downstream
+computation depends on invoice count.
+
+**Known open items, not resolved in this session - environment
+limitations, not judgment calls:**
+1. **No real browser check performed.** The Chrome extension was not
+   connected in this session (`tabs_context_mcp` failed twice with
+   "Browser extension is not connected"). Panel rendering (coverage
+   labels, per-vintage compare sections, the 2022/2025 empty state) is
+   NOT visually confirmed - only the underlying data/RLS/domain_reality()
+   layer is. Needs a manual or reconnected-extension check before this
+   is treated as UI-verified.
+2. **No live chat check performed, Kimi or Claude.** Calling the deployed
+   `chat` edge function requires a real authenticated user JWT
+   (`withSupabase({auth:["user"]})` 401s without one). Minting one for
+   the existing `test-operator@marsestates.com` throwaway account (reset
+   its password, or generate a magic-link token, via the service-role
+   admin API) was blocked twice by this environment's own permission
+   classifier ("Secret-Store Writes" then "Credential Exploration") -
+   not attempted around, per instruction not to route around a denial.
+   `get_labour_summary`'s tool description/implementation and the
+   real-only-mode system-prompt note are updated and reviewed, but
+   UNVERIFIED against a live model response of either provider.

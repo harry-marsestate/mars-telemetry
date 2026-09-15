@@ -289,6 +289,10 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .irrigblk-vyr{margin-bottom:18px}
 .irrigblk-vyr:last-child{margin-bottom:0}
 .irrigblk-vyr-hd{font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:var(--gold); margin-bottom:8px}
+.labour-vyr{margin-bottom:22px}
+.labour-vyr:last-child{margin-bottom:0}
+.labour-vyr-hd{font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:var(--gold); margin-bottom:4px}
+.labour-vyr-cov{font-size:11px; color:var(--muted); margin-bottom:10px}
 
 /* table */
 .tbl{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:10.5px}
@@ -1060,25 +1064,102 @@ function gddTo(date,v){
 // reference to an uncorrected intermediate.
 const HARVEST_BAND=[3550,4050];
 
-/* Labour */
-const OPS = [
-  {op:'Pruning',                    mo:[1,2],       hpa:38, rate:44},
-  {op:'Suckering & thinning',       mo:[4,5],       hpa:26, rate:42},
-  {op:'Canopy management',          mo:[5,6,7],     hpa:34, rate:42},
-  {op:'Leafing & shoot positioning',mo:[6,7],       hpa:22, rate:42},
-  {op:'Spraying',                   mo:[3,4,5,6,7], hpa:9,  rate:52},
-  {op:'Irrigation & upkeep',        mo:[5,6,7,8],   hpa:11, rate:48},
-  {op:'Harvest',                    mo:[8,9],       hpa:31, rate:55}
-];
-function labour(id,v){
-  const b=B(id), done=v<CURRENT;
-  return OPS.map(o=>{
-    const prog = done ? 1 : (o.mo.every(m=>m<NOW.getMonth()) ? 1
-               : o.mo.some(m=>m<=NOW.getMonth()) ? .48 : 0);
-    const jit = .86+noise('lab|'+id+'|'+o.op+'|'+v, v)*.3;
-    const hrs = +(b.acres*o.hpa*jit*prog).toFixed(1);
-    return {op:o.op, hours:hrs, rate:o.rate, cost:Math.round(hrs*o.rate)};
+/* Labour — real per-category data (labour_actuals / real-labour-ingestion
+   project). Replaces the old OPS/labour() client-side mock generator
+   entirely: real records now exist for 2023/2024/2026 and there is no
+   vintage left for a mock fallback to cover (2022/2025 render an honest
+   empty state instead — see labourEmptyReasonFor()). */
+const REAL_LABOUR_VINTAGES = new Set([2023,2024,2026]);
+const _labourCatCache = new Map();   // vintage -> Promise<rows from labour_actuals_by_category>
+const _labourCovCache = new Map();   // vintage -> Promise<coverage row from labour_vintage_coverage>
+
+function getLabourByCategory(v){
+  if(!_labourCatCache.has(v)){
+    _labourCatCache.set(v, (async()=>{
+      const { data, error } = await sb.from('labour_actuals_by_category')
+        .select('vintage, job_category, labor_hours, labor_cost, expense_cost, total_cost, cost_per_hour')
+        .eq('vintage', v);
+      if(error){ console.error('getLabourByCategory failed', v, error); return []; }
+      return data;
+    })());
+  }
+  return _labourCatCache.get(v);
+}
+function getLabourCoverage(v){
+  if(!_labourCovCache.has(v)){
+    _labourCovCache.set(v, (async()=>{
+      const { data, error } = await sb.from('labour_vintage_coverage')
+        .select('vintage, first_month, last_month, month_count').eq('vintage', v).maybeSingle();
+      if(error){ console.error('getLabourCoverage failed', v, error); return null; }
+      return data;
+    })());
+  }
+  return _labourCovCache.get(v);
+}
+const MONTH_SHORT=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function labourCoverageLabel(cov){
+  if(!cov) return '';
+  const a=new Date(cov.first_month+'T00:00:00'), b=new Date(cov.last_month+'T00:00:00');
+  const range = a.getTime()===b.getTime() ? `${MONTH_SHORT[a.getMonth()]} ${a.getFullYear()}`
+    : `${MONTH_SHORT[a.getMonth()]}–${MONTH_SHORT[b.getMonth()]} ${a.getFullYear()}`;
+  return cov.month_count>=12 ? `${range} · full season` : `${range} · ${cov.month_count} of 12 months — not a full season`;
+}
+// Third, distinct state from both real and simulated: 2022/2025 have no
+// labour records of any kind (never ingested, never mocked). Returning a
+// reason string (rather than a boolean) lets render sites show exactly
+// why, matching irrigBlkSubtitleFor's precedent for honest per-vintage gaps.
+function labourEmptyReasonFor(v){
+  return REAL_LABOUR_VINTAGES.has(v) ? null : `No labour records for ${v}.`;
+}
+// Chart helpers (barChart) self-clear via box.innerHTML=g -- rendered into
+// a dedicated child div, never the per-vintage `box` itself, so a header/
+// coverage line appended before it (compare mode) survives.
+async function renderLabHoursVintage(box, v, compareMode){
+  const reason = labourEmptyReasonFor(v);
+  if(reason){ box.appendChild(el('div','empty', reason)); return; }
+  const [rows, cov] = await Promise.all([getLabourByCategory(v), getLabourCoverage(v)]);
+  if(compareMode) box.appendChild(el('div','labour-vyr-cov', labourCoverageLabel(cov)));
+  const sorted=[...rows].sort((a,b)=>b.labor_hours-a.labor_hours);
+  const chartBox=el('div'); box.appendChild(chartBox);
+  barChart(chartBox, sorted.map(r=>({lbl:r.job_category, v:+(+r.labor_hours).toFixed(1), color:'#C6A961'})),
+    {unit:'hrs', dec:0, name:'Hours', h:240});
+}
+async function renderLabCostVintage(box, v, compareMode){
+  const reason = labourEmptyReasonFor(v);
+  if(reason){ box.appendChild(el('div','empty', reason)); return; }
+  const [rows, cov] = await Promise.all([getLabourByCategory(v), getLabourCoverage(v)]);
+  if(compareMode) box.appendChild(el('div','labour-vyr-cov', labourCoverageLabel(cov)));
+  const sorted=[...rows].sort((a,b)=>b.total_cost-a.total_cost);
+  const totalHours=sorted.reduce((s,r)=>s+(+r.labor_hours),0);
+  const laborCost=sorted.reduce((s,r)=>s+(+r.labor_cost),0);
+  const expenseCost=sorted.reduce((s,r)=>s+(+r.expense_cost),0);
+  const totalCost=laborCost+expenseCost;
+  // Blended rate deliberately divides labor cost (not total cost) by
+  // hours -- expenses have cost but no hours, so folding them into this
+  // ratio would silently distort $/hr for the categories that receive
+  // them (Fertilize/Disease Control/Irrigation/Other), per the ingestion
+  // project's explicit requirement. Same rule the per-category $/hr
+  // column below and labour_actuals_by_category's cost_per_hour apply.
+  strip(box,[
+    {l:'Crew hours', v:fmt(totalHours,0), u:'hrs'},
+    {l:'Labor cost', v:money(laborCost)},
+    {l:'Expense cost', v:money(expenseCost)},
+    {l:'Total cost', v:money(totalCost)},
+    {l:'Blended rate', v:'$'+fmt(laborCost/(totalHours||1),0), u:'/hr, labor only'},
+  ]);
+  const chartBox=el('div'); box.appendChild(chartBox);
+  barChart(chartBox, sorted.map(r=>({lbl:r.job_category, v:+(+r.total_cost).toFixed(0), color:'#7FA3D4'})),
+    {unit:'USD', dec:0, name:'Total cost', h:220});
+  const tableRows=sorted.map(r=>{
+    const hrs=+r.labor_hours, lc=+r.labor_cost, ec=+r.expense_cost, tc=+r.total_cost;
+    const pct = totalHours>0 ? hrs/totalHours*100 : 0;
+    const perHr = r.cost_per_hour!=null ? '$'+fmt(+r.cost_per_hour,0) : '—';
+    return [r.job_category, fmt(hrs,0), fmt(pct,1)+'%', money(lc), money(ec), money(tc), perHr];
   });
+  table(box,
+    [{h:'Operation'},{h:'Hours',num:1},{h:'% of hours',num:1},{h:'Labor cost',num:1},{h:'Expense cost',num:1},{h:'Total cost',num:1},{h:'$/hr (labor)',num:1}],
+    tableRows,
+    ['Total', fmt(totalHours,0), '100%', money(laborCost), money(expenseCost), money(totalCost), '$'+fmt(laborCost/(totalHours||1),0)]);
 }
 
 /* Winery — tanks ferment only inside a harvest window, so series have gaps */
@@ -1532,7 +1613,12 @@ function legendFor(panel, sets){
 const SECTIONS = [
   {tab:'vineyard', id:'climate', label:'Climate',      note:'Estate weather station'},
   {tab:'vineyard', id:'soil',    label:'Soil & water', note:'Vineyard sensors'},
-  {tab:'vineyard', id:'labour',  label:'Labour',       note:'Simulated labor record'},
+  // Function-valued like harvest's note above -- reality now varies by
+  // vintage (real for 2023/2024/2026, absent for 2022/2025), so a single
+  // static string would misdescribe most vintages.
+  {tab:'vineyard', id:'labour',  label:'Labour',
+   note:(c)=> c.compare ? 'Mars labor & invoice records — coverage varies by vintage shown below'
+     : REAL_LABOUR_VINTAGES.has(c.primary) ? 'Mars labor & invoice records' : 'No labour records for this vintage'},
   {tab:'winery',   id:'cellar',  label:'Cellar',       note:'Cellar HVAC sensors'},
   {tab:'winery',   id:'ferm',    label:'Fermentation', note:'InnoVint winery data'},
   // The only function-valued note: harvest's source flips with vintage, and a
@@ -1590,7 +1676,7 @@ const DATA_SOURCES = {
   vessels:           {kind:'real', detail:'InnoVint vessel inventory'},
   solar:             {kind:'procedural', detail:'Simulated pyranometer + UV reading'},
   wind:              {kind:'procedural', detail:'Simulated weather-station reading'},
-  labour:            {kind:'procedural', detail:'Simulated labor record'},
+  labour:            {kind:'procedural', detail:'No labour records for this vintage'}, // 2022/2025 fallback only -- see getDataSourceLabel's real branch above
   fruit:             {kind:'procedural', detail:'Simulated weigh-tag record'},
 };
 
@@ -1896,7 +1982,18 @@ const PANEL_DOMAIN = {
   gdd:'gdd_cumulative_calibrated', dtr:'dtr_f', vpd:'vpd_kpa', et0:'et0_in',
   wind:'wind_speed', solar:'solar',
   irrig:'irrigation_volume', irrigblk:'irrigation_volume',
-  labhours:'labour', labcost:'labour',
+  // labhours/labcost deliberately NOT mapped here (real-labour-ingestion
+  // project): this generic gate assumes "not real" means "simulated data
+  // would otherwise show," which realOnlyEmptyState() says explicitly.
+  // That's false for labour now -- 2022/2025 have no simulated fallback
+  // to hide (the mock generator was deleted entirely), so is_real=false
+  // for them means "no data exists," not "simulated data is being
+  // withheld." Both render functions already handle real-only-mode
+  // correctness AND the honest empty state themselves via
+  // labourEmptyReasonFor(), unconditionally (true regardless of
+  // dataMode) -- routing them through this gate would show the wrong
+  // ("...is simulated for this vintage") message for 2022/2025 whenever
+  // dataMode==='real_only'.
   fruit:'harvest_receipts', ferm:'lot_analyses', tanks:'vessels',
   cellart:'cellar_temp', cellarh:'cellar_rh',
 };
@@ -1975,6 +2072,16 @@ function getDataSourceLabel(metricKey, vintage){
   // as every other always-simulated metric.
   if(metricKey==='fruit' && REAL_FRUIT_VINTAGES.has(vintage)) return 'InnoVint grower receipts · weigh-tag intake records';
   if(metricKey==='irrigation_volume' && IRRIGATION_REAL_VINTAGES.has(vintage)) return 'Mars Vineyard Farming records';
+  // labour: source differs by vintage (real-labour-ingestion project) --
+  // Silverado invoices for 2023/2024, the Mars Invoice Backup (labor +
+  // expenses, folded into matching job categories) for 2026. 2022/2025
+  // fall through to labourEmptyReasonFor()'s empty state at the render
+  // site, never reaching this label at all.
+  if(metricKey==='labour' && REAL_LABOUR_VINTAGES.has(vintage)){
+    return vintage===2026
+      ? 'Mars Invoice Backup · labor + expenses by category'
+      : 'Silverado Hours Analysis invoices';
+  }
   if(s.kind==='weather') return vintage===CURRENT
     ? `Regional weather data (Howell Mountain) · on-site sensors pending${s.detail?' · '+s.detail:''}`
     : `Regional weather data (Howell Mountain)${s.detail?' · '+s.detail:''}`;
@@ -2214,45 +2321,42 @@ const PANELS = [
  }},
 
 /* ══ VINEYARD · LABOUR ══ */
-{id:'labhours', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour hours by operation', unit:'hours',
- sub:(c)=>getDataSourceLabel('labour',c.primary)+' · selected blocks',
- render:(b,c)=>{
-   if(c.compare){
-     const groups=OPS.map(o=>({lbl:o.op, v:c.vintages.map(v=>
-       c.blocks.reduce((s,id)=>s+(labour(id,v).find(r=>r.op===o.op).hours),0))}));
-     legendFor(b.parentElement,c.vintages.map(v=>({name:String(v),color:VCOLOR[v]})));
-     groupedBars(b,groups,c.vintages.map(v=>String(v)),c.vintages.map(v=>VCOLOR[v]),{unit:'hrs',dec:0,h:206});
-   } else {
-     const agg={};
-     c.blocks.forEach(id=>labour(id,c.primary).forEach(r=>agg[r.op]=(agg[r.op]||0)+r.hours));
-     barChart(b, Object.entries(agg).map(([k,v])=>({lbl:k.split(' ')[0],v:+v.toFixed(1),color:'#C6A961'})),
-       {unit:'hrs',dec:0,name:'Hours',h:206});}}},
-
-{id:'labcost', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour cost by block', unit:'USD · USD/acre',
- sub:(c)=>getDataSourceLabel('labour',c.primary)+' · selected blocks',
- render:(b,c)=>{
-   // strip()/table() below are append-only (see docs/SECURITY.md's "Two
-   // independent panel repeat-render mechanisms" entry) -- harmless under a
-   // full renderTab() rebuild (b is always fresh) but stacks a duplicate
-   // strip+table if this ever runs twice against the same body, which
-   // rerenderVineyardBlocks() now does. Every other panel in this file
-   // either self-clears (lineChart/barChart/groupedBars) or builds fresh
-   // child nodes each call (irrigblk); labcost was the one exception,
-   // confirmed live (see the vineyard block-filter scoping entry).
+// Re-dimensioned from BLOCK to OPERATION CATEGORY (real-labour-ingestion
+// project) -- the source data has no block dimension at all (Silverado/
+// Mars Invoice records are job-category/task/role, not per-block), so
+// c.blocks no longer applies here. Both panels render one section per
+// selected vintage (mirroring irrigblk's renderIrrigBlkVintage pattern)
+// rather than overlaying vintages in one grouped-bar chart -- 2023 (8mo),
+// 2024 (12mo) and 2026 (1mo, July only) are not comparable as raw totals,
+// and a shared chart would visually imply they were. s12 (full width):
+// ~20 categories need materially more room than the old block-keyed s6.
+{id:'labhours', tab:'vineyard', sect:'labour', span:'s12', minRole:'operator', title:'Labour hours by operation', unit:'hours',
+ sub:(c)=> c.compare ? 'Mars labor & invoice records — coverage varies by vintage, see below'
+   : (labourEmptyReasonFor(c.primary) || getDataSourceLabel('labour',c.primary)),
+ render: async (b,c) => {
    b.innerHTML='';
-   const v=c.primary; let tc=0, th=0;
-   const rows=c.blocks.map(id=>{
-     const L=labour(id,v), h=L.reduce((s,r)=>s+r.hours,0), cc=L.reduce((s,r)=>s+r.cost,0);
-     tc+=cc; th+=h;
-     return [`<span class="vdot" style="background:${B(id).color}"></span>${B(id).label}`,
-             fmt(B(id).acres,2), fmt(h,0), money(cc), money(cc/B(id).acres)];});
-   const ac=acresOf(c.blocks);
-   strip(b,[{l:'Crew hours',v:fmt(th,0),u:'hrs'},
-            {l:'Total cost',v:money(tc)},
-            {l:'Per acre',v:money(tc/ac)},
-            {l:'Blended rate',v:'$'+fmt(tc/(th||1),0),u:'/hr'}]);
-   table(b,[{h:'Block'},{h:'Acres',num:1},{h:'Hours',num:1},{h:'Cost',num:1},{h:'$ / acre',num:1}],rows,
-     ['Total',fmt(ac,2),fmt(th,0),money(tc),money(tc/ac)]);}},
+   const vintagesDesc=[...c.vintages].sort((x,y)=>y-x);
+   for(const v of vintagesDesc){
+     const section=el('div','labour-vyr');
+     if(c.compare) section.appendChild(el('div','labour-vyr-hd', String(v)));
+     await renderLabHoursVintage(section, v, c.compare);
+     b.appendChild(section);
+   }
+ }},
+
+{id:'labcost', tab:'vineyard', sect:'labour', span:'s12', minRole:'operator', title:'Labour cost by operation', unit:'USD · USD/hr',
+ sub:(c)=> c.compare ? 'Mars labor & invoice records — coverage varies by vintage, see below'
+   : (labourEmptyReasonFor(c.primary) || getDataSourceLabel('labour',c.primary)),
+ render: async (b,c) => {
+   b.innerHTML='';
+   const vintagesDesc=[...c.vintages].sort((x,y)=>y-x);
+   for(const v of vintagesDesc){
+     const section=el('div','labour-vyr');
+     if(c.compare) section.appendChild(el('div','labour-vyr-hd', String(v)));
+     await renderLabCostVintage(section, v, c.compare);
+     b.appendChild(section);
+   }
+ }},
 
 /* ══ WINERY · CELLAR ══ */
 {id:'cellart', tab:'winery', sect:'cellar', span:'s6', minRole:'operator', title:'Cellar temperature', unit:'°F',
@@ -4192,7 +4296,11 @@ async function rerenderVineyardBlocks(){
     await rerenderPanel('anom-v');
   }
 
-  const scoped=PANELS.filter(p=>p.tab==='vineyard' && (p.sect==='soil'||p.sect==='labour')
+  // 'labour' removed from this block-filter-triggered scope (real-labour-
+  // ingestion project): the real data has no block dimension at all, so a
+  // block-filter toggle no longer changes anything these panels show.
+  // They still re-render normally on vintage change via the full-tab path.
+  const scoped=PANELS.filter(p=>p.tab==='vineyard' && p.sect==='soil'
     && (p.minRole!=='operator' || isOperator));
   scoped.forEach(p=>refreshPanelRun(p,c));
   await Promise.allSettled(scoped.map(p=>rerenderPanel(p.id)));

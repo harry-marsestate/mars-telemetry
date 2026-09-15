@@ -315,6 +315,13 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
    rendered in one table. Deliberately its own class, not reusing .out's
    overlay scroll fix (different context: in-page flow vs fixed overlay). */
 .tbl-scroll{max-height:360px; overflow-y:auto}
+.tbl-scroll thead th{position:sticky; top:0; background:var(--ink-2); z-index:1}
+.lab-barlist{display:flex; flex-direction:column; gap:7px; max-height:360px; overflow-y:auto}
+.lab-bar-row{display:grid; grid-template-columns:minmax(84px,34%) 1fr 56px; align-items:center; gap:8px}
+.lab-bar-lbl{font-size:10.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.lab-bar-track{height:9px; background:rgba(255,255,255,.07); border-radius:2px; overflow:hidden}
+.lab-bar-fill{height:100%; border-radius:2px}
+.lab-bar-val{font-family:var(--mono); font-size:10.5px; text-align:right; color:var(--cream); white-space:nowrap}
 .tbl-toggle{font-family:var(--mono); font-size:9.5px; color:var(--gold-dim); background:none; border:none; padding:10px 0 0; cursor:pointer; text-decoration:underline; text-underline-offset:2px; transition:color .16s}
 .tbl-toggle:hover{color:var(--gold)}
 .flag{color:var(--warn); cursor:help; margin-left:3px}
@@ -1111,18 +1118,41 @@ function labourCoverageLabel(cov){
 function labourEmptyReasonFor(v){
   return REAL_LABOUR_VINTAGES.has(v) ? null : `No labour records for ${v}.`;
 }
-// Chart helpers (barChart) self-clear via box.innerHTML=g -- rendered into
-// a dedicated child div, never the per-vintage `box` itself, so a header/
-// coverage line appended before it (compare mode) survives.
+// Horizontal bar-list, not the vertical SVG barChart -- reverting labhours
+// to s6 (half-width, ~700px on a wide desktop) means barChart's own
+// x-axis label-skip logic (Math.floor(W/84) columns before it starts
+// dropping labels) hides roughly 2 of every 3 category labels with ~20
+// categories: confirmed by running that exact math (706px usable width,
+// n=20) before writing this -- only 7 of 20 labels would render, the rest
+// identifiable only by hovering. Height, not width, is the abundant
+// dimension for a half-width panel, so each category gets its own row
+// instead of competing for horizontal label space; every label stays
+// fully legible regardless of panel width. Capped/scrollable at the same
+// 360px as labcost's .tbl-scroll (not requested, but the two panels sit
+// side by side and .grid>.panel{height:100%} stretches both to the
+// taller one -- an unbounded list here would drag labcost's card tall
+// with mostly empty space below its own, shorter, capped table).
+function labourBarList(box, rows, opts={}){
+  const max = Math.max(...rows.map(r=>r.v), .01);
+  const wrap = el('div','lab-barlist');
+  rows.forEach(r=>{
+    const pct = Math.max(1.5, r.v/max*100);
+    const row = el('div','lab-bar-row');
+    row.innerHTML = `<div class="lab-bar-lbl" title="${r.lbl}">${r.lbl}</div>
+      <div class="lab-bar-track"><div class="lab-bar-fill" style="width:${pct}%;background:${r.color||opts.color||'#C6A961'}"></div></div>
+      <div class="lab-bar-val">${fmt(r.v,opts.dec??0)}${opts.unit?' '+opts.unit:''}</div>`;
+    wrap.appendChild(row);
+  });
+  box.appendChild(wrap);
+}
 async function renderLabHoursVintage(box, v, compareMode){
   const reason = labourEmptyReasonFor(v);
   if(reason){ box.appendChild(el('div','empty', reason)); return; }
   const [rows, cov] = await Promise.all([getLabourByCategory(v), getLabourCoverage(v)]);
   if(compareMode) box.appendChild(el('div','labour-vyr-cov', labourCoverageLabel(cov)));
   const sorted=[...rows].sort((a,b)=>b.labor_hours-a.labor_hours);
-  const chartBox=el('div'); box.appendChild(chartBox);
-  barChart(chartBox, sorted.map(r=>({lbl:r.job_category, v:+(+r.labor_hours).toFixed(1), color:'#C6A961'})),
-    {unit:'hrs', dec:0, name:'Hours', h:240});
+  labourBarList(box, sorted.map(r=>({lbl:r.job_category, v:+(+r.labor_hours).toFixed(1), color:'#C6A961'})),
+    {unit:'hrs', dec:0});
 }
 async function renderLabCostVintage(box, v, compareMode){
   const reason = labourEmptyReasonFor(v);
@@ -1147,19 +1177,19 @@ async function renderLabCostVintage(box, v, compareMode){
     {l:'Total cost', v:money(totalCost)},
     {l:'Blended rate', v:'$'+fmt(laborCost/(totalHours||1),0), u:'/hr, labor only'},
   ]);
-  const chartBox=el('div'); box.appendChild(chartBox);
-  barChart(chartBox, sorted.map(r=>({lbl:r.job_category, v:+(+r.total_cost).toFixed(0), color:'#7FA3D4'})),
-    {unit:'USD', dec:0, name:'Total cost', h:220});
+  // No chart here (reverted) and Hours/% of hours dropped from the table
+  // -- both already shown in the adjacent labhours panel, so repeating
+  // them here was redundant, not a second view of a different figure.
   const tableRows=sorted.map(r=>{
-    const hrs=+r.labor_hours, lc=+r.labor_cost, ec=+r.expense_cost, tc=+r.total_cost;
-    const pct = totalHours>0 ? hrs/totalHours*100 : 0;
+    const lc=+r.labor_cost, ec=+r.expense_cost, tc=+r.total_cost;
     const perHr = r.cost_per_hour!=null ? '$'+fmt(+r.cost_per_hour,0) : '—';
-    return [r.job_category, fmt(hrs,0), fmt(pct,1)+'%', money(lc), money(ec), money(tc), perHr];
+    return [r.job_category, money(lc), money(ec), money(tc), perHr];
   });
-  table(box,
-    [{h:'Operation'},{h:'Hours',num:1},{h:'% of hours',num:1},{h:'Labor cost',num:1},{h:'Expense cost',num:1},{h:'Total cost',num:1},{h:'$/hr (labor)',num:1}],
+  const scroll=el('div','tbl-scroll'); box.appendChild(scroll);
+  table(scroll,
+    [{h:'Operation'},{h:'Labor cost',num:1},{h:'Expense cost',num:1},{h:'Total cost',num:1},{h:'$/hr (labor)',num:1}],
     tableRows,
-    ['Total', fmt(totalHours,0), '100%', money(laborCost), money(expenseCost), money(totalCost), '$'+fmt(laborCost/(totalHours||1),0)]);
+    ['Total', money(laborCost), money(expenseCost), money(totalCost), '$'+fmt(laborCost/(totalHours||1),0)]);
 }
 
 /* Winery — tanks ferment only inside a harvest window, so series have gaps */
@@ -2328,9 +2358,17 @@ const PANELS = [
 // selected vintage (mirroring irrigblk's renderIrrigBlkVintage pattern)
 // rather than overlaying vintages in one grouped-bar chart -- 2023 (8mo),
 // 2024 (12mo) and 2026 (1mo, July only) are not comparable as raw totals,
-// and a shared chart would visually imply they were. s12 (full width):
-// ~20 categories need materially more room than the old block-keyed s6.
-{id:'labhours', tab:'vineyard', sect:'labour', span:'s12', minRole:'operator', title:'Labour hours by operation', unit:'hours',
+// and a shared chart would visually imply they were.
+// UI-revision round: back to s6/s6 side by side (an s12/s12 stacked
+// layout was tried and reverted after a manual check of the rendered
+// panels). ~20 categories at s6 width no longer needs the vertical
+// barChart's x-axis label space, because labhours moved to a horizontal
+// bar list (labourBarList(), one row per category, scrollable) instead
+// of fighting for width -- see that function's own comment for the
+// label-legibility math that motivated the switch. labcost dropped its
+// chart entirely and reverted to strip()+table(), the pre-re-dimensioning
+// structure, just keyed by operation instead of block.
+{id:'labhours', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour hours by operation', unit:'hours',
  sub:(c)=> c.compare ? 'Mars labor & invoice records — coverage varies by vintage, see below'
    : (labourEmptyReasonFor(c.primary) || getDataSourceLabel('labour',c.primary)),
  render: async (b,c) => {
@@ -2344,7 +2382,7 @@ const PANELS = [
    }
  }},
 
-{id:'labcost', tab:'vineyard', sect:'labour', span:'s12', minRole:'operator', title:'Labour cost by operation', unit:'USD · USD/hr',
+{id:'labcost', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour cost by operation', unit:'USD · USD/hr',
  sub:(c)=> c.compare ? 'Mars labor & invoice records — coverage varies by vintage, see below'
    : (labourEmptyReasonFor(c.primary) || getDataSourceLabel('labour',c.primary)),
  render: async (b,c) => {

@@ -3170,3 +3170,122 @@ container in this codebase should get `overflow-x:hidden` explicitly
 treatment, rather than trusting the browser's own default scrollbar
 rendering and spacing - this project already had one clean convention
 for this and both new containers simply hadn't been reconciled with it.
+
+## Daily InnoVint sync investigation: Dagster confirmed still undeployed, a stale rate-limit comment corrected, and three real gaps found before any code was written
+
+Investigation for bringing `harvest_receipts`/`lot_analyses`/`vessels` onto
+the same always-on daily cadence `ingest-climate-2026` already gives real
+2026 climate data, mirroring that Edge-Function-+-pg_cron architecture. No
+code diff accompanies this entry - recorded before the port, per this
+file's own convention (see the real-climate-data milestone entry above),
+so the reasoning is on record independent of the implementation that
+follows.
+
+**Dagster was never deployed - confirmed, not assumed.** `ingestion/innovint/definitions.py`
+already defines a complete `ScheduleDefinition` (`0 6 * * *`,
+America/Los_Angeles) wiring all three sync assets to a daily cron. Nothing
+in this repo runs it: no Dockerfile, no CI workflow, no Dagster Cloud
+config, nothing daemonized anywhere. Confirmed independently via git
+history rather than trusting the absence of deployment files alone -
+commit `3d46f4c` (the insights-engine work) states outright that "the
+originally-designed Dagster/Python implementation... was never applied and
+has been abandoned" in favor of Supabase-native pg_cron/pg_net. Today
+`analyses_sync`/`vessels_sync`/`harvest_receipts_sync` only run when
+someone hand-invokes `dagster asset materialize` or boots `dagster dev` -
+a manually-triggered script wearing a scheduler's clothing, same shape as
+every other "designed for Dagster, actually cron-shaped in practice"
+decision this project has already made once.
+
+**`client.py`'s rate-limit comment is stale - corrected against the live
+OpenAPI spec, not assumed accurate because it was already in the codebase.**
+`REQUEST_PAUSE_SECONDS`'s comment reads "No documented InnoVint rate limit
+was found during the data inventory." That predates the OpenAPI-spec
+discovery recorded above ("InnoVint publishes an OpenAPI spec - it IS
+discoverable") and was never revisited once the spec was found. Fetched
+`GET /api/v1/schema` directly (351,925 bytes, live, with the real
+`INNOVINT_TOKEN`) for this investigation: the spec's own `# Rate Limiting`
+section documents **120 requests/minute**, with a `429` + `Retry-After` on
+excess. The existing ~100-call-per-run volume at 0.1s pacing sits
+comfortably under this regardless, so no behavior changes - but the
+comment claiming "no documented limit" is now flatly wrong and should be
+corrected wherever this logic is ported, not carried forward uncorrected
+into new code on the strength of it being the existing comment.
+
+**Incremental-fetch capability is real but uneven across endpoints -
+checked per-endpoint against the spec, not assumed uniform.** Grepped the
+full spec for every list endpoint this ingestion calls:
+- `/wineries/{id}/lots` has genuine `updatedAtAfter`/`updatedAtBefore`
+  query params - a true last-modified filter.
+- `/wineries/{id}/lots/{lotId}/analyses` has `recordedAtAfter`/
+  `recordedAtBefore` only - the lab *measurement* date, not a modification
+  timestamp. A real gap if incremental fetching is ever added here: a
+  correction entered today against an analysis recorded three weeks ago
+  would not be caught by a filter keyed on `recordedAt`, since the
+  measurement date itself didn't change. This is not hypothetical - lab
+  corrections after the fact are exactly the kind of edit InnoVint's
+  `deleted`/`skipped` flags on `InnoVintAnalysis` already anticipate.
+- `/wineries/{id}/vessels` and `/wineries/{id}/growerReceipts/{vintage}`
+  have **no** incremental filter of any kind - `archived`/`codeIn`/`idIn`/
+  `lotIn`/`q`/`limit`/`offset` only. Full pull is the only option for
+  these two, which is a real reason the daily job pulls everything rather
+  than a reason it's an oversight not to build incremental.
+
+**Today's date falls inside the harvest window `definitions.py`'s own
+docstring already flagged as a future revisit trigger.** That docstring
+says daily is fine because "45/47 lots are archived and only 3 vessels
+currently hold wine" but adds: "during harvest (Sept-Oct) receipts
+genuinely ARE same-day events... fine for a historical panel; not fine if
+this ever drives live intake tracking." This investigation is happening
+2026-09-15 - inside that exact window, not a hypothetical future date.
+Daily still seems right given this app's actual use (a historical
+dashboard, not operational intake tracking), but it's a live consideration
+right now rather than a deferred one, and worth the winery confirming
+rather than assuming.
+
+**`service_role` has no grants at all on three of the four tables this
+job needs to write.** Per the standing "service_role has never had
+table-level GRANTs in this project" finding above, checked each table
+this job touches individually rather than assuming the gap was already
+closed: `service_role` currently has only `SELECT` on `harvest_receipts`
+(granted for insights-scan's read path,
+`20260902211836_insights_scan_service_role_grants.sql`) and **nothing** on
+`lot_analyses`, `vessels`, or `block_innovint_map`. A migration granting
+exactly what this job writes - `INSERT, UPDATE` on `lot_analyses`/
+`vessels`, `SELECT` on `block_innovint_map`, `INSERT, UPDATE, DELETE` on
+`harvest_receipts` (delete needed for its reconciliation step) - is
+required before the Edge Function can write anything, same narrowly-scoped
+one-at-a-time pattern as `ingest-climate-2026`'s own grants migration, not
+a blanket fix.
+
+**`INNOVINT_TOKEN`/`INNOVINT_WINERY_ID` are not yet Supabase secrets.**
+Both exist only in the local `.env` used by the Python scripts
+(`psycopg2`/`httpx`). Grepped all of `supabase/` for either name: zero
+hits. An Edge Function reads secrets via `Deno.env.get(...)` - confirmed
+against `chat/index.ts`'s existing `ANTHROPIC_API_KEY`/`KIMI_API_KEY`
+reads - but that mechanism only works once these two are added via
+`supabase secrets set`, which is an operator action, not something this
+investigation (or the implementation that follows it) can do itself.
+
+**Dropped capability, recorded as a conscious tradeoff, not a silent
+loss: `raw_landing.py`'s disk-based replay.** Every raw InnoVint response
+is currently landed to `ingestion/innovint/_raw/<run_stamp>/` before
+parsing, specifically so a transform/upsert bug can be diagnosed by
+replaying the exact bytes that produced a bad run without re-hitting
+InnoVint or needing a live token. A Supabase Edge Function has no durable
+disk across invocations - anything written during one run's execution is
+gone once that instance recycles. `ingest-climate-2026` never had an
+equivalent for Open-Meteo responses either, so this isn't a new gap this
+port introduces relative to the established pattern - but it is a real
+capability the Python path has today that the ported version won't,
+flagged here so it reads as a decision made with eyes open rather than
+something nobody noticed was missing.
+
+RULE, generalizing across all of the above: before porting a working
+script into a scheduled Edge Function, re-verify every comment and
+assumption it carries against current reality rather than porting them
+as-is - a comment can go stale the moment the fact it described changes
+(the rate-limit comment), a capability can look complete until it's read
+per-endpoint instead of assumed uniform (the incremental-filter check),
+and a script that runs standalone today can be relying on privileges or
+local state (grants, disk, `.env`) that a hosted scheduled version won't
+have for free.

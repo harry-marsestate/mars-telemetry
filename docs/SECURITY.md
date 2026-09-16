@@ -3289,3 +3289,85 @@ per-endpoint instead of assumed uniform (the incremental-filter check),
 and a script that runs standalone today can be relying on privileges or
 local state (grants, disk, `.env`) that a hosted scheduled version won't
 have for free.
+
+## ingest-innovint verification: a wrong GRANT-gap assumption, the real combined-run timing, and a confirmed-clear cron slot
+
+Closes out the daily-InnoVint-sync investigation above with what actually
+happened building and verifying `ingest-innovint`
+(`supabase/functions/ingest-innovint`, migrations `20260915120000`/
+`20260915120001`/`20260915130000`).
+
+**A real bug, found by the first live invocation, not by re-reading the
+migration.** The service_role grants migration (`20260915120000`)
+deliberately omitted `SELECT` on `lot_analyses`/`vessels`, reasoning in
+its own comment that "`INSERT ... ON CONFLICT DO UPDATE` needs INSERT +
+UPDATE, not SELECT." Wrong. The first real run returned `permission
+denied for table lot_analyses`/`vessels` from both of those phases, while
+`harvest_receipts_sync` (which already carried `SELECT`, granted earlier
+for insights-scan's read path) succeeded in the same run - the asymmetry
+itself was the tell. Reproduced directly rather than guessed, per this
+file's own established method (the `anomaly_thresholds` investigation
+above): `set role service_role;` then the exact upsert ingest-innovint
+runs, live, in `psql`. Failed identically, and Postgres's own HINT gave
+the fix verbatim: `GRANT SELECT ON public.lot_analyses TO service_role`.
+Also confirmed directly that `service_role` has `rolbypassrls=true`,
+ruling out an RLS-policy explanation - this was purely the GRANT gate.
+Root cause: `ON CONFLICT ... DO UPDATE` has to read the pre-existing
+conflicting row to build itself, which needs `SELECT` on the table; a
+plain `INSERT` or a keyed `UPDATE` don't have that requirement, which is
+what the original (wrong) reasoning was implicitly generalizing from.
+Fixed in a new migration (`20260915130000`), not by editing the
+already-applied one, per this project's own convention of recording
+corrections forward rather than rewriting history.
+
+**Real combined-run timing, measured three times, not estimated.**
+76.5s, 76.7s, 76.4s wall-clock across three consecutive live invocations
+(one partial-failure run before the grant fix, two full-success runs
+after) - 97 real HTTP calls to InnoVint each time, matching the
+investigation's own ~100-call estimate. This is the number the
+combined-vs-split function decision hinged on: 76s comfortably clears a
+150s Edge Function budget with real margin, so the combined-function
+choice stands - but it is not a fast function, and the corrected 600ms
+pacing (see the investigation entry above) is the dominant cost (97
+calls x 0.6s = ~58s of pure pacing, the rest being actual InnoVint
+latency). A future addition to this job's scope (a fourth asset, or a
+lot count that grows meaningfully past today's 48) should re-time rather
+than assume the same margin holds.
+
+**Idempotency confirmed by running it back-to-back, not assumed from
+reading the upsert logic.** Two full-success runs in immediate
+succession produced byte-identical `rows_upserted` counts (1,405
+lot_analyses / 241 vessels / 7 harvest_receipts) and `stale_deleted: 0`
+both times - table row counts confirmed unchanged via direct query
+between runs, not inferred from the function's own self-reported numbers
+alone.
+
+**Data spot-checked against direct InnoVint calls, not just against the
+function's own report of what it wrote.** A vessel (`ves_O3Z1...`,
+capacity/volume/type/archived), a 2022 grower receipt (the same
+4.802-ton Zinfandel receipt already on record in the B1-mapping entry
+above), and the pagination-boundary dedup itself (`lot_2VQ0D3NK...`,
+independently re-walked page by page: 179 raw rows including 3
+boundary-duplicate ids, 176 distinct - exactly the row count actually
+stored) all matched exactly.
+
+**The provisional 07:00 UTC cron slot is now confirmed clear, not still
+guessed.** `select jobname, schedule from cron.job` (blocked earlier in
+the investigation by this environment's own "Production Reads"
+classifier; not blocked when run as part of this implementation/
+verification work) shows the two existing jobs neither of which this
+repo had ever recorded: `ingest-climate-2026-daily` at `17 13 * * *`
+(13:17 UTC) and `insights-weekly-scan` at `0 15 * * 0` (Sundays, 15:00
+UTC). `ingest-innovint-daily`'s `0 7 * * *` clears both with a wide
+margin. The standing caveat from the investigation - that neither job's
+schedule exists anywhere in this repo's history - remains true and
+unresolved; only this one, `ingest-innovint-daily`, is now committed to a
+migration.
+
+RULE, adding to the two-gates entries already on record: `INSERT ...
+ON CONFLICT DO UPDATE` is a THIRD case (alongside plain SELECT and
+plain INSERT/UPDATE/DELETE) with its own distinct privilege requirement
+- it needs SELECT even though it looks, on the surface, like a pure
+write. Don't reason about upsert grants by analogy to a plain INSERT or
+UPDATE; check what Postgres's own error/HINT says, or grant SELECT
+alongside INSERT/UPDATE by default for any table an upsert targets.

@@ -1,0 +1,29 @@
+-- Correction to 20260915120000: that migration's own comment claimed
+-- "INSERT ... ON CONFLICT DO UPDATE needs INSERT + UPDATE, not SELECT"
+-- and deliberately omitted SELECT on lot_analyses/vessels for service_role
+-- on that reasoning. Wrong -- found by the first real invocation of
+-- ingest-innovint, not by re-reading the comment: analyses_sync/
+-- vessels_sync both failed with `permission denied for table
+-- lot_analyses`/`vessels` while harvest_receipts_sync (which already had
+-- SELECT, granted earlier for insights-scan) succeeded in the same run.
+--
+-- Reproduced directly and unambiguously before writing this fix, per this
+-- project's own established debugging discipline (docs/SECURITY.md's
+-- anomaly_thresholds investigation): `set role service_role;` then the
+-- exact INSERT ... ON CONFLICT DO UPDATE ingest-innovint runs, live. It
+-- failed with the identical error, and Postgres's own HINT gave the fix
+-- verbatim: "Grant the required privileges to the current role with:
+-- GRANT SELECT ON public.lot_analyses TO service_role." Also confirmed
+-- directly that service_role has rolbypassrls=true, ruling out RLS as an
+-- alternative explanation -- this is purely the GRANT gate, not the
+-- policy gate.
+--
+-- Root cause: `ON CONFLICT ... DO UPDATE` needs to read the pre-existing
+-- conflicting row to build it, which requires SELECT on the table --
+-- unlike a plain INSERT or a plain UPDATE by primary key, which don't.
+-- harvest_receipts's upsert always worked because it already carried
+-- SELECT for an unrelated reason (insights-scan's read path); lot_analyses
+-- and vessels never had a service_role reader, so nothing had granted
+-- SELECT to them yet.
+grant select on lot_analyses to service_role;
+grant select on vessels to service_role;

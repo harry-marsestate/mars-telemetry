@@ -314,24 +314,27 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
    before it, since 92+ rows is far beyond anything this app has
    rendered in one table. Deliberately its own class, not reusing .out's
    overlay scroll fix (different context: in-page flow vs fixed overlay). */
-/* .tbl-scroll/.lab-barlist share the same overlay-scrollbar fix and the
-   same thin-scrollbar convention as .chat-log/.chip-panel below (5px,
-   var(--line-2) thumb) -- neither reserved space nor styled the OS
-   scrollbar before, so on an overlay-scrollbar platform (confirmed live:
-   macOS default) the ~15px default thumb drew directly on top of the
-   rightmost column/value with no gutter. overflow-x:hidden also fixes a
-   CSS quirk specific to setting only overflow-y: an unset overflow-x
-   computes to 'auto' too (per spec, when one axis isn't 'visible' the
-   other stops being 'visible'), which was producing a spurious
-   horizontal scrollbar under .lab-barlist confirmed live in a harness
-   using the real data/rows -- there was nothing to scroll horizontally,
-   it was a side effect of the vertical-only intent never being stated
-   explicitly for the other axis. */
+/* .tbl-scroll: overlay-scrollbar fix, same thin-scrollbar convention as
+   .chat-log/.chip-panel below (5px, var(--line-2) thumb) -- it reserved
+   no space for or styled its own scrollbar before, so on an
+   overlay-scrollbar platform (confirmed live: macOS default) the ~15px
+   default thumb drew directly on top of the rightmost column with no
+   gutter. overflow-x:hidden also fixes a CSS quirk specific to setting
+   only overflow-y: an unset overflow-x computes to 'auto' too (per spec,
+   when one axis isn't 'visible' the other stops being 'visible'). labcost
+   is the one panel of this pair the user explicitly accepted scrolling
+   in (labhours is the height benchmark instead -- see .lab-barlist),
+   so this cap intentionally stays fixed rather than growing with content. */
 .tbl-scroll{max-height:640px; overflow-y:auto; overflow-x:hidden; padding-right:10px}
 .tbl-scroll thead th{position:sticky; top:0; background:var(--ink-2); z-index:1}
-.tbl-scroll::-webkit-scrollbar, .lab-barlist::-webkit-scrollbar{width:5px}
-.tbl-scroll::-webkit-scrollbar-thumb, .lab-barlist::-webkit-scrollbar-thumb{background:var(--line-2); border-radius:3px}
-.lab-barlist{display:flex; flex-direction:column; gap:9px; max-height:640px; overflow-y:auto; overflow-x:hidden; padding-right:10px}
+.tbl-scroll::-webkit-scrollbar{width:5px}
+.tbl-scroll::-webkit-scrollbar-thumb{background:var(--line-2); border-radius:3px}
+/* No max-height/overflow here (unlike .tbl-scroll) -- labhours is the
+   panel-height BENCHMARK per explicit request: it grows to fit every row
+   naturally, and .grid>.panel{height:100%} stretches labcost's sibling
+   panel to match. labcost is the one the user accepted scrolling in
+   instead of also capping/scrolling this one. */
+.lab-barlist{display:flex; flex-direction:column; gap:9px}
 .lab-bar-row{display:grid; grid-template-columns:minmax(84px,34%) 1fr 60px; align-items:center; gap:8px}
 /* Both label and value now explicitly var(--mono) at the same size as
    .tbl's cell text (10.5px) -- .lab-bar-val already had this; .lab-bar-lbl
@@ -1151,14 +1154,13 @@ function labourEmptyReasonFor(v){
 // identifiable only by hovering. Height, not width, is the abundant
 // dimension for a half-width panel, so each category gets its own row
 // instead of competing for horizontal label space; every label stays
-// fully legible regardless of panel width. Capped/scrollable at the same
-// 640px ceiling as labcost's .tbl-scroll (not requested, but the two
-// panels sit side by side and .grid>.panel{height:100%} stretches both to
-// the taller one) -- high enough that the normal ~19-category case never
-// scrolls at all (confirmed live: a fixed 360px cap was scrolling even
-// though 14 rows already fit with empty space below), only a genuinely
-// oversized list would. An unbounded list here would drag labcost's card tall
-// with mostly empty space below its own, shorter, capped table).
+// fully legible regardless of panel width. Deliberately UNCAPPED, never
+// scrolls -- explicit product decision: this panel is the benchmark for
+// the row's height (.grid>.panel{height:100%} stretches labcost's sibling
+// panel to match), and labcost is the one accepted to scroll instead
+// (.tbl-scroll keeps its own fixed max-height). Two capped panels were
+// tried first (both at 360px, then 640px) and moved away from once the
+// benchmark/scroll split was actually decided.
 function labourBarList(box, rows, opts={}){
   const max = Math.max(...rows.map(r=>r.v), .01);
   const wrap = el('div','lab-barlist');

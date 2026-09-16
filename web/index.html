@@ -327,11 +327,11 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
    using the real data/rows -- there was nothing to scroll horizontally,
    it was a side effect of the vertical-only intent never being stated
    explicitly for the other axis. */
-.tbl-scroll{max-height:360px; overflow-y:auto; overflow-x:hidden; padding-right:10px}
+.tbl-scroll{max-height:640px; overflow-y:auto; overflow-x:hidden; padding-right:10px}
 .tbl-scroll thead th{position:sticky; top:0; background:var(--ink-2); z-index:1}
 .tbl-scroll::-webkit-scrollbar, .lab-barlist::-webkit-scrollbar{width:5px}
 .tbl-scroll::-webkit-scrollbar-thumb, .lab-barlist::-webkit-scrollbar-thumb{background:var(--line-2); border-radius:3px}
-.lab-barlist{display:flex; flex-direction:column; gap:9px; max-height:360px; overflow-y:auto; overflow-x:hidden; padding-right:10px}
+.lab-barlist{display:flex; flex-direction:column; gap:9px; max-height:640px; overflow-y:auto; overflow-x:hidden; padding-right:10px}
 .lab-bar-row{display:grid; grid-template-columns:minmax(84px,34%) 1fr 60px; align-items:center; gap:8px}
 /* Both label and value now explicitly var(--mono) at the same size as
    .tbl's cell text (10.5px) -- .lab-bar-val already had this; .lab-bar-lbl
@@ -1152,9 +1152,12 @@ function labourEmptyReasonFor(v){
 // dimension for a half-width panel, so each category gets its own row
 // instead of competing for horizontal label space; every label stays
 // fully legible regardless of panel width. Capped/scrollable at the same
-// 360px as labcost's .tbl-scroll (not requested, but the two panels sit
-// side by side and .grid>.panel{height:100%} stretches both to the
-// taller one -- an unbounded list here would drag labcost's card tall
+// 640px ceiling as labcost's .tbl-scroll (not requested, but the two
+// panels sit side by side and .grid>.panel{height:100%} stretches both to
+// the taller one) -- high enough that the normal ~19-category case never
+// scrolls at all (confirmed live: a fixed 360px cap was scrolling even
+// though 14 rows already fit with empty space below), only a genuinely
+// oversized list would. An unbounded list here would drag labcost's card tall
 // with mostly empty space below its own, shorter, capped table).
 function labourBarList(box, rows, opts={}){
   const max = Math.max(...rows.map(r=>r.v), .01);

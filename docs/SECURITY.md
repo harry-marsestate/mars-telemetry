@@ -3371,3 +3371,110 @@ plain INSERT/UPDATE/DELETE) with its own distinct privilege requirement
 write. Don't reason about upsert grants by analogy to a plain INSERT or
 UPDATE; check what Postgres's own error/HINT says, or grant SELECT
 alongside INSERT/UPDATE by default for any table an upsert targets.
+
+## Winery Harvest "as of": sync-freshness, not data-content freshness - and why that's a real divergence from vineyardAsOfDate(), not an oversight
+
+Found by the user's own manual check, after ingest-innovint shipped: the
+winery tab's Harvest strip still said `as of 31 Oct <vintage>` (or `as of
+<today>` for CURRENT) regardless of whether the daily InnoVint sync had
+run at all - the exact "wired the label in one place, not the other"
+shape already on record for the real-2026-climate project's `MOCK_NOW`
+entry above, just for a different feature.
+
+**Investigated before assuming the climate pattern transfers.** Grepped
+`web/index.html` for every "as of"/freshness instance on the winery tab
+and found exactly ONE that's InnoVint-relevant: `buildVintageMeta('winery')`'s
+Harvest-strip meta line - the only real caller of that function (the
+page-wide filter bar's own winery branch shows a static `Cellar sensors
+live` pulse instead, per `renderFilters()`, untouched and correctly
+out of scope). `ferm`/`tanks` (lot_analyses/vessels) have NO freshness
+text of any kind today - their `sub:` is `getDataSourceLabel()`'s static,
+vintage-invariant string (`'InnoVint lab analyses'`/`'InnoVint vessel
+inventory'`) - so there was nothing there to fix, only something that
+could be added later at zero extra schema cost (see below).
+
+**Design question, resolved by checking rather than assuming (b) because
+it "sounds more correct"):** should "as of" mean the latest real
+data-content date within the InnoVint tables (mirroring
+`real_climate_as_of_2026()`'s `MIN(day)`-across-metrics approach), or the
+actual last-successful-ingest-innovint-run timestamp? Chose the latter,
+for a reason specific to InnoVint's shape, not a generic preference:
+a receipt's `receipt_date` reflects when the WINERY entered it into
+InnoVint, not when this app last checked InnoVint for it - a broken sync
+sitting untouched for a week would still show a perfectly plausible
+2022/2023/2024 date under the content-derived approach, silently hiding
+exactly the failure a freshness signal exists to catch. Climate's
+`MIN(day)` approach is correct there specifically because climate has one
+clean daily grain where "the data's date" and "when it was fetched" are
+the same day by construction (ERA5 publishes yesterday's day as
+yesterday). InnoVint has no equivalent grain to derive from.
+
+**Implementation cost of (b), confirmed before committing to it, not
+assumed cheap:** nothing already tracked a last-successful-run timestamp
+anywhere in this project (grepped for `sync_runs`/`last_sync`/similar -
+zero hits). Added the minimal piece: `innovint_sync_status` (migration
+`20260916120000`), `resource text primary key, last_success_at
+timestamptz not null` - one row per ingest-innovint phase, not a run-history
+log, matching this project's own established "small purpose-built table"
+convention (`real_data_sources`, `block_innovint_map`). `ingest-innovint`
+upserts its own row from each phase's OWN success path only (never from
+a `catch` block) via a new `markSynced()` helper - so a phase that fails
+never advances its own freshness marker, and a `markSynced()` write
+failure itself is logged but doesn't fail the phase (the actual data
+sync already committed by that point; a marker-write hiccup isn't the
+same failure). Verified live: triggered a real run, confirmed all three
+`resource` rows landed with timestamps matching the run's actual
+per-phase completion order (lot_analyses first, then vessels, then
+harvest_receipts - correctly sequential, not simultaneous).
+
+**Grant, not just a new call site - checked directly rather than assumed
+same as the last one.** `SELECT` for `authenticated` (matching
+`harvest_receipts_read`/`block_innovint_map_read`'s identical `using
+(true)` openness - this is a timestamp, not sensitive data) plus
+`SELECT, INSERT, UPDATE` for `service_role` - `SELECT` included from the
+start this time, not omitted on the same wrong reasoning corrected two
+entries above. Verified via `set role authenticated` directly (the same
+substitute-for-a-real-session technique already established in this
+file, used again here because no operator credentials were available in
+this environment) - all three rows readable.
+
+**Deliberately NOT the same mechanism as `vineyardAsOfDate()`, in one
+specific way, stated explicitly rather than left for a future reader to
+wonder about:** `vineyardAsOfDate()` only special-cases `CURRENT` -
+an archived climate vintage is a closed, complete dataset needing no
+freshness claim at all, so `seriesEnd()`'s Oct-31 season-end already
+answers the only question that matters for it. The winery fix applies to
+EVERY real InnoVint vintage (`REAL_FRUIT_VINTAGES`: 2022-2024), not just
+CURRENT - because `harvest_receipts` reconciles deletions on EVERY sync
+run regardless of vintage (see the entry above), so "does this still
+match InnoVint right now" is a live question for 2022 exactly as much as
+for the current season, unlike climate where an archived vintage's data
+will never change again. The displayed text also drops the vintage
+suffix entirely for the synced case (`synced 16 Sep, 07:04`, not `synced
+16 Sep 2026 2022`) - one sync run covers every vintage in the same pass,
+so pairing a sync timestamp with a specific vintage year would misstate
+the sync as scoped to that vintage.
+
+**Verification gap, stated plainly rather than silently left unmentioned:**
+the actual rendered text (`synced <date>, <time>`) was NOT confirmed in a
+logged-in browser session - no operator credentials were available in
+this environment, and (per this project's own browser-automation safety
+rules) an autofilled saved password is still not something to submit
+without the user doing it themselves. What WAS verified: the DB write
+lands correctly and in the right order (above), the `authenticated`-role
+read path is grant/policy-correct (above), the page loads and parses
+without any JS error after the change (checked via a fresh unauthenticated
+load), and the branch logic was read and traced by hand for every case
+(real vintage + synced value present, real vintage + no synced value yet,
+mock vintage, non-winery tab). The one thing genuinely unconfirmed is the
+final rendered string in an actual operator session - flagged here rather
+than claimed as done, matching this file's own established discipline
+(e.g. the real-labour-ingestion round's identical Kimi-tool-call gap).
+
+RULE, generalizing: a freshness/"as of" fix built for one data source is
+not automatically correct for a second one just because both show up in
+similar-looking meta lines - check what "the data's own date" versus
+"when we last checked" actually means for THIS source's specific update
+pattern (does historical data ever change after the fact? does the
+source expose one clean freshness grain, or several irregular ones?)
+before reusing the first fix's mechanism unchanged.

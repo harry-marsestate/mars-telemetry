@@ -2151,6 +2151,35 @@ const REAL_FRUIT_VINTAGES = new Set([2022,2023,2024]);
 // original seed values and InnoVint's block acreage. renderFruitReal() uses
 // B(id).acres like every other panel.)
 
+// resource -> Date | undefined, last successful ingest-innovint run per
+// phase (innovint_sync_status, written by the Edge Function -- see
+// docs/SECURITY.md's "winery Harvest 'as of'" entry). Deliberately NOT
+// the same mechanism as realClimateAsOf2026/vineyardAsOfDate: that one
+// derives freshness from the DATA's own content (the latest real
+// calendar day actually landed), which works for climate because one
+// day's data always lands as that same day. InnoVint's receipt/analysis
+// dates reflect when the WINERY entered them into InnoVint, not when
+// this app last checked -- a stale sync would still show a plausible
+// historical date under that approach, hiding exactly the failure a
+// freshness signal exists to surface. This is the actual last-sync-ran
+// timestamp instead. Only 'harvest_receipts' has a consumer today
+// (buildVintageMeta, below) -- keyed by resource rather than one
+// InnoVint-wide value since the ingest job already fails independently
+// per phase, and lot_analyses/vessels are written to this same table by
+// the same function at zero extra cost, so a future ferm/tanks "as of"
+// needs no schema change.
+let innovintSyncStatus = new Map();
+
+async function refreshInnovintSyncStatus(){
+  try{
+    const { data, error } = await sb.from('innovint_sync_status').select('resource, last_success_at');
+    if(error){ console.error('refreshInnovintSyncStatus: keeping last-known values', error); return; }
+    innovintSyncStatus = new Map((data||[]).map(r => [r.resource, new Date(r.last_success_at)]));
+  }catch(err){
+    console.error('refreshInnovintSyncStatus: unexpected error, keeping last-known values', err);
+  }
+}
+
 function getDataSourceLabel(metricKey, vintage){
   const s = DATA_SOURCES[metricKey];
   if(!s) return '';
@@ -3657,11 +3686,43 @@ function buildVintageGroup(tab){
    (seriesEnd(CURRENT, true) extends to Oct 31 so every series in a
    comparison shares one axis, see seriesEnd's own comment) -- this label
    would be actively wrong if it borrowed that value, since 2026 never has
-   real data past today no matter what it's compared against. */
+   real data past today no matter what it's compared against.
+
+   WINERY EXCEPTION: when the primary vintage is InnoVint-backed
+   (REAL_FRUIT_VINTAGES -- the only winery panel this strip scopes,
+   `fruit`, is InnoVint-real for exactly those three vintages), the line
+   becomes a sync-freshness claim instead of a season-end date: "synced
+   <when ingest-innovint's harvest_receipts phase last succeeded>".
+   Deliberately NOT vintage-suffixed like the default case -- one sync
+   run covers every vintage at once, so "synced 16 Sep 2026 2022" would
+   misread as if the sync itself were scoped to 2022. Applies to EVERY
+   real vintage, not just CURRENT (contrast vineyardAsOfDate(), which
+   only special-cases CURRENT because an archived CLIMATE vintage is a
+   closed, complete dataset needing no freshness signal) -- InnoVint's
+   harvest_receipts reconciles deletions on every run regardless of
+   vintage (see docs/SECURITY.md), so even a "closed" 2022 season can
+   still change, and "does this match InnoVint right now" is equally
+   live for any real vintage, not just the current one. Also
+   deliberately NOT derived from the data's own content (e.g. MAX(receipt_date)):
+   a receipt's date reflects when the WINERY entered it into InnoVint,
+   not when this app last checked -- a stale sync would still show a
+   plausible-looking historical date under that approach. Falls back to
+   the default text if the sync has never recorded a success yet (fresh
+   table, or refreshInnovintSyncStatus() hasn't resolved/failed) -- same
+   never-go-blank discipline as vineyardAsOfDate(). Mock vintages
+   (2025/2026) and every non-winery tab are entirely untouched -- this
+   function's only other caller is the page-wide vineyard filter bar via
+   buildVintageGroup's sibling meta (renderFilters), which never reaches
+   this branch since tab!=='winery' there. */
 function buildVintageMeta(tab){
   const st=state[tab];
   const meta=el('div','fmeta');
-  meta.innerHTML=`<div class="fmeta-txt">as of ${dstr(seriesEnd(primV(tab), false))} ${primV(tab)}</div>
+  const v=primV(tab);
+  const synced = (tab==='winery' && REAL_FRUIT_VINTAGES.has(v)) ? innovintSyncStatus.get('harvest_receipts') : null;
+  const asOfLine = synced
+    ? `synced ${dstr(synced)}, ${synced.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}`
+    : `as of ${dstr(seriesEnd(v, false))} ${v}`;
+  meta.innerHTML=`<div class="fmeta-txt">${asOfLine}</div>
      <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`;
   return meta;
 }
@@ -5182,8 +5243,11 @@ async function runSessionGate(){
   // every affected panel's every render, unlike insights-scan's weekly
   // batch job). One RPC round-trip per session-gate pass, not per panel.
   // refreshDataMode() shares the same reasoning -- makePanel()'s run()
-  // closure calls realOnlyBlocked() on every render.
-  await Promise.all([refreshRealClimateVintages(), refreshDataMode()]);
+  // closure calls realOnlyBlocked() on every render. refreshInnovintSyncStatus()
+  // joins the same batch for the same reason: buildVintageMeta() reads
+  // innovintSyncStatus on every Harvest-strip rebuild (full renderTab AND
+  // rerenderHarvestVintage's scoped path).
+  await Promise.all([refreshRealClimateVintages(), refreshDataMode(), refreshInnovintSyncStatus()]);
   showDashboard();
 }
 

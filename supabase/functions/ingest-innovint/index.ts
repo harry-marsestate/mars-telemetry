@@ -99,6 +99,7 @@ export default {
         const { error } = await ctx.supabaseAdmin.from("lot_analyses")
           .upsert(deduped, { onConflict: "source_system,source_id" });
         if (error) throw new Error(error.message);
+        await markSynced(ctx, "lot_analyses");
         results.analyses = {
           lots_processed: lots.length,
           rows_upserted: deduped.length,
@@ -150,6 +151,7 @@ export default {
         const { error } = await ctx.supabaseAdmin.from("vessels")
           .upsert(deduped, { onConflict: "vessel_id" });
         if (error) throw new Error(error.message);
+        await markSynced(ctx, "vessels");
         results.vessels = {
           vessels_processed: vessels.length,
           rows_upserted: deduped.length,
@@ -233,6 +235,7 @@ export default {
         }
         const { error: delErr, count: deletedCount } = await delQuery;
         if (delErr) throw new Error(delErr.message);
+        await markSynced(ctx, "harvest_receipts");
 
         results.harvest_receipts = {
           vintages_swept: `${vintages[0]}-${vintages[vintages.length - 1]}`,
@@ -288,6 +291,18 @@ const VESSEL_TYPES = new Set(["TANK", "BARREL", "KEG", "STEEL_DRUM"]);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+// Records that THIS resource's phase just succeeded -- called once per
+// phase, only from that phase's own success path (never from a catch
+// block), so a failed phase never advances its freshness marker. Failure
+// to write this is logged but never thrown: the actual data sync for
+// this phase already committed by the time this runs, and a freshness-
+// marker hiccup shouldn't be reported as if the sync itself failed.
+async function markSynced(ctx: { supabaseAdmin: { from: (t: string) => any } }, resource: string): Promise<void> {
+  const { error } = await ctx.supabaseAdmin.from("innovint_sync_status")
+    .upsert({ resource, last_success_at: new Date().toISOString() }, { onConflict: "resource" });
+  if (error) console.error(`ingest-innovint: could not record sync status for ${resource}`, error);
 }
 
 // ── Pagination envelope ─────────────────────────────────────────────────

@@ -220,6 +220,16 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .p-body:has(table){justify-content:flex-start}
 .p-body:has(.anom){justify-content:flex-start}
 .p-body:has(.lot-select){justify-content:flex-start}
+/* Without this, .p-body's default justify-content:center split the
+   labhours/labcost row-height mismatch into equal gaps ABOVE and BELOW
+   the bar list every time labcost's (taller) content stretched the row
+   -- confirmed live via direct measurement (a 724px-tall body around a
+   489.75px-tall .lab-barlist, centered, ~117px gap on each side). Top-
+   aligning here is still needed even with syncLabourPanelHeights() (see
+   that function) actively equalizing the two panels afterward: sync runs
+   after this render's own DOM is built, so without flex-start the
+   pre-sync layout would visibly center-then-jump on every render. */
+.p-body:has(.lab-barlist){justify-content:flex-start}
 .legend{display:flex; flex-wrap:wrap; gap:13px; padding:0 16px 10px; font-family:var(--mono); font-size:9.5px; color:var(--muted)}
 .legend span{display:flex; align-items:center; gap:6px}
 .legend i{width:12px; height:2px; border-radius:1px; background:currentColor; display:block}
@@ -1219,6 +1229,45 @@ async function renderLabCostVintage(box, v, compareMode){
     [{h:'Operation'},{h:'Labor cost',num:1},{h:'Expense cost',num:1},{h:'Total cost',num:1},{h:'$/hr (labor)',num:1}],
     tableRows,
     ['Total', money(laborCost), money(expenseCost), money(totalCost), '$'+fmt(laborCost/(totalHours||1),0)]);
+}
+// labhours is the panel-height benchmark (product decision, see
+// .lab-barlist's own comment) -- but CSS alone can't make labcost's
+// .tbl-scroll actually SIZE TO that benchmark, only bound it with a
+// guessed constant (tried 360px, then 640px; both still left either a
+// gap or an oversized row, confirmed live both times). A CSS flex-fill
+// approach was tried too (.tbl-scroll{flex:1}, cascaded through
+// .labour-vyr) and made things WORSE, confirmed by direct measurement in
+// a harness: it inflated the row to the table's full unclipped content
+// height (718px) instead of shrinking it, because a grid track's
+// intrinsic-size pass measures a flexed scroll child's unstretched
+// content size, not its post-stretch clipped size. So: measure labhours'
+// actual rendered height directly and apply it as labcost's cap. Called
+// from both panels' own render() (whichever finishes last wins, and it's
+// idempotent) since panelHeaders[] entries for both are guaranteed to
+// exist by the time either's render() runs (renderTab builds every
+// panel's header/body for a tab before invoking any of their render()s).
+// Per-vintage-section index correspondence handles compare mode too,
+// since both panels iterate the same c.vintages in the same order.
+function syncLabourPanelHeights(){
+  const hoursHd = panelHeaders['labhours'], costHd = panelHeaders['labcost'];
+  if(!hoursHd || !costHd) return;
+  const hoursSections = hoursHd.parentElement.querySelectorAll('.p-body .labour-vyr');
+  const costSections = costHd.parentElement.querySelectorAll('.p-body .labour-vyr');
+  costSections.forEach((costSection,i)=>{
+    const hoursSection = hoursSections[i];
+    const scrollEl = costSection.querySelector('.tbl-scroll');
+    if(!hoursSection || !scrollEl) return;
+    // Not just "match the table to the bar list" -- labcost's own strip()
+    // summary sits ABOVE its table in the same section, so matching only
+    // the table left a residual gap in labhours equal to the strip's own
+    // height (confirmed live: 84px, not the full original ~230px, but
+    // still real). Subtracting it here makes the two SECTIONS' total
+    // heights equal, not just their tables.
+    const stripEl = costSection.querySelector('.strip');
+    const otherHeight = stripEl ? stripEl.getBoundingClientRect().height : 0;
+    const target = hoursSection.getBoundingClientRect().height - otherHeight;
+    scrollEl.style.maxHeight = Math.max(80, target)+'px';
+  });
 }
 
 /* Winery — tanks ferment only inside a harvest window, so series have gaps */
@@ -2409,6 +2458,7 @@ const PANELS = [
      await renderLabHoursVintage(section, v, c.compare);
      b.appendChild(section);
    }
+   syncLabourPanelHeights();
  }},
 
 {id:'labcost', tab:'vineyard', sect:'labour', span:'s6', minRole:'operator', title:'Labour cost by operation', unit:'USD · USD/hr',
@@ -2423,6 +2473,7 @@ const PANELS = [
      await renderLabCostVintage(section, v, c.compare);
      b.appendChild(section);
    }
+   syncLabourPanelHeights();
  }},
 
 /* ══ WINERY · CELLAR ══ */

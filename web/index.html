@@ -1263,9 +1263,23 @@ function syncLabourPanelHeights(){
     // height (confirmed live: 84px, not the full original ~230px, but
     // still real). Subtracting it here makes the two SECTIONS' total
     // heights equal, not just their tables.
+    //
+    // Measure .lab-barlist itself, NOT hoursSection's own full height --
+    // in compare mode hoursSection also contains .labour-vyr-hd/
+    // .labour-vyr-cov (the year label + coverage caption), which
+    // costSection has its OWN identical copies of. Using hoursSection's
+    // full height double-counted that shared header on labcost's side
+    // (hd+cov counted once via hoursSection's total, then AGAIN via
+    // costSection's own hd+cov sitting above strip+table) -- confirmed
+    // live in a multi-vintage harness: every real vintage's cost section
+    // came out ~57.5px taller than its hours counterpart (matching
+    // hd+cov's actual height), which single-vintage mode never has
+    // (compare-only markup) and never surfaced there.
+    const barlistEl = hoursSection.querySelector('.lab-barlist');
+    const barlistHeight = barlistEl ? barlistEl.getBoundingClientRect().height : hoursSection.getBoundingClientRect().height;
     const stripEl = costSection.querySelector('.strip');
     const otherHeight = stripEl ? stripEl.getBoundingClientRect().height : 0;
-    const target = hoursSection.getBoundingClientRect().height - otherHeight;
+    const target = barlistHeight - otherHeight;
     scrollEl.style.maxHeight = Math.max(80, target)+'px';
   });
 }

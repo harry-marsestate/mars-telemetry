@@ -147,12 +147,12 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_labour_summary",
     description:
-      "Real vineyard labor hours and cost per block/work-type/vintage (e.g. harvest, leafing, pruning), sourced from actual work records. Operator access only -- returns no rows for customer or pending accounts.",
+      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 covers July only (1 month). 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Operator access only -- returns no rows for customer or pending accounts.",
     input_schema: {
       type: "object",
       properties: {
-        vintage: { type: "integer", description: "Year, e.g. 2026." },
-        block_id: { type: "string", description: "Block id, e.g. 'B1'." },
+        vintage: { type: "integer", description: "Year, e.g. 2024." },
+        job_category: { type: "string", description: "Partial match on operation category, e.g. 'Canopy' or 'Harvest'." },
       },
       required: [],
     },
@@ -195,7 +195,7 @@ export async function runTool(
       case "get_vessels":
         return await getVessels(supabase, input);
       case "get_labour_summary":
-        return await getLabourSummary(supabase, input, dataMode);
+        return await getLabourSummary(supabase, input);
       default:
         return { content: `Unknown tool: ${name}`, isError: true };
     }
@@ -423,28 +423,49 @@ async function getVessels(supabase: any, input: Record<string, unknown>): Promis
   return { content: JSON.stringify(data), isError: false };
 }
 
+// Real-labour-ingestion project (2026-09-14): labour_summary/work_events
+// (100% simulated) are gone entirely, replaced by labour_actuals. No
+// real_only-mode gate here anymore -- unlike every other gated tool,
+// there is no simulated version of this data left to withhold. 2022/2025
+// genuinely have no labour records (never real, never mocked) and that's
+// true regardless of dataMode, so it falls out of the query naturally
+// (empty result + the coverage note below) rather than needing a block.
 // deno-lint-ignore no-explicit-any
-async function getLabourSummary(supabase: any, input: Record<string, unknown>, dataMode: string): Promise<ToolResult> {
-  const { vintage, block_id } = input as { vintage?: number; block_id?: string };
-
-  // Real-only-data-mode gate (2026-09-13). labour is 100% simulated for
-  // every vintage -- no real work-records source has been ingested yet
-  // (a separate, not-yet-scoped future effort) -- so this is an
-  // unconditional block, not a per-vintage domain_reality() lookup like
-  // every other gated tool. Skips the query entirely rather than running
-  // it only to discard the result.
-  if (dataMode === "real_only") {
-    return realOnlyBlockedResult("Vineyard labor hours and cost");
-  }
+async function getLabourSummary(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
+  const { vintage, job_category } = input as { vintage?: number; job_category?: string };
 
   let query = supabase
-    .from("labour_summary")
-    .select("vintage, block_id, block_label, acres, work_type, total_hours, total_cost, cost_per_acre")
+    .from("labour_actuals_by_category")
+    .select("vintage, job_category, labor_hours, labor_cost, expense_cost, total_cost, cost_per_hour")
     .limit(500);
   if (vintage) query = query.eq("vintage", vintage);
-  if (block_id) query = query.eq("block_id", block_id);
+  if (job_category) query = query.ilike("job_category", `%${job_category}%`);
 
   const { data, error } = await query;
   if (error) return formatErrorForModel(error);
-  return { content: JSON.stringify(data), isError: false };
+
+  // Coverage caveat, per vintage actually present in the result -- the
+  // model has no other way to know 2024's total is a full season while
+  // 2026's is one month, and get_labour_summary's own description can't
+  // carry a caveat this specific to the rows actually returned.
+  // deno-lint-ignore no-explicit-any
+  const vintagesInResult = [...new Set((data ?? []).map((r: any) => r.vintage))] as number[];
+  const coverageNotes: string[] = [];
+  for (const v of vintagesInResult) {
+    const { data: cov } = await supabase
+      .from("labour_vintage_coverage")
+      .select("first_month, last_month, month_count")
+      .eq("vintage", v)
+      .maybeSingle();
+    if (cov) {
+      const partial = cov.month_count < 12
+        ? " -- NOT a full season, do not compare this vintage's raw totals to a full-year vintage"
+        : "";
+      coverageNotes.push(`${v}: ${cov.first_month} to ${cov.last_month} (${cov.month_count} of 12 months)${partial}`);
+    }
+  }
+  const note = coverageNotes.length
+    ? `\n\nCoverage: ${coverageNotes.join("; ")}.`
+    : (vintage ? `\n\nNo labour records exist for ${vintage} -- not simulated, genuinely absent.` : "");
+  return { content: JSON.stringify(data) + note, isError: false };
 }

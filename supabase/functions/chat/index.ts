@@ -635,7 +635,7 @@ You only ever know what your tools return. If a tool returns no data for a quest
   // data without this: without this note the model has no way to know
   // that shape carries an explicit reason, not just an absence.
   const realOnlyNote = dataMode === "real_only"
-    ? `\n\nThis account is set to real-data-only mode. Any tool result containing "real_only_mode_blocked": true means the data exists but is simulated, not real, and has been withheld because of this account's setting -- read its "message" field and explain that plainly (e.g. "labour costs for 2026 are simulated data, and this account is set to show only real data, so I can't report a figure there"). Never describe that as "no data exists" or as an error -- it's neither.`
+    ? `\n\nThis account is set to real-data-only mode. Any tool result containing "real_only_mode_blocked": true means the data exists but is simulated, not real, and has been withheld because of this account's setting -- read its "message" field and explain that plainly (e.g. "cellar humidity is simulated data, and this account is set to show only real data, so I can't report a figure there"). Never describe that as "no data exists" or as an error -- it's neither. Note get_labour_summary never returns this shape (real-labour-ingestion project, 2026-09-14): labour has no simulated data left to withhold, so a vintage with no rows (2022, 2025) is a genuine, real absence -- describe it the normal "no data" way, not as real-only-mode withholding.`
     : "";
 
   return `${shared}\n\n${toneBlock}${accessNote}${realOnlyNote}`;

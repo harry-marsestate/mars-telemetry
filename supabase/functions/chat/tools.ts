@@ -147,7 +147,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_labour_summary",
     description:
-      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 covers July only (1 month). 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Operator access only -- returns no rows for customer or pending accounts.",
+      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026, ingested month by month as new invoices arrive). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 is a partial, still-growing season -- the exact month range is NOT fixed here, always read it from this tool's own returned Coverage note rather than assuming a specific month or month count. 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Operator access only -- returns no rows for customer or pending accounts.",
     input_schema: {
       type: "object",
       properties: {
@@ -446,8 +446,24 @@ async function getLabourSummary(supabase: any, input: Record<string, unknown>): 
 
   // Coverage caveat, per vintage actually present in the result -- the
   // model has no other way to know 2024's total is a full season while
-  // 2026's is one month, and get_labour_summary's own description can't
-  // carry a caveat this specific to the rows actually returned.
+  // 2026's is a couple of months, and get_labour_summary's own description
+  // can't carry a caveat this specific to the rows actually returned.
+  //
+  // first_month/last_month are each the 1ST OF that calendar month (e.g.
+  // 2026-08-01 means "the month of August", not "August 1st" as a cutoff),
+  // and BOTH ends are calendar months WITH data, inclusive. Spelling them
+  // out as bare ISO dates joined by "to" reads to a model like a narrow
+  // day-precision span ("2026-07-01 to 2026-08-01" ~ one month), which
+  // produced a real, observed wrong answer during the August 2026 labour
+  // round: Kimi read a genuine 2-month (Jul+Aug) coverage note as "a single
+  // July window" and claimed August data didn't exist yet, despite the
+  // same tool result's own rows already including it. Spelling out month
+  // names plus an explicit inclusive-months sentence removes that reading.
+  const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const monthLabel = (isoDate: string) => {
+    const [y, m] = isoDate.split("-");
+    return `${MONTH_NAMES[Number(m) - 1]} ${y}`;
+  };
   // deno-lint-ignore no-explicit-any
   const vintagesInResult = [...new Set((data ?? []).map((r: any) => r.vintage))] as number[];
   const coverageNotes: string[] = [];
@@ -458,10 +474,13 @@ async function getLabourSummary(supabase: any, input: Record<string, unknown>): 
       .eq("vintage", v)
       .maybeSingle();
     if (cov) {
+      const span = cov.first_month === cov.last_month
+        ? monthLabel(cov.first_month)
+        : `${monthLabel(cov.first_month)} through ${monthLabel(cov.last_month)} INCLUSIVE (both calendar months have real data, not just their first day)`;
       const partial = cov.month_count < 12
         ? " -- NOT a full season, do not compare this vintage's raw totals to a full-year vintage"
         : "";
-      coverageNotes.push(`${v}: ${cov.first_month} to ${cov.last_month} (${cov.month_count} of 12 months)${partial}`);
+      coverageNotes.push(`${v}: ${span} -- ${cov.month_count} distinct calendar month(s) of data out of 12${partial}`);
     }
   }
   const note = coverageNotes.length

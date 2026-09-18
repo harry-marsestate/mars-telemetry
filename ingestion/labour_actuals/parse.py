@@ -1,13 +1,19 @@
-"""Parses the three real labour source files into labour_actuals rows.
+"""Parses the real labour source files into labour_actuals rows.
 
   - Silverado_2023_Hours_Analysis.xlsx 'Raw Data'  -> vintage 2023
   - Silverado_2024_Hours_Analysis.xlsx 'Raw Data'  -> vintage 2024
   - Mars_Invoice_Backup_7_31_26.xlsx   'Labor'      -> vintage 2026 (July)
   - Mars_Invoice_Backup_7_31_26.xlsx   'Expenses'   -> vintage 2026 (July)
+  - Mars_Invoice_Backup_8_31_26.xlsx   'Labor'      -> vintage 2026 (August)
+  - Mars_Invoice_Backup_8_31_26.xlsx   'Expenses'   -> vintage 2026 (August)
 
-The Mars Invoice Backup file is JULY 2026 -- confirmed by the filename
+The July Mars Invoice Backup file is JULY 2026 -- confirmed by the filename
 (7_31_26), every Expenses row's own date (2026-07-xx), and the user
-directly. It is NOT 2025 data.
+directly. It is NOT 2025 data. The August file is AUGUST 2026 -- confirmed
+the same way (filename 8_31_26, every Expenses row's own date is 2026-08-xx,
+and the division Labor subtotals/TOTAL reconcile exactly against the two
+real PDF invoices backing it, Mars Development INV 39686 / Mars Farming INV
+39687, both dated 8/31/2026).
 
 Every parse function returns (rows, checksum). checksum compares computed
 totals against CHECKSUMS below -- values independently verified against
@@ -58,6 +64,15 @@ CHECKSUMS = {
     "mars_invoice_expenses": {
         "rows": 20, "amount": 4346.0928,
         "by_category": {"Disease Control": 3217.3568, "Fertilize": 656.9472, "Irrigation": 231.84, "Other": 239.9488},
+    },
+    "mars_invoice_labor_aug": {
+        "rows": 58, "hours": 365.19, "amount": 20281.18, "job_categories": 10,
+        "development_hours": 212.83, "development_amount": 10773.08,
+        "farming_hours": 152.36, "farming_amount": 9508.10,
+    },
+    "mars_invoice_expenses_aug": {
+        "rows": 8, "amount": 5531.1648,
+        "by_category": {"Fertilize": 3936.80, "Disease Control": 1064.9632, "Other": 179.9616, "Harvest": 349.44},
     },
 }
 _TOL = 0.01
@@ -167,14 +182,21 @@ def parse_2024(path: Path = RAW_DIR / "Silverado_2024_Hours_Analysis.xlsx") -> t
     return rows, check
 
 
-def parse_mars_invoice_labor(path: Path = RAW_DIR / "Mars_Invoice_Backup_7_31_26.xlsx") -> tuple[list[dict], dict]:
-    wb = openpyxl.load_workbook(path, data_only=True)
-    ws = wb["Labor"]
-
+def parse_mars_invoice_labor(
+    path: Path = RAW_DIR / "Mars_Invoice_Backup_7_31_26.xlsx",
+    *,
+    period_month: str = "2026-07-01",
     # Invoice numbers taken from the two real PDF invoices backing this
     # file (Mars Development INV 39517.pdf / Mars Farming INV 39518.pdf,
     # seed-data/labour_raw/ -- same two divisions, same July 2026 period).
-    INVOICE_BY_DIVISION = {"Mars Development": "39517", "Mars Farming": "39518"}
+    invoice_by_division: dict[str, str] | None = None,
+    checksum_key: str = "mars_invoice_labor",
+) -> tuple[list[dict], dict]:
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws = wb["Labor"]
+
+    invoice_by_division = invoice_by_division or {"Mars Development": "39517", "Mars Farming": "39518"}
+    source_file = f"{path.name}:Labor"
 
     rows = []
     division = None
@@ -196,8 +218,8 @@ def parse_mars_invoice_labor(path: Path = RAW_DIR / "Mars_Invoice_Backup_7_31_26
         role_code, role = _split_code(role_raw)
         rows.append({
             "vintage": 2026,
-            "period_month": "2026-07-01",
-            "invoice_number": INVOICE_BY_DIVISION[division],
+            "period_month": period_month,
+            "invoice_number": invoice_by_division[division],
             "invoice_type": division,
             "job_category": job_category,
             "task": task, "task_code": task_code,
@@ -207,15 +229,15 @@ def parse_mars_invoice_labor(path: Path = RAW_DIR / "Mars_Invoice_Backup_7_31_26
             "entry_kind": "labor",
             "expense_vendor": None, "expense_memo": None, "expense_account": None, "expense_date": None,
             "source_system": "mars_invoice_labor",
-            "source_file": "Mars_Invoice_Backup_7_31_26.xlsx:Labor",
+            "source_file": source_file,
             "source_row_id": r,
         })
 
-    c = CHECKSUMS["mars_invoice_labor"]
+    c = CHECKSUMS[checksum_key]
     dev = [r for r in rows if r["invoice_type"] == "Mars Development"]
     farm = [r for r in rows if r["invoice_type"] == "Mars Farming"]
     check = {
-        "label": "Mars Invoice Backup: Labor",
+        "label": f"Mars Invoice Backup ({path.name}): Labor",
         "checks": [
             ("rows", len(rows), c["rows"]),
             ("hours", sum(r["hours"] for r in rows), c["hours"]),
@@ -230,9 +252,14 @@ def parse_mars_invoice_labor(path: Path = RAW_DIR / "Mars_Invoice_Backup_7_31_26
     return rows, check
 
 
-def parse_mars_invoice_expenses(path: Path = RAW_DIR / "Mars_Invoice_Backup_7_31_26.xlsx") -> tuple[list[dict], dict]:
+def parse_mars_invoice_expenses(
+    path: Path = RAW_DIR / "Mars_Invoice_Backup_7_31_26.xlsx",
+    *,
+    checksum_key: str = "mars_invoice_expenses",
+) -> tuple[list[dict], dict]:
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb["Expenses"]
+    source_file = f"{path.name}:Expenses"
 
     rows = []
     division = None
@@ -269,11 +296,11 @@ def parse_mars_invoice_expenses(path: Path = RAW_DIR / "Mars_Invoice_Backup_7_31
             "expense_vendor": source_name, "expense_memo": memo,
             "expense_account": account, "expense_date": date_val.date().isoformat(),
             "source_system": "mars_invoice_expense",
-            "source_file": "Mars_Invoice_Backup_7_31_26.xlsx:Expenses",
+            "source_file": source_file,
             "source_row_id": r,
         })
 
-    c = CHECKSUMS["mars_invoice_expenses"]
+    c = CHECKSUMS[checksum_key]
     by_cat: dict[str, float] = {}
     for r in rows:
         by_cat[r["job_category"]] = by_cat.get(r["job_category"], 0.0) + r["amount_usd"]
@@ -285,7 +312,28 @@ def parse_mars_invoice_expenses(path: Path = RAW_DIR / "Mars_Invoice_Backup_7_31
     for cat, target in c["by_category"].items():
         checks.append((f"category:{cat}", by_cat.get(cat, 0.0), target))
 
-    return rows, {"label": "Mars Invoice Backup: Expenses", "checks": checks}
+    return rows, {"label": f"Mars Invoice Backup ({path.name}): Expenses", "checks": checks}
+
+
+# August 2026 -- same file format as July (same two tabs, same colon-delimited
+# activity format, same expense account set plus one new account, '6018 ·
+# Harvest', which is not in ACCOUNT_CATEGORY_MAP but needs no new mapping
+# entry: 'Harvest' already exists as a real job_category on the Labor side,
+# so ACCOUNT_CATEGORY_MAP.get('Harvest', 'Harvest') correctly folds it in via
+# the existing pass-through default rather than dropping or mis-mapping it.
+# Invoice numbers (39686 Mars Development / 39687 Mars Farming) confirmed
+# against the two real PDF invoices backing this file, both dated 8/31/2026.
+def parse_mars_invoice_labor_aug(path: Path = RAW_DIR / "Mars_Invoice_Backup_8_31_26.xlsx") -> tuple[list[dict], dict]:
+    return parse_mars_invoice_labor(
+        path,
+        period_month="2026-08-01",
+        invoice_by_division={"Mars Development": "39686", "Mars Farming": "39687"},
+        checksum_key="mars_invoice_labor_aug",
+    )
+
+
+def parse_mars_invoice_expenses_aug(path: Path = RAW_DIR / "Mars_Invoice_Backup_8_31_26.xlsx") -> tuple[list[dict], dict]:
+    return parse_mars_invoice_expenses(path, checksum_key="mars_invoice_expenses_aug")
 
 
 def evaluate(check: dict) -> bool:

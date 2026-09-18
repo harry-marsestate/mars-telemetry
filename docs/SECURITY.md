@@ -3478,3 +3478,129 @@ similar-looking meta lines - check what "the data's own date" versus
 pattern (does historical data ever change after the fact? does the
 source expose one clean freshness grain, or several irregular ones?)
 before reusing the first fix's mechanism unchanged.
+
+## Real-labour-ingestion, round 4: August 2026 ingested; the round-2 "genuinely unverified" Kimi coverage-caveat gap turned out to be a real bug, confirmed to affect Claude too
+
+Second month of Mars Invoice Backup data (`Mars_Invoice_Backup_8_31_26.xlsx`,
+Labor + Expenses) ingested into the same `labour_actuals` pipeline, no new
+tables/migrations. Verified before parsing, not assumed from the filename
+alone: same two tabs, same colon-delimited `JobCategory:TaskCode Task:RoleCode
+Role` activity format, every Expenses row's own date genuinely in August 2026,
+and the Labor tab's own division subtotals/TOTAL row cross-checked against
+the two real PDF invoices backing it (Mars Development INV 39686 / Mars
+Farming INV 39687, both dated 8/31/2026, both PDF totals matching the xlsx
+exactly). One new expense account appeared, `6018 · Harvest` - not in
+`ACCOUNT_CATEGORY_MAP`, but needed no new entry: `Harvest` is already a real
+`job_category` on the Labor side, so the map's existing pass-through default
+(`ACCOUNT_CATEGORY_MAP.get(name, name)`) folds it in correctly, not silently.
+
+`parse.py`'s `parse_mars_invoice_labor`/`parse_mars_invoice_expenses` were
+generalized (path/period_month/invoice-numbers/checksum-key as parameters,
+`source_file` derived from `path.name`) rather than duplicated, with the
+existing July call sites left as the default parameter values - re-ran all
+four original sources' self-checks after the refactor and confirmed
+byte-for-byte identical reconciliation before touching the new file, so the
+generalization itself introduced no regression. Two new thin wrappers
+(`parse_mars_invoice_labor_aug`/`parse_mars_invoice_expenses_aug`) supply
+August's period/invoice numbers/checksum key. Idempotent: backfill run twice,
+identical row counts both times (`Mars_Invoice_Backup_8_31_26.xlsx:Labor` 58
+rows, `:Expenses` 8 rows, both times).
+
+**Checksum reconciliation (independently computed from the file, before
+insert, then re-derived from the live database after - all exact):**
+- Labor: 58 rows, 365.19 hrs, $20,281.18, 10 job categories. Development
+  212.83 hrs/$10,773.08, Farming 152.36 hrs/$9,508.10 - both match the file's
+  own subtotal rows AND the two PDF invoices' "Labor for August" lines
+  exactly.
+- Expenses: 8 rows, $5,531.1648. By folded category: Fertilize $3,936.80,
+  Disease Control $1,064.9632, Other $179.9616, Harvest $349.44.
+- Combined 2026 (July+August, queried fresh from `labour_actuals` post-
+  insert): labor 123 rows/946.43 hrs/$49,612.57; expense 28 rows/$9,877.2576
+  - both equal to the two months' independently-computed sums to the cent.
+- `labour_vintage_coverage` for 2026 now reads `2026-07-01` to `2026-08-01`,
+  `month_count=2`, with **zero manual update** - confirmed live, it's a VIEW.
+- `domain_reality(array[...])` for `labour`/2026 confirmed `true` (2022/2025
+  still `false`, unchanged) - also automatic, no code touched it.
+- `labour_actuals_by_category` (a VIEW) correctly shows the new `Harvest`
+  category with `labor_cost`/`expense_cost` kept separate and
+  `cost_per_hour` computed from labor_cost only ($1,602.38 / 18.5 hrs =
+  $86.62, excluding its $349.44 expense) - confirmed live, matching the
+  same rule already enforced for Fertilize/Disease Control/Irrigation/Other.
+- Dashboard panels confirmed dynamic, not a fixed category list (browser
+  check, operator session): `labhours`/`labcost` rendered all 13 categories
+  present across July+August combined, `Harvest` included, sorted by value
+  with no code path assuming a specific set.
+
+**A real, previously-flagged-as-"unverified" gap turned out to be an actual
+bug, found only because this round did the live check round 2 could not.**
+Round 2's own entry (above) explicitly flagged "the model's phrasing... its
+coverage-caveat handling... remains genuinely unverified." This round
+performed that exact check (both Kimi K3 and, additionally, Sonnet 5 for
+comparison) and it failed: asked "What was our labour spend and hours for
+August 2026, and how does that compare to what we have on record for the
+rest of 2026?" against the *pre-fix*, still-currently-deployed `chat`
+function -
+
+- **Kimi K3** opened with "we have no distinct August 2026 records to
+  report... covers only July 1 - August 1, 2026, so everything below is
+  effectively a single July window - August activity hasn't been invoiced
+  into the system yet" - false; the row-level data in its own answer's
+  table already included August (combined-category totals matching the
+  dashboard exactly). It also stated a headline "$57,948 in labor cost"
+  inconsistent with its own per-category table, which summed to $49,611
+  (matching the true DB total) - a separate arithmetic error, not a
+  coverage-note misreading, and NOT something this round's fix addresses.
+- **Sonnet 5**, asked the identical question against the identical
+  unfixed function, made the *same* coverage-note misreading ("No August
+  2026 labour data exists... only July (2026-07-01 to 2026-08-01)... a
+  data-currency gap, not a zero-spend month") - its arithmetic was correct
+  ($49,612, matching the DB exactly), but the false "no August data"
+  framing was identical to Kimi's. This confirms the root cause is in
+  `get_labour_summary`'s own tool-result text, not a Kimi-specific
+  weakness - it reproduced across both providers from the same input.
+
+**Root cause, found by reading `tools.ts`'s coverage-note construction
+after seeing both models make the identical mistake:** the note formatted
+`labour_vintage_coverage.first_month`/`last_month` as bare ISO dates joined
+by "to" - `"2026: 2026-07-01 to 2026-08-01 (2 of 12 months)..."`. Both
+columns are the 1ST OF a calendar month with real data (August's row means
+"the month of August has data", not "data stops at August 1st"), but bare
+day-precision dates joined by "to" read to a model as a narrow ~31-day span
+- both models collapsed that into "basically just July" and reasoned from
+there, even though `month_count=2` was present in the same note and
+contradicts that reading. **Fixed** in `getLabourSummary` (`tools.ts`): the
+note now spells out month names and says so explicitly - e.g. "July 2026
+through August 2026 INCLUSIVE (both calendar months have real data, not
+just their first day) - 2 distinct calendar month(s) of data out of 12".
+Also tightened `get_labour_summary`'s own static tool description, which
+separately still said "2026 covers July only (1 month)" - now says 2026 is
+"a partial, still-growing season... always read [the range] from this
+tool's own returned Coverage note" so future months don't require touching
+this string again (mirrors round 2's undeployed-code lesson: the
+description string and the runtime coverage note are two independent
+things that can drift out of sync).
+
+**Not verified this round, stated plainly rather than assumed fixed:**
+deploying the `chat` function (`supabase functions deploy chat --use-api`)
+to ship this fix was blocked by this environment's own "Production Deploy"
+permission classifier, the same class of hard stop round 2 hit for minting
+a test session (not attempted a workaround, per that same precedent). The
+code fix is committed and reviewed; a live re-ask against the *fixed,
+deployed* function - confirming the new coverage-note wording actually
+produces a correct "July and August" answer, on both providers - is a
+genuine open item for whoever runs that deploy next, not something this
+round can claim as done. The Kimi-side arithmetic error ($57,948 vs the
+correct $49,611) is flagged but explicitly NOT something this round
+attempted to fix - it's model-side arithmetic over a correctly-formed
+tool result, not a bug in this codebase, consistent with this project's
+existing, already-documented Kimi cost/quality tradeoffs.
+
+RULE, generalizing: a date range meant for a model to reason over should
+never be two bare ISO dates joined by "to" when the underlying granularity
+is coarser than a day (here, whole months) - spell out the unit explicitly
+(month names, "inclusive", a plain count) rather than relying on the model
+to infer that a date column represents a bucket rather than a boundary.
+This is cheap to get right and, per this round, wrong in a way that
+reproduces identically across different model providers rather than being
+one model's idiosyncrasy - so it is worth fixing at the data-formatting
+layer rather than trying to prompt around it per-provider.

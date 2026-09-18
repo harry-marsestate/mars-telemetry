@@ -1,6 +1,6 @@
 """Real labour backfill: Silverado 2023/2024 hours + Mars Invoice Backup
-(July 2026) labor and expenses -> labour_actuals. Idempotent (safe to
-re-run; upserts on (source_file, source_row_id)).
+(July and August 2026) labor and expenses -> labour_actuals. Idempotent
+(safe to re-run; upserts on (source_file, source_row_id)).
 
 Refuses to insert any one of the four sources whose self-check doesn't
 reconcile against that file's own verified totals -- see parse.py's
@@ -19,6 +19,8 @@ SOURCES = [
     ("2024", parse.parse_2024),
     ("mars_invoice_labor", parse.parse_mars_invoice_labor),
     ("mars_invoice_expenses", parse.parse_mars_invoice_expenses),
+    ("mars_invoice_labor_aug", parse.parse_mars_invoice_labor_aug),
+    ("mars_invoice_expenses_aug", parse.parse_mars_invoice_expenses_aug),
 ]
 
 

@@ -3718,8 +3718,98 @@ assumed from "I only wrote a CREATE VIEW statement."
   it ("Pass period_month to scope the answer to ONE specific calendar
   month... without it, results are summed across every month on file").
 
-**Deploy status:** as with every deploy this session, `supabase functions
-deploy chat --use-api` is gated by this environment's own permission
-classifier and was run by the user directly, then confirmed the same way
-as every prior deploy - downloaded the live function immediately after
-and diffed against the committed working tree.
+**Deploy status: confirmed live.** As with every deploy this session,
+`supabase functions deploy chat --use-api` is gated by this environment's
+own permission classifier - the user ran it directly. `supabase functions
+download chat` immediately after, diffed against the committed working
+tree: `git status` showed zero changes, i.e. byte-identical to
+`tools.ts`/`index.ts`/`kimi.ts`/`deno.json` at this commit.
+
+**Before the live re-ask, the "no records for this month" branch was
+exercised directly against the live database** (its `data.length > 0`
+happy path was already covered by the August checksum check above, but
+its empty-result sub-branches hadn't been) - both queries the code
+depends on for that branch, run separately:
+1. `labour_actuals_by_month` for `vintage=2026, period_month='2026-01-01'`
+   (a genuinely empty month within a vintage that has other data) returns
+   0 rows, with or without the `vintage` filter applied - confirms the
+   query side of the empty-result branch.
+2. `labour_vintage_coverage` for `vintage=2026` resolves to
+   `(2026-07-01, 2026-08-01, 2)` - the fallback query the code runs to
+   build the "this vintage's actual coverage is..." message - confirming
+   that sub-branch has real data to render, not just a code path that
+   would only ever hit its `cov`-is-null fallback.
+3. `vintage=2025, period_month='2025-06-01'` (a vintage with NO labour
+   records at all) also returns 0 rows, and `labour_vintage_coverage` for
+   2025 correctly returns no row at all (`None`) - confirming the OTHER
+   empty-result sub-branch ("no labour records exist for vintage 2025 at
+   all") has real data to trigger on too, not just the happy path.
+
+This confirms every SQL query the "no records" branch depends on behaves
+correctly for both cases it's designed to handle. It does not execute the
+actual Deno code (that needed the deployed function, exercised next via
+the live re-ask, which only exercised the happy path) - a live ask for a
+genuinely-empty month like January 2026 remains a gap this round didn't
+close, flagged rather than assumed fine by extension.
+
+**Live re-ask, through Kimi K3 (per standing instruction), against the
+deployed fix - "What was our labour spend for August 2026 specifically,
+not combined with July?"** Response (verbatim):
+
+> "August 2026 labor spend was $22,281 (365.2 hours), plus $5,531 in
+> folded-in expenses, for a total invoice cost of ~$27,812.
+>
+> Breakdown by category (labor cost / hours / $-per-hr): Canopy Management
+> 4,163 / 83.3 / 50.00; Land Preparation 3,340 / 67.0 / 49.85; Erosion
+> Control 2,416 / 27.3 / 88.39; Disease Control 2,243 / 31.7 / 70.81
+> (+$1,065 expenses); Sucker & Train 2,302 / 41.0 / 56.15; Animals 1,956 /
+> 47.0 / 41.62; Harvest 1,523 / 16.5 / 92.30 (+$349 expenses); Irrigation
+> 1,154 / 23.7 / 48.74; Crop Thinning 946 / 23.3 / 40.70; Weed Control 237
+> / 4.5 / 52.75; Fertilize 0 / 0 / - (expense only: $3,937); Other 0 / 0 /
+> - (expense only: $180).
+>
+> Notables: Harvest started billing in August... Fertilize hit as a pure
+> expense charge of $3,937 with no labor hours..."
+
+**What this confirms worked, checked line by line against the true
+database figures (the same `mars_invoice_labor_aug`/`mars_invoice_expenses_aug`
+checksums from the ingestion round):** every single per-category figure in
+Kimi's table is correct to the dollar/tenth-hour - Canopy Management
+$4,162.70/83.25hrs, Land Preparation $3,340.26/67.00hrs, Erosion Control
+$2,416.45/27.34hrs, Disease Control $2,242.66/31.67hrs (+$1,064.96
+expense), Sucker & Train $2,302.27/41.00hrs, Animals $1,956.25/47.00hrs,
+Harvest $1,522.88/16.50hrs (+$349.44 expense), Irrigation
+$1,154.14/23.68hrs, Crop Thinning $946.19/23.25hrs, Weed Control
+$237.38/4.50hrs, Fertilize $0/$3,936.80 expense, Other $0/$179.96 expense
+- all match exactly. The answer correctly scoped itself to August alone
+(no confusion with July), and critically **did not** fall back to the
+pre-fix "the summary tool doesn't expose month-level filtering" caveat -
+it proactively offered a July-vs-August comparison instead, demonstrating
+it understood both months as separately queryable, known data. This is
+the capability the round was built for, and it works.
+
+**What did NOT verify, reported honestly rather than glossed over: the
+headline total is wrong, the same failure shape as round 4's original
+(pre-fix) bug.** Kimi's stated "$22,281" labor cost does not match either
+the true database figure ($20,281.18, the `mars_invoice_labor_aug`
+checksum) or its own per-category table's sum (~$20,280, adding the
+twelve rows above by hand). "$27,812" total and "$22,281" are internally
+consistent with EACH OTHER (22,281 + 5,531 = 27,812) but both are wrong
+relative to the true $20,281.18 + $5,531.16 = $25,812.34. This is a
+headline-arithmetic slip over a correctly-formed, correctly-scoped tool
+result - not a coverage-note misreading (nothing here resembles round 4's
+bare-ISO-date bug) and not a defect in this round's new query/view/code,
+all of which are proven correct by the per-category table being exact.
+Consistent with the standing, already-documented Kimi cost/quality
+characteristic flagged in round 4 and explicitly out of scope to chase
+here - noted again rather than re-litigated.
+
+RULE, reinforcing round 4's: a tool returning a correct, precise
+per-category breakdown does not guarantee the model's own headline
+summation over that breakdown is correct - this is now the second
+observed instance in this project of Kimi's stated aggregate total
+disagreeing with its own correctly-rendered detail table. Anyone
+reviewing a Kimi labour answer should treat a stated grand total as
+needing independent verification against either the detail table it
+came with or a direct query, even when every line of that detail table
+is individually right.

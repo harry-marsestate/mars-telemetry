@@ -3580,20 +3580,46 @@ this string again (mirrors round 2's undeployed-code lesson: the
 description string and the runtime coverage note are two independent
 things that can drift out of sync).
 
-**Not verified this round, stated plainly rather than assumed fixed:**
-deploying the `chat` function (`supabase functions deploy chat --use-api`)
-to ship this fix was blocked by this environment's own "Production Deploy"
-permission classifier, the same class of hard stop round 2 hit for minting
-a test session (not attempted a workaround, per that same precedent). The
-code fix is committed and reviewed; a live re-ask against the *fixed,
-deployed* function - confirming the new coverage-note wording actually
-produces a correct "July and August" answer, on both providers - is a
-genuine open item for whoever runs that deploy next, not something this
-round can claim as done. The Kimi-side arithmetic error ($57,948 vs the
-correct $49,611) is flagged but explicitly NOT something this round
-attempted to fix - it's model-side arithmetic over a correctly-formed
-tool result, not a bug in this codebase, consistent with this project's
-existing, already-documented Kimi cost/quality tradeoffs.
+**Deploy and re-ask: completed and confirmed live, in a follow-up pass.**
+Deploying the `chat` function was initially blocked by this environment's
+"Production Deploy" permission classifier (not attempted a workaround, per
+round 2's identical precedent) and the fix sat committed-but-undeployed for
+one exchange with the user. The user ran the deploy themselves
+(`supabase functions deploy chat --use-api`, outside this session's
+permission gate) and asked for it to be confirmed, not just trusted from
+the deploy command's own exit code - `supabase functions download chat`
+immediately after, diffed against the committed working tree: `git status`
+showed zero changes, i.e. the live function is byte-identical to
+`tools.ts`/`index.ts`/`kimi.ts`/`deno.json` at this commit.
+
+**Live re-ask, same question as before, against the now-fixed deployed
+function, through Kimi K3 (per standing instruction):** "What was our
+labour spend and hours for August 2026, and how does that compare to what
+we have on record for the rest of 2026?" Response (verbatim, relevant
+part): *"2026 coverage so far is just July and August combined... Coverage
+note from the invoice data: 2026 records run July through August 2026
+inclusive - 2 calendar months, and that's it... Totals: ~947 hours, ~$49,613
+labor + ~$9,877 expenses = ~$59,490 across those two months."* This is
+correct on both counts the fix targeted: August is now described as real,
+present data (not "hasn't been invoiced yet"), and the headline totals
+this time match the per-category table's own sum exactly (~$49,613 labor,
+matching the database's $49,612.57 to the dollar) - no repeat of the
+previous internally-inconsistent $57,948 headline. Kimi additionally,
+correctly, self-disclosed a real tool limitation rather than fabricating
+a number: *"If you want an August-specific figure, that would need
+invoice-level date filtering, which the summary tool doesn't expose"* -
+accurate, since `get_labour_summary` aggregates by category+vintage, not
+by month, and was never asked to change that in this round.
+
+The previously-flagged Kimi arithmetic error did NOT recur on this re-ask
+(headline and detail table agreed this time), but this round only ran the
+check once - per this project's own established discipline (e.g. the
+Phase 2 `attemptKimi` fallback battery elsewhere in this file), one clean
+run is evidence the fix addressed the coverage-note misreading, not proof
+the underlying arithmetic-over-a-table failure mode can never recur on a
+future ask; that remains a standing, documented Kimi cost/quality
+characteristic of this integration, not something this round's fix
+targeted or can claim to have eliminated.
 
 RULE, generalizing: a date range meant for a model to reason over should
 never be two bare ISO dates joined by "to" when the underlying granularity

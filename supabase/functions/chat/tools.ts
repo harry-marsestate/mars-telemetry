@@ -147,12 +147,13 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_labour_summary",
     description:
-      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026, ingested month by month as new invoices arrive). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 is a partial, still-growing season -- the exact month range is NOT fixed here, always read it from this tool's own returned Coverage note rather than assuming a specific month or month count. 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Operator access only -- returns no rows for customer or pending accounts.",
+      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026, ingested month by month as new invoices arrive). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 is a partial, still-growing season -- the exact month range is NOT fixed here, always read it from this tool's own returned Coverage note rather than assuming a specific month or month count. 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Pass period_month to scope the answer to ONE specific calendar month (e.g. 'what did we spend in August specifically') instead of the whole vintage -- without it, results are summed across every month on file for that vintage, which is almost certainly NOT what a month-specific question wants. Operator access only -- returns no rows for customer or pending accounts.",
     input_schema: {
       type: "object",
       properties: {
         vintage: { type: "integer", description: "Year, e.g. 2024." },
         job_category: { type: "string", description: "Partial match on operation category, e.g. 'Canopy' or 'Harvest'." },
+        period_month: { type: "string", description: "Optional. Scopes the result to one calendar month instead of the whole vintage, format 'YYYY-MM' (e.g. '2026-08' for August 2026). When given, returned totals cover ONLY that month -- read this tool's Coverage note either way, since a month with no records returns empty plus that vintage's real range, not an error." },
       },
       required: [],
     },
@@ -423,6 +424,24 @@ async function getVessels(supabase: any, input: Record<string, unknown>): Promis
   return { content: JSON.stringify(data), isError: false };
 }
 
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+// first_month/last_month/period_month are each the 1ST OF that calendar
+// month (e.g. 2026-08-01 means "the month of August", not "August 1st" as
+// a cutoff). Spelling a date out as a bare ISO string joined by "to"/"for"
+// reads to a model like a narrow day-precision span, which produced a
+// real, observed wrong answer during the August 2026 labour round: Kimi
+// (and, checked side by side, Sonnet 5 too -- not a Kimi-specific
+// weakness) read a genuine 2-month (Jul+Aug) coverage note as "a single
+// July window" and claimed August data didn't exist yet, despite the same
+// tool result's own rows already including it. Every place that reports a
+// month back to the model -- the vintage-range note below AND the new
+// single-month note in the period_month branch -- goes through this same
+// helper so neither path can reintroduce that bug independently.
+function monthLabel(isoDate: string): string {
+  const [y, m] = isoDate.split("-");
+  return `${MONTH_NAMES[Number(m) - 1]} ${y}`;
+}
+
 // Real-labour-ingestion project (2026-09-14): labour_summary/work_events
 // (100% simulated) are gone entirely, replaced by labour_actuals. No
 // real_only-mode gate here anymore -- unlike every other gated tool,
@@ -430,10 +449,75 @@ async function getVessels(supabase: any, input: Record<string, unknown>): Promis
 // genuinely have no labour records (never real, never mocked) and that's
 // true regardless of dataMode, so it falls out of the query naturally
 // (empty result + the coverage note below) rather than needing a block.
+//
+// Monthly-granularity project (2026-09-18): period_month was already a
+// correct, row-level column on labour_actuals for every source ingested
+// so far -- see docs/SECURITY.md's investigation entry -- so this adds a
+// query path onto the new labour_actuals_by_month view (additive sibling
+// to labour_actuals_by_category, same migration round) rather than
+// changing any schema. Omitting period_month must behave EXACTLY as
+// before this change -- that's the regression risk, guarded by keeping
+// the original vintage/category query and coverage-note logic completely
+// untouched in its own branch below, not restructured or merged with the
+// new one.
 // deno-lint-ignore no-explicit-any
 async function getLabourSummary(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
-  const { vintage, job_category } = input as { vintage?: number; job_category?: string };
+  const { vintage, job_category, period_month: periodMonthInput } = input as {
+    vintage?: number; job_category?: string; period_month?: string;
+  };
 
+  // Accepts 'YYYY-MM' (e.g. '2026-08', the documented format) and also
+  // tolerates a full 'YYYY-MM-DD' (a model sometimes passes a complete
+  // date despite the schema asking for year-month only) -- the day part,
+  // if present, is ignored, since every row's own period_month is already
+  // normalized to the 1st. Anything else is treated the same as omitted
+  // (falls through to the unfiltered vintage/category path) rather than
+  // raising a validation error -- consistent with this tool's existing
+  // style of never special-casing bad input.
+  const periodMonthMatch = typeof periodMonthInput === "string" ? periodMonthInput.match(/^(\d{4})-(\d{2})(?:-\d{2})?$/) : null;
+  const periodMonth = periodMonthMatch ? `${periodMonthMatch[1]}-${periodMonthMatch[2]}-01` : null;
+
+  if (periodMonth) {
+    let query = supabase
+      .from("labour_actuals_by_month")
+      .select("vintage, period_month, job_category, labor_hours, labor_cost, expense_cost, total_cost, cost_per_hour")
+      .eq("period_month", periodMonth)
+      .limit(500);
+    if (vintage) query = query.eq("vintage", vintage);
+    if (job_category) query = query.ilike("job_category", `%${job_category}%`);
+
+    const { data, error } = await query;
+    if (error) return formatErrorForModel(error);
+
+    const label = monthLabel(periodMonth);
+    let note: string;
+    if ((data ?? []).length > 0) {
+      // Scoped to THIS month, not the full vintage -- says so explicitly
+      // so the model doesn't need to infer scope from the row shape alone.
+      note = `\n\nCoverage: this result is scoped to ${label} only, not the full vintage -- ${data.length} job categor${data.length === 1 ? "y" : "ies"} with labour records that month.`;
+    } else {
+      // No rows for this specific month -- say so plainly (matching the
+      // existing "not simulated, genuinely absent" framing below) and give
+      // the vintage's real coverage range as context rather than a bare
+      // zero, reusing the same month-name/inclusive phrasing.
+      const impliedVintage = vintage ?? Number(periodMonth.slice(0, 4));
+      const { data: cov } = await supabase
+        .from("labour_vintage_coverage")
+        .select("first_month, last_month, month_count")
+        .eq("vintage", impliedVintage)
+        .maybeSingle();
+      const rangeNote = cov
+        ? ` This vintage's actual coverage is ${cov.first_month === cov.last_month ? monthLabel(cov.first_month) : `${monthLabel(cov.first_month)} through ${monthLabel(cov.last_month)} INCLUSIVE`} (${cov.month_count} of 12 months).`
+        : ` No labour records exist for vintage ${impliedVintage} at all -- not simulated, genuinely absent.`;
+      note = `\n\nNo labour records exist for ${label} specifically.${rangeNote}`;
+    }
+    return { content: JSON.stringify(data) + note, isError: false };
+  }
+
+  // Unchanged from before period_month existed -- same query, same
+  // coverage-note construction, byte-for-byte, so a caller that never
+  // passes period_month sees identical behavior to the round-4 verified
+  // response.
   let query = supabase
     .from("labour_actuals_by_category")
     .select("vintage, job_category, labor_hours, labor_cost, expense_cost, total_cost, cost_per_hour")
@@ -448,22 +532,6 @@ async function getLabourSummary(supabase: any, input: Record<string, unknown>): 
   // model has no other way to know 2024's total is a full season while
   // 2026's is a couple of months, and get_labour_summary's own description
   // can't carry a caveat this specific to the rows actually returned.
-  //
-  // first_month/last_month are each the 1ST OF that calendar month (e.g.
-  // 2026-08-01 means "the month of August", not "August 1st" as a cutoff),
-  // and BOTH ends are calendar months WITH data, inclusive. Spelling them
-  // out as bare ISO dates joined by "to" reads to a model like a narrow
-  // day-precision span ("2026-07-01 to 2026-08-01" ~ one month), which
-  // produced a real, observed wrong answer during the August 2026 labour
-  // round: Kimi read a genuine 2-month (Jul+Aug) coverage note as "a single
-  // July window" and claimed August data didn't exist yet, despite the
-  // same tool result's own rows already including it. Spelling out month
-  // names plus an explicit inclusive-months sentence removes that reading.
-  const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-  const monthLabel = (isoDate: string) => {
-    const [y, m] = isoDate.split("-");
-    return `${MONTH_NAMES[Number(m) - 1]} ${y}`;
-  };
   // deno-lint-ignore no-explicit-any
   const vintagesInResult = [...new Set((data ?? []).map((r: any) => r.vintage))] as number[];
   const coverageNotes: string[] = [];

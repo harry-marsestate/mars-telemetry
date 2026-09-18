@@ -3630,3 +3630,96 @@ This is cheap to get right and, per this round, wrong in a way that
 reproduces identically across different model providers rather than being
 one model's idiosyncrasy - so it is worth fixing at the data-formatting
 layer rather than trying to prompt around it per-provider.
+
+## Monthly-granularity project: get_labour_summary can now answer a single calendar month, chat-only scope
+
+Separate change from round 4 above, same branch. The user asked for the
+chat tool (not the dashboard, not `labour_actuals` itself, not
+`domain_reality()`) to answer month-specific labour questions (e.g. "what
+did we spend in August specifically") instead of only category+vintage
+rollups.
+
+**Investigation finding, confirmed before writing any code (full writeup
+given directly to the user; summarized here for the record): no schema
+gap existed.** `labour_actuals.period_month` (`date not null`, "1st of the
+month") was already a correct, row-level column for every source ingested
+so far - Silverado 2023/2024 genuinely per-row (each row's own `Month`
+cell in the source file, confirmed to vary: 8 distinct months for 2023,
+12 for 2024), and the Mars Invoice Backup Expenses tab genuinely per-row
+too (each row's own real `Date` cell - finer than month, in fact, since
+`expense_date` already keeps the full day). Only the Mars Invoice Backup
+**Labor** tab (100% of 2026's labor rows) has no per-row date in its
+source at all - `period_month` is a file-level parameter stamped
+uniformly on every row from one invoice, which is exactly correct at
+month grain because one invoice file = exactly one calendar month
+(confirmed against the real PDF invoices), just never finer than that.
+`backfill.py`/`db.py` write `period_month` straight through per row, no
+aggregation. The only place month grain was ever lost was the
+`labour_actuals_by_category` view's `group by vintage, job_category` -
+an aggregation-layer gap, not a data-collection one. This meant the fix
+could be additive: a new view plus a tool-surface extension, no migration
+to `labour_actuals` itself.
+
+**Schema change (`20260918120000_labour_actuals_by_month.sql`, applied
+via `supabase db push` - not gated in this environment the way function
+deploys are): one new view, `labour_actuals_by_month`.** Identical column
+shape to `labour_actuals_by_category` (`labor_hours`, `labor_cost`,
+`expense_cost`, `total_cost`, `cost_per_hour` - same labor-cost-only $/hr
+rule, same reasoning), with `period_month` added as a third `group by`
+column alongside `vintage`/`job_category`. `labour_actuals`,
+`labour_actuals_by_category`, `labour_vintage_coverage`, and
+`domain_reality()` are all untouched - confirmed directly (below), not
+assumed from "I only wrote a CREATE VIEW statement."
+
+**Verified against the live database, before touching `tools.ts`:**
+1. `labour_actuals_by_month` for `vintage=2026, period_month='2026-08-01'`
+   sums to exactly 365.19 hrs / $20,281.18 labor / $5,531.1648 expense -
+   matching the `mars_invoice_labor_aug`/`mars_invoice_expenses_aug`
+   checksums from the ingestion round exactly, not approximately.
+   July's month-scoped sum (581.24 hrs / $29,331.39 / $4,346.0928)
+   matches the July checksums the same way.
+2. `count(distinct period_month)` per vintage via the new view: 2023->8,
+   2024->12, 2026->2 - matches `labour_vintage_coverage.month_count`
+   exactly for all three.
+3. **Regression check on the two pre-existing views, queried again after
+   the new view was created:** `labour_actuals_by_category` summed over
+   `vintage=2026` still returns 946.43 hrs / $49,612.57 labor /
+   $9,877.2576 expense / $59,489.83 total, and `labour_vintage_coverage`
+   still returns the identical three rows (2023 May-Dec/8mo, 2024
+   Jan-Dec/12mo, 2026 Jul-Aug/2mo) - byte-identical to the round-4
+   verified figures. `pg_views` confirms exactly three `labour%` views
+   exist, the two originals plus the one new one.
+
+**`tools.ts` changes, scoped to `getLabourSummary()` and the
+`get_labour_summary` tool definition only - no other file touched:**
+- `input_schema` gains an optional `period_month` property (string,
+  documented format `'YYYY-MM'`, e.g. `'2026-08'`; the parser also
+  tolerates a trailing `-DD` since a model sometimes passes a full date
+  despite the documented format, and just ignores the day).
+- When `period_month` is present (and parses), the function takes an
+  **entirely separate branch**: queries `labour_actuals_by_month` filtered
+  to that exact month (plus `vintage`/`job_category` if also given), and
+  builds a coverage note scoped to that one month - reusing the same
+  `monthLabel()` helper round 4 introduced (now hoisted to module scope
+  so both branches share one implementation, eliminating any chance of
+  the bare-ISO-date bug being reintroduced independently in the new
+  path). A month with zero rows returns an explicit "no records for
+  <month> specifically" message plus that vintage's real coverage range
+  as context, rather than a bare empty array.
+- **When `period_month` is absent, the code path is the exact original
+  query and coverage-note construction, unchanged** - the only diff in
+  that branch is `MONTH_NAMES`/`monthLabel` moving to module scope (a
+  pure hoist, same implementation, now shared instead of duplicated).
+  This was the explicit regression risk called out before starting: the
+  new branch is additive and gated behind a value that's simply never
+  present in any existing caller until `tools.ts`'s tool-selection logic
+  or a user's own phrasing supplies one.
+- Tool description updated to document the new parameter and when to use
+  it ("Pass period_month to scope the answer to ONE specific calendar
+  month... without it, results are summed across every month on file").
+
+**Deploy status:** as with every deploy this session, `supabase functions
+deploy chat --use-api` is gated by this environment's own permission
+classifier and was run by the user directly, then confirmed the same way
+as every prior deploy - downloaded the live function immediately after
+and diffed against the committed working tree.

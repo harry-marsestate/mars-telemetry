@@ -150,7 +150,13 @@ export async function fetchTierBPairs(sb: SupabaseClient): Promise<TierBPoint[]>
       .eq("metric_key", "irrigation_volume")
       .eq("source_system", "farm_irrigation_log")
       .not("block_id", "is", null),
-    sb.from("harvest_receipts")
+    // harvest_receipts_current, not harvest_receipts directly -- excludes
+    // known-foreign rows (e.g. the 2026 Syrah cross-tenant artifact,
+    // docs/SECURITY.md). This query's own .not("block_id","is",null)
+    // happens to already drop that specific row (its block_id is null),
+    // but that's incidental, not a real safeguard -- a future excluded
+    // row with a real-looking block_id wouldn't be caught by it.
+    sb.from("harvest_receipts_current")
       .select("block_id, vintage, weight_tons")
       .eq("source_system", "innovint")
       .not("block_id", "is", null),

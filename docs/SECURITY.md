@@ -5067,3 +5067,143 @@ cases:**
   grant there either).
 `current_user` confirmed `postgres` again after each rollback -- no
 leaked role.
+
+## Within-lot "duplicate" rows: checked, not assumed -- they're real distinct samples, no fix built
+
+Follow-up to the prior entry's "15 within-lot exact-duplicate rows"
+finding (7 lot_codes, all dated 2024-05-01; a second cluster on
+`MA24CSV3` in October 2024). That entry proposed a
+`lot_analyses_deduped` view collapsing exact `(lot_code, analysis_type,
+value, recorded_at)` matches. Explicitly asked to rule out the
+alternative before building: could collapsing ever destroy real
+information -- two genuinely distinct measurements coincidentally
+agreeing to the decimal on the same timestamp? Checked directly rather
+than assumed correct, and **the answer is yes, and it's the entire
+pattern here, not an edge case.**
+
+**2024-05-01 cluster.** Every one of the 7 lot_codes got not just the
+duplicate `(type, value, timestamp)` rows already found, but a FULL
+second row for every analyte that date -- `ph`/`titratable-acidity`
+happened to read identical between the two, but `free-so2`, `total-so2`,
+and `volatile-acidity` did NOT: `MA22CS` free-SO2 was `39` and `36` on
+the same timestamp; `MA23ZIN` total-SO2 was `74` and `68`; every lot
+shows the same shape. This is two real, distinct lab submissions on
+one date -- SO2/VA genuinely differ between two draws or an SO2
+addition partway through the day, while pH/TA (more stable within a
+day) simply happened to coincide. Collapsing on value-match alone
+would have kept both readings for SO2/VA (correctly, since they
+differ) while silently dropping one of the two real pH/TA readings for
+the exact same lot on the exact same day -- an internally inconsistent
+result implying one measurement event for some analytes and two for
+others, when there were genuinely two throughout.
+
+**October 2024 `MA24CSV3` cluster** is even more clearly not a
+duplicate-entry artifact: `brix` shows THREE DISTINCT values every
+single day in the window (e.g. `{27.5, 28.6, 26.9}` on Oct 1, varying
+by over a full degree) -- brix genuinely differs barrel to barrel
+during active fermentation. `temperature` sometimes coincides between
+two of the three (a coarser, whole-degree-Fahrenheit reading, far more
+likely to land on the same value by chance in a shared cellar) but
+never all three. This is three real, separate vessels tracked
+individually under one `lot_code`, not a sync bug.
+
+**No fix built.** The premise behind the proposed
+`lot_analyses_deduped` view is falsified by direct examination -- there
+is no duplicate-ROW problem to solve here, only genuinely distinct
+same-timestamp samples that happen to partially coincide in value. Any
+value-based collapse would silently and selectively destroy real
+measurements. `get_lot_analyses` and `lot_canonical_map` (which maps
+lot-to-lot identity, a different problem entirely) are unaffected and
+correct as-is for this question.
+
+## harvest_receipts: the 2026 Syrah row was making a foreign record report as real estate data
+
+Confirmed live before building anything, per instruction: the single
+2026 `harvest_receipts` row (`grwrec_23EDRM094PK23IDDN21MQ89P`,
+`varietal_name='Syrah'`, 1.918 tons, `block_id` NULL) is the ONLY 2026
+row in the table (`COUNT(*) FROM harvest_receipts WHERE vintage=2026`
+= 1), and `domain_reality(ARRAY[2026])`'s `harvest_receipts` clause
+returned `is_real = true` for 2026 on the strength of that row alone
+-- real receipts actually stop at 2024 (B2/B3 Cabernet Sauvignon). The
+owner has confirmed Mars Estate has never grown or vinified Syrah and
+directed the cross-tenant-artifact investigation dropped (no further
+digging into InnoVint's side); this round's job was excluding it, not
+explaining it.
+
+**Deleting it is not a fix** -- `ingest-innovint` upserts on
+`(source_system, source_id)` daily, so a deleted row returns on the
+next sync. Same shape of problem `block_innovint_map`/
+`lot_canonical_map` already solve: an explicit, auditable exclusion
+table, not a hardcoded predicate, and the raw synced row stays intact
+-- this is a read-side exclusion, not a data deletion, even for data
+that turns out not to be ours.
+
+```sql
+create table harvest_receipts_excluded (
+  innovint_receipt_id text primary key references harvest_receipts(innovint_receipt_id),
+  reason               text not null,
+  confidence           text not null check (confidence in ('confirmed', 'provisional')),
+  excluded_at          timestamptz not null default now()
+);
+```
+
+`harvest_receipts_current` (same naming convention as
+`lab_samples_current`/`lab_results_current`/
+`berry_volume_histogram_current` -- exclude, don't destroy) is the new
+read surface: `select h.* from harvest_receipts h where not exists
+(select 1 from harvest_receipts_excluded e where e.innovint_receipt_id
+= h.innovint_receipt_id)`. RLS mirrors `harvest_receipts` itself
+exactly (open `SELECT` to `authenticated`, `using (true)` -- confirmed
+live that's what `harvest_receipts` already grants, same reference-data
+character, nothing newly sensitive).
+
+**Every consumer updated to read the `_current` surface:**
+- `domain_reality()`'s Tier-3 harvest clause -- full function body
+  copied forward (confirmed via `pg_get_functiondef` before writing
+  the migration, same pattern as every prior `domain_reality()`
+  change), one clause changed to query `harvest_receipts_current`.
+- `web/index.html`'s `renderFruitReal()` (the only place `weight_tons`
+  is read/summed anywhere in the file -- confirmed by grep, not
+  assumed) -- the one real query against harvest tonnage.
+- `insights-scan/metrics.ts`'s `fetchTierBPairs()` (irrigation-vs-yield
+  correlation) -- this one's own `.not("block_id", "is", null)`
+  already incidentally dropped the Syrah row (its `block_id` is null),
+  but that was never a real safeguard against a future excluded row
+  with a populated `block_id`, so switched it too rather than relying
+  on the coincidence.
+- No chat tool reads `harvest_receipts` today (confirmed by grep across
+  `supabase/functions/chat/*.ts` -- zero hits) -- nothing to change
+  there.
+
+**Verified live, before and after:**
+- `harvest_receipts_current`: 6 rows (raw table has 7) -- all 2022/
+  2023/2024 real rows intact and unchanged, Syrah alone excluded.
+- `domain_reality(ARRAY[2022..2026])`'s `harvest_receipts` clause,
+  before: `2022=t, 2023=t, 2024=t, 2025=f, 2026=t`. After:
+  `2022=t, 2023=t, 2024=t, 2025=f, 2026=f` -- exactly the expected
+  change, 2022/2023/2024/2025 provably unchanged, only 2026 flips.
+- RLS on both new objects, `SET LOCAL`-in-a-transaction: `authenticated`
+  reads 1/1 `harvest_receipts_excluded` rows and 6/6
+  `harvest_receipts_current` rows; `current_user` confirmed `postgres`
+  after each rollback.
+
+**What actually changes user-visibly, checked rather than assumed
+harmless:** `REAL_FRUIT_VINTAGES` (`web/index.html`, hardcoded
+`{2022,2023,2024}`) already independently gates which vintages render
+real vs. mock fruit-intake data -- it does NOT read `domain_reality()`
+-- so for a normal (`all`-mode) account, 2026 was ALREADY rendering the
+mock/simulated fruit chart before this fix, and still does after; no
+change there. The real behavior change is for a **real-only-mode**
+account specifically: `realOnlyBlocked('harvest_receipts', [2026])`
+reads `isDomainReal()`, which reads the same `domain_reality()` RPC
+result -- before this fix it returned `false` (not blocked, since the
+RPC said 2026 was real), so a real-only account fell through to
+`renderFruit()`, which then internally routed to the MOCK renderer
+anyway (`REAL_FRUIT_VINTAGES` doesn't include 2026) -- meaning **a
+real-only-mode account was being shown simulated 2026 harvest data with
+no disclosure that it was simulated, the exact thing real-only mode
+exists to prevent.** After this fix, `realOnlyBlocked` correctly
+returns `true` for 2026, and a real-only account now sees the "Not
+available in real-only mode" empty state instead. This is a genuine,
+newly-corrected user-visible behavior change, reported here rather than
+only implied by the domain_reality() numbers above.

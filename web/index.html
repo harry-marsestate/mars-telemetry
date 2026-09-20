@@ -3215,7 +3215,12 @@ async function renderFruitReal(box, ctx){
   // `.empty` + "Loading…" treatment loadApprovalQueue() already uses, rather
   // than introducing a second visual language for the same idea.
   box.appendChild(el('div','empty','Loading&hellip;'));
-  const { data, error } = await sb.from('harvest_receipts')
+  // harvest_receipts_current, not harvest_receipts directly -- excludes
+  // known-foreign rows (e.g. the 2026 Syrah cross-tenant artifact,
+  // docs/SECURITY.md) that don't belong to this estate, same "read the
+  // *_current surface, never the raw synced table" rule this project
+  // now applies everywhere a source can contain data that isn't ours.
+  const { data, error } = await sb.from('harvest_receipts_current')
     .select('block_id,lot_code,lot_name,varietal_name,weight_tons,receipt_date')
     .eq('vintage',v).order('receipt_date',{ascending:true});
   if(error) throw error;

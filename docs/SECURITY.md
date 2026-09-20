@@ -5465,3 +5465,85 @@ paired readings are confirmed separate InnoVint records (different
 vessels or submissions), not duplicates."* Every cited figure matches
 the live database exactly (already independently verified earlier in
 this entry). The disclosure fix works as designed in production.
+
+## Near-miss: five branches touching one deployed Edge Function -- merged before deploying, not caught by accident
+
+Five unmerged branches (`fix/block-lots-grants`, `fix/harvest-receipts-
+exclusion`, `feat/winery-ets-ingestion`, `fix/lot-analyses-multi-
+reading-disclosure`, plus `fix/lot-canonical-map` already in `main`)
+accumulated in parallel over one session, two of which
+(`feat/winery-ets-ingestion` and `fix/lot-analyses-multi-reading-
+disclosure`) both edited `supabase/functions/chat/tools.ts` --
+`feat/winery-ets-ingestion` added `get_wine_lab_results`;
+`fix/lot-analyses-multi-reading-disclosure` (branched from `main`
+AFTER `fix/lot-canonical-map` but BEFORE the winery branch existed)
+added the multi-reading disclosure to `getLotAnalyses`. Neither branch
+contained the other's change. `supabase functions deploy` replaces
+`tools.ts` wholesale from whatever is in the working tree at deploy
+time -- deploying either branch as-is would have silently reverted the
+other's already-verified, already-deployed fix. This was caught before
+it happened (deploy from `main` was requested explicitly instead of
+from either feature branch) -- the near-miss is worth recording
+precisely because the PREVIOUS deploy in this same session already
+came close to the opposite failure: a deploy from
+`fix/lot-analyses-multi-reading-disclosure` had to be verified
+post-hoc (byte-diffed against all three candidate branches) specifically
+because it was not obvious which of five branches' code was actually
+live -- see that entry above.
+
+**Merge, resolving both real conflicts by keeping both sides** (not
+taking one wholesale, per instruction): `docs/SECURITY.md` conflicted
+three times across the five merges, always the same append-only shape
+(both sides added independent sections at the end) -- resolved by
+keeping both every time. `tools.ts` conflicted for real once, merging
+`fix/lot-analyses-multi-reading-disclosure` last: git's own 3-way merge
+resolved it WITHOUT conflict markers (the two branches' insertions
+landed in non-overlapping line ranges), but this was verified rather
+than trusted -- grepped for both `get_wine_lab_results` and
+`multiReadingGroups` post-merge, read the full merged `getLotAnalyses`
+function end-to-end to confirm the multi-reading disclosure block
+landed in its correct position (after the scope-query date-range
+block, before the truncation check), and ran `tsc --noEmit` clean.
+`index.ts` never conflicted (only `feat/winery-ets-ingestion` touched
+it in this final round; `fix/lot-analyses-multi-reading-disclosure`
+didn't touch that file, confirmed via `git diff --stat` before
+merging, not assumed from the instruction's warning that it might).
+
+**Verified after all five merges, before recommending a deploy:** the
+merged `tools.ts` contains all four fixes simultaneously --
+`get_wine_lab_results` (winery chat tool), the multi-reading
+disclosure (`multiReadingGroups`), the `lot_canonical_map` exclusion
+(`fetchSupersededLotMap`), and the scope-query date ranges
+(`lotRanges`) -- confirmed by direct grep and a full read of the
+function, not inferred from the merge succeeding. `tsc --noEmit` clean
+on both `tools.ts` and `index.ts`. `supabase migration list` shows
+all 69 migrations through `20260920190000` with local matching remote
+exactly (checked the actual file count, not guessed) -- every
+migration from all four merged branches present, no gaps. `domain_reality()` spot-checked live post-merge:
+`berry_sampling` correctly `f,t,t,t,t` for 2022-2026 (the Part D
+regression fix held through the merge).
+
+**RULE: when multiple branches touch the same deployed function file,
+merge to the target branch before deploying -- never deploy from a
+feature branch when a sibling branch's change to the same file hasn't
+landed yet.** A feature branch's own "deploy and verify" step is only
+trustworthy in isolation; the moment a second branch touches the same
+file, the two branches' deploy-and-verify results stop being
+composable, and only a merge (or an explicit, deliberate decision to
+overwrite one branch's change) resolves which code is actually live.
+
+## Queued, not built: syncing vesselId/action_id into lot_analyses
+
+Recommendation from the multi-reading-disclosure investigation above,
+restated here as an explicit backlog item rather than left buried in
+that entry's prose. Confirmed available upstream two ways (cached raw
+API response AND a fresh live API call, not just one): every InnoVint
+analysis record carries `vesselId` (rare, ~0.5% populated, but the
+more specific identity when present) and `actionId` (on 100% of
+records checked, less specific but universally available). Neither is
+declared in `ingest-innovint`'s `InnoVintAnalysis` interface or synced
+to `lot_analyses` today. Scope: two new nullable columns
+(`vessel_id`/`action_id`) on `lot_analyses`, plus passing
+`a.vesselId`/`a.actionId` through in the row-construction code -- no
+backfill needed beyond the next scheduled sync, since the upsert key
+(`source_system`, `source_id`) is unchanged. Not started this round.

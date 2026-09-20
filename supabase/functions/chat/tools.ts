@@ -159,6 +159,32 @@ export const TOOLS: Anthropic.Tool[] = [
       required: [],
     },
   },
+  {
+    name: "get_berry_maturity",
+    description:
+      "Real vineyard berry-maturity sampling per block per collection date (brix, pH, titratable acidity, L-malic acid, glucose+fructose, berry weight, berry volume, berry volume variability, sugar per berry), sourced from ETS Labs. Reads berry_maturity_by_block, a view over CURRENT (non-superseded) samples only -- never the raw lab_samples/lab_results tables, which intentionally retain superseded reissue rows. Coverage is UNEVEN and NOT comparable across vintages: 2023 and 2024 each have exactly ONE collection date with only three analytes measured (brix/pH/titratable acidity) -- L-malic acid, glucose+fructose, and the three berry-size analytes are ABSENT those vintages because ETS ran a smaller panel then, not because the fruit had none or measurement failed; do not read those gaps as zero or as a real change in the vineyard. 2026 has the full nine-analyte Dyostem panel across four collection dates through late-season ripening. 2022 has no berry sampling of any kind. 2025 has smoke-taint screening only (see get_smoke_markers), no maturity/ripening panel. Always read this tool's own returned Coverage note rather than assuming a vintage's shape from another vintage's. Deliberately does NOT expose the underlying 20-bin Dyostem berry-size histogram -- that's raw instrument detail with no value in a chat answer; berry_volume_variability_pct already carries the same ripening-uniformity signal as one number. Operator access only (customer/pending accounts get no rows, enforced by the view's own RLS, not an application check here). Never gated by real-only mode -- this data has no simulated counterpart to withhold, same as get_labour_summary.",
+    input_schema: {
+      type: "object",
+      properties: {
+        vintage: { type: "integer", description: "Year, e.g. 2026. Omit for all vintages." },
+        block_id: { type: "string", description: "Block id, e.g. 'B2' or 'B3'. Omit for all blocks." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_smoke_markers",
+    description:
+      "Real smoke-taint marker lab results per sample (the nine free volatile phenols -- guaiacol, 4-methylguaiacol, 4-methylsyringol, m-/o-/p-cresol, cresols (sum), phenol, syringol -- plus the six glycosylated conjugate markers of the same compounds), sourced from ETS Labs. Reads lab_results_current, filtered to just these analytes -- never lab_results directly, which intentionally retains superseded reissue rows (confirmed live: querying it directly for this exact data returned every value twice before this fix). Every row carries result_operator ('=' or '<') separately from result_numeric: a '<' row is a detection-limit censored result (e.g. '< 0.5'), and must be reported as below/under that limit, NEVER as a plain measured number. units differ by sample basis and are NEVER interchangeable: µg/kg is berry-mass basis, µg/L is liquid/juice basis -- always quote the unit given with the value, never convert or compare a µg/kg figure to a µg/L one as if equal. Coverage is concentrated in 2025: two berry-mass-basis samples, two juice-basis samples, and one trial micro-ferment (block unresolved -- see this tool's Coverage note). 2022/2023/2024/2026 have no vineyard-side smoke screening on file. Operator access only (RLS-enforced, not an application check). Never gated by real-only mode -- no simulated counterpart exists for this data.",
+    input_schema: {
+      type: "object",
+      properties: {
+        vintage: { type: "integer", description: "Year, e.g. 2025. Omit for all vintages." },
+        block_id: { type: "string", description: "Block id, e.g. 'B2' or 'B3'. Omit for all blocks -- note the trial micro-ferment sample has no resolved block and is excluded by any block_id filter." },
+      },
+      required: [],
+    },
+  },
 ];
 
 export interface ToolResult {
@@ -198,6 +224,10 @@ export async function runTool(
         return await getVessels(supabase, input);
       case "get_labour_summary":
         return await getLabourSummary(supabase, input);
+      case "get_berry_maturity":
+        return await getBerryMaturity(supabase, input);
+      case "get_smoke_markers":
+        return await getSmokeMarkers(supabase, input);
       default:
         return { content: `Unknown tool: ${name}`, isError: true };
     }
@@ -552,4 +582,191 @@ async function getLabourSummary(supabase: any, input: Record<string, unknown>): 
     ? `\n\nCoverage: ${coverageNotes.join("; ")}.`
     : (vintage ? `\n\nNo labour records match vintage ${vintage}${job_category ? ` with job category filter "${job_category}"` : ""} -- not simulated, genuinely absent for this scope.` : "");
   return { content: labourResult(data ?? [], { vintage: vintage ?? null, period_month: periodMonth, job_category: job_category ?? null }) + note, isError: false };
+}
+
+// Same day-precision-matters reasoning as monthLabel() above, one level
+// finer: a berry-maturity/smoke-marker collection date IS the meaningful
+// unit here (samples are taken on specific days, not aggregated by
+// month), so this spells the full date out in words rather than
+// reusing monthLabel() at month grain or falling back to a bare ISO
+// string.
+function dayLabel(isoDate: string): string {
+  const [y, m, d] = isoDate.split("-");
+  return `${MONTH_NAMES[Number(m) - 1]} ${Number(d)}, ${y}`;
+}
+
+// ETS berry-sampling ingestion (2026-09-20): lab_samples/lab_results/
+// berry_volume_histogram are intentionally lossless (a reissued sample's
+// superseded rows stay in the base tables -- see docs/SECURITY.md for the
+// duplication bug that was live before lab_results_current/
+// lab_samples_current existed). Both tools below read ONLY the *_current
+// views/the berry_maturity_by_block view built on them -- never
+// lab_samples/lab_results directly -- so a chat answer can't reintroduce
+// that bug.
+//
+// Real-only-mode: deliberately NOT gated, same reasoning and same choice
+// as get_labour_summary (see that function's own comment) -- ETS lab
+// data has no mock/simulated generator that has ever existed for it (the
+// domain_reality() berry_sampling clause is existence-based against this
+// exact table, with nothing to distinguish "real" from "simulated" for
+// this domain -- there is no simulated version to withhold). Operator
+// access is enforced by each view's own RLS (security_invoker + an
+// operator-only policy, mirroring lot_analyses/labour_actuals) -- not an
+// application-level check in either function below.
+const MATURITY_ANALYTE_LABELS: Record<string, string> = {
+  brix: "brix", ph: "pH", titratable_acidity: "titratable acidity",
+  l_malic_acid: "L-malic acid", glucose_fructose: "glucose+fructose",
+  berry_weight_g: "berry weight", berry_volume_ml: "berry volume",
+  berry_volume_variability_pct: "berry volume variability", sugar_per_berry_mg: "sugar per berry",
+};
+const MATURITY_ANALYTE_KEYS = Object.keys(MATURITY_ANALYTE_LABELS);
+
+// deno-lint-ignore no-explicit-any
+async function getBerryMaturity(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
+  const { vintage, block_id } = input as { vintage?: number; block_id?: string };
+
+  let query = supabase
+    .from("berry_maturity_by_block")
+    .select("block_id, collected_on, vintage, brix, ph, titratable_acidity, l_malic_acid, glucose_fructose, berry_weight_g, berry_volume_ml, berry_volume_variability_pct, sugar_per_berry_mg")
+    .order("block_id", { ascending: true })
+    .order("collected_on", { ascending: true });
+  if (vintage) query = query.eq("vintage", vintage);
+  if (block_id) query = query.eq("block_id", block_id);
+
+  const { data, error } = await query;
+  if (error) return formatErrorForModel(error);
+
+  // Coverage is computed from an UNFILTERED read of the same view plus
+  // lab_samples_current's sample_type/vintage columns -- both tiny (12
+  // and 17 rows total) -- so the returned note is honest about every
+  // vintage's actual shape regardless of what this call filtered to,
+  // rather than only describing whatever happened to survive the filter.
+  const { data: allMaturity, error: allErr } = await supabase
+    .from("berry_maturity_by_block")
+    .select("vintage, collected_on, brix, ph, titratable_acidity, l_malic_acid, glucose_fructose, berry_weight_g, berry_volume_ml, berry_volume_variability_pct, sugar_per_berry_mg");
+  if (allErr) return formatErrorForModel(allErr);
+  const { data: allSamples, error: samplesErr } = await supabase
+    .from("lab_samples_current")
+    .select("vintage, sample_type");
+  if (samplesErr) return formatErrorForModel(samplesErr);
+
+  const SAMPLE_TYPE_LABEL: Record<string, string> = {
+    berry_smoke: "smoke-taint screening", trial_ferment: "a trial micro-ferment",
+  };
+  const coverageLines: string[] = [];
+  for (const v of [2022, 2023, 2024, 2025, 2026]) {
+    // deno-lint-ignore no-explicit-any
+    const rows = (allMaturity as any[]).filter((r) => r.vintage === v);
+    if (rows.length === 0) {
+      // deno-lint-ignore no-explicit-any
+      const otherTypes = [...new Set((allSamples as any[]).filter((s) => s.vintage === v).map((s) => s.sample_type))];
+      coverageLines.push(
+        otherTypes.length === 0
+          ? `${v}: no berry sampling of any kind -- genuinely absent, not simulated.`
+          : `${v}: no maturity/ripening panel -- that vintage's only berry sampling was ${otherTypes.map((t) => SAMPLE_TYPE_LABEL[t as string] ?? t).join(" and ")} (see get_smoke_markers), not brix/pH/TA ripening tracking.`,
+      );
+      continue;
+    }
+    const dates = [...new Set(rows.map((r) => r.collected_on))].sort();
+    const present = MATURITY_ANALYTE_KEYS.filter((k) => rows.some((r) => r[k] != null));
+    const absent = MATURITY_ANALYTE_KEYS.filter((k) => !present.includes(k));
+    const dateLabel = dates.length === 1 ? dayLabel(dates[0]) : `${dates.length} dates (${dates.map(dayLabel).join(", ")})`;
+    coverageLines.push(
+      absent.length === 0
+        ? `${v}: full nine-analyte panel across ${dateLabel}.`
+        : `${v}: only ${present.map((k) => MATURITY_ANALYTE_LABELS[k]).join("/")} measured, across ${dateLabel} -- ${absent.map((k) => MATURITY_ANALYTE_LABELS[k]).join(", ")} NOT measured that vintage (absent because a smaller panel ran, not zero or missing entry).`,
+    );
+  }
+  const note = `\n\nCoverage (all vintages, regardless of this call's filters): ${coverageLines.join(" ")}`;
+  return { content: JSON.stringify(data ?? []) + note, isError: false };
+}
+
+// The nine free volatile phenols (both ETS method-string variants
+// normalize to these codes -- see ingestion/ets_labs/parse.py's
+// analysis_code_for()) plus the six glycosylated conjugate markers.
+const SMOKE_ANALYSIS_CODES = [
+  "guaiacol", "4_methylguaiacol", "4_methylsyringol", "m_cresol", "o_cresol", "p_cresol",
+  "phenol", "syringol", "cresols_sum",
+  "smoke_glycosylated_markers_lcms_ms_qqq_4_methylguaiacol_rutinoside",
+  "smoke_glycosylated_markers_lcms_ms_qqq_4_methylsyringol_gentiobioside",
+  "smoke_glycosylated_markers_lcms_ms_qqq_cresol_rutinoside",
+  "smoke_glycosylated_markers_lcms_ms_qqq_guaiacol_rutinoside",
+  "smoke_glycosylated_markers_lcms_ms_qqq_phenol_rutinoside",
+  "smoke_glycosylated_markers_lcms_ms_qqq_syringol_gentiobioside",
+];
+
+// deno-lint-ignore no-explicit-any
+async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
+  const { vintage, block_id } = input as { vintage?: number; block_id?: string };
+
+  // Samples first (not lab_results_current directly): lab_results_current
+  // carries no block_id/vintage/collected_on of its own (it's `select
+  // r.*` over lab_results, joined only to filter -- see
+  // 20260920140000_lab_samples_current.sql), and it's a view, not a
+  // table with a declared FK, so PostgREST embedding across it isn't
+  // relied on here -- the join is done explicitly in this function
+  // instead, against sample ids resolved from lab_samples_current.
+  let sampleQuery = supabase
+    .from("lab_samples_current")
+    .select("id, lab_sample_no, sample_description_raw, sample_type, block_id, vintage, collected_on");
+  if (vintage) sampleQuery = sampleQuery.eq("vintage", vintage);
+  if (block_id) sampleQuery = sampleQuery.eq("block_id", block_id);
+  const { data: samples, error: sampleErr } = await sampleQuery;
+  if (sampleErr) return formatErrorForModel(sampleErr);
+
+  // deno-lint-ignore no-explicit-any
+  const sampleById = new Map((samples as any[]).map((s) => [s.id, s]));
+  const sampleIds = [...sampleById.keys()];
+
+  let rows: unknown[] = [];
+  if (sampleIds.length > 0) {
+    const { data: results, error: resultsErr } = await supabase
+      .from("lab_results_current")
+      .select("sample_id, analysis_name_raw, analysis_code, result_raw, result_numeric, result_operator, units, analyzed_at")
+      .in("sample_id", sampleIds)
+      .in("analysis_code", SMOKE_ANALYSIS_CODES);
+    if (resultsErr) return formatErrorForModel(resultsErr);
+    // deno-lint-ignore no-explicit-any
+    rows = (results as any[]).map((r) => {
+      const s = sampleById.get(r.sample_id);
+      return {
+        block_id: s?.block_id ?? null,
+        vintage: s?.vintage,
+        collected_on: s?.collected_on,
+        lab_sample_no: s?.lab_sample_no,
+        sample_description: s?.sample_description_raw,
+        analysis_name_raw: r.analysis_name_raw,
+        analysis_code: r.analysis_code,
+        result_operator: r.result_operator,
+        result_numeric: r.result_numeric,
+        result_raw: r.result_raw,
+        units: r.units,
+        analyzed_at: r.analyzed_at,
+      };
+    });
+  }
+
+  // Coverage: unfiltered read of every sample this table has ever seen
+  // (17 rows total via lab_samples_current), so the note is honest about
+  // every vintage's smoke-screening status regardless of this call's own
+  // vintage/block_id filters.
+  const { data: allSamples, error: allSamplesErr } = await supabase
+    .from("lab_samples_current")
+    .select("vintage, block_id, collected_on, sample_type, sample_description_raw");
+  if (allSamplesErr) return formatErrorForModel(allSamplesErr);
+  const coverageLines: string[] = [];
+  for (const v of [2022, 2023, 2024, 2025, 2026]) {
+    // deno-lint-ignore no-explicit-any
+    const smokeSamples = (allSamples as any[]).filter((s) => s.vintage === v && (s.sample_type === "berry_smoke" || s.sample_type === "trial_ferment"));
+    if (smokeSamples.length === 0) {
+      coverageLines.push(`${v}: no vineyard-side smoke-taint screening on file -- genuinely absent, not simulated.`);
+      continue;
+    }
+    const parts = smokeSamples.map((s) =>
+      `${s.block_id ?? "block unresolved"} (${dayLabel(s.collected_on)}${s.sample_type === "trial_ferment" ? ", trial micro-ferment" : ""})`
+    );
+    coverageLines.push(`${v}: ${parts.join(", ")}.`);
+  }
+  const note = `\n\nCoverage (all vintages, regardless of this call's filters): ${coverageLines.join(" ")} Units are basis-specific (µg/kg = berry mass, µg/L = liquid/juice) and are never interchangeable -- always read the units field on each row.`;
+  return { content: JSON.stringify(rows) + note, isError: false };
 }

@@ -4474,3 +4474,189 @@ remaining 9 live codes (`brix`, `ph`, `titratable_acidity`,
 `berry_volume_variability`, `sugar_per_berry_by_volume`) are exactly
 `get_berry_maturity`'s own analytes -- 15 + 9 = 24, with nothing left
 uncovered by either tool.
+
+## Phase 2 investigation: the ETS winery-side CSV vs. lot_analyses reconciliation -- read-only, no ingestion built
+
+Read-only investigation, per explicit scope -- no migration, no
+ingestion code, no schema change. Covers the 25 ETS sample numbers
+(93 CSV rows) NOT in Phase 1's scope: `MA22CS`/`MA22CSV2`/`MA22CSV3`/
+`MA22ZIN`/`MA23CSV2`/`MA23CSV3`/`MA23ZIN`/`MA24CS`/`MA24CSV2`/
+`MA24CSV3`/`MA25CH`/`25CHMR-LF`/`25CH MR-LF`/`23 Zinfandel`/
+`23 Zin 90/10`/`T-7 V-2 (fermenting)`/`26MARCH`, matched row-by-row
+against `lot_analyses`' 1,405 rows.
+
+**Bucket counts (every ETS winery-side row classified into exactly
+one):**
+```
+A. EXACT           5
+B. VALUE CONFLICT   0
+C. DATE-NEAR        0
+D. ETS-ONLY        88
+```
+93 total, reconciling exactly against the CSV's own winery-side row
+count. **Zero value conflicts and zero date-near matches** -- every
+match that exists is a same-day, byte-exact value; everything else is
+a clean miss (no InnoVint row within +/-3 days for the analyte), not a
+near-miss.
+
+**The 5 exact matches, all ethanol, all same-day:**
+```
+606180131  MA25CH    ethanol at 20C  14.83% == lot_analyses[MA25CH].ethanol-20c    14.83%
+606180131  MA25CH    ethanol at 60F  14.75% == lot_analyses[MA25CH].ethanol-60f    14.75%
+312211153  MA23CSV3  ethanol at 20C  14.63% == lot_analyses[MA23CSV3].ethanol      14.63%  (== MA23CSV3-AP.ethanol, MA23CSV322.ethanol -- see below)
+312211152  MA23CSV2  ethanol at 20C  14.74% == lot_analyses[MA23CSV2-AP].ethanol   14.74%
+312211154  MA23ZIN   ethanol at 20C  15.74% == lot_analyses[MA23ZIN].ethanol       15.74%  (== MA23ZIN-AP.ethanol)
+```
+In every case, `lot_analyses`' generic `ethanol` (or `ethanol-20c`)
+type is the ETS 20C reading -- `ethanol at 60F` (the secondary/legacy
+unit ETS also reports) has NO counterpart under any lot except
+`MA25CH`, which is the only lot with an explicit `ethanol-60f` row.
+
+**D. ETS-ONLY, broken down by why (88 rows, three distinct reasons,
+none of them "should have matched and didn't"):**
+- **43 rows: no lot mapping exists at all** -- `26MARCH` (11),
+  `25CHMR-LF`+`25CH MR-LF` (17 combined), `MA22CSV2` (9), `23 Zinfandel`
+  + `23 Zin 90/10` (4), `T-7 V-2 (fermenting)` (2). See the mapping
+  section below for why each has none.
+- **26 rows: the analyte itself has no `lot_analyses` equivalent, even
+  though the lot does** -- `MA25CH`'s heat/cold-stability trials,
+  fining trial, conductivity test, and Scorpion microbial panel (17
+  rows across 3 samples), plus `MA22CSV3`'s Scorpion panel (9 rows).
+  `lot_analyses`' 19 distinct `analysis_type` values (confirmed live:
+  `volatile-acidity`, `titratable-acidity`, `ph`, `free-so2`,
+  `total-so2`, `brix`, `temperature`, `malic-acid`, `glucosefructose`,
+  `residual-sugar`, `alcohol`, `potassium`,
+  `yeast-assimilable-nitrogen-yan`, `alpha-amino-nitrogen`,
+  `ammonia-nh3`, `ethanol`, `lactic-acid`, `ethanol-20c`,
+  `ethanol-60f`) have never included a microbial count, a stability/
+  fining-trial NTU reading, a conductivity value, molecular SO2, or
+  tartaric acid -- confirmed by the same live query this file's earlier
+  entries already ran, not re-derived from the CSV.
+- **19 rows: lot AND analyte both map, but no `lot_analyses` row
+  exists within +/-3 days** -- entirely `ethanol at 20C`/`ethanol at
+  60F` readings for `MA22CS`/`MA22ZIN`/`MA23CSV2`/`MA23CSV3`/`MA23ZIN`/
+  `MA24CS`/`MA24CSV2`/`MA24CSV3`/`MA25CH`'s OTHER ethanol dates.
+  `lot_analyses` stores at most ONE or TWO ethanol readings per lot
+  ever (confirmed live: `MA22ZIN` has exactly one, `ethanol-20c=5.9%`
+  at 2022-09-19 -- a mid-fermentation reading nowhere near either of
+  ETS's 2024 values of 16.91%/15.45%, and outside +/-3 days of both;
+  `MA24CS`/`MA24CSV2`/`MA24CSV3` have NO ethanol-type row at all),
+  while ETS ran ethanol checks repeatedly over each lot's life.
+  `lot_analyses` appears to capture a single bottling-time (or
+  similar milestone) snapshot, not ETS's full periodic re-check
+  cadence.
+
+**E. INNOVINT-ONLY rows in the same 13 lot_codes ETS's winery CSV
+touches: 1,243** (1,248 total `lot_analyses` rows across those
+lot_codes, minus the 5 matched). Dominated by exactly the kind of
+routine fermentation/aging monitoring ETS's winery-side CSV extract
+doesn't contain at all: `volatile-acidity` (217), `titratable-acidity`
+(148), `ph` (147), `free-so2`/`total-so2` (114 each), `brix` (110),
+`temperature` (109), `malic-acid` (107), `glucosefructose` (60),
+`residual-sugar` (43). **This overturns the scoping assumption Phase 1
+was built on** ("substantial overlap" between the ETS CSV and
+`lot_analyses`, the reason winery ingestion was deferred to its own
+round) -- for the winery side specifically, the overlap turned out to
+be negligible (5 of 93 ETS rows, 5 of 1,248 `lot_analyses` rows in
+those lots). The two sources look almost entirely complementary
+rather than duplicative: `lot_analyses` is InnoVint's own dense,
+routine internal monitoring stream; this ETS CSV extract is sparse,
+occasional, milestone-shaped external-lab submissions (a bottling
+ethanol check, a microbial safety panel, a stability/fining trial) --
+a different kind of record, not a second copy of the same one. (Phase
+1's vineyard-side overlap finding stands separately and isn't affected
+by this -- that was lot_code/lot_name/date-pattern evidence specific
+to the berry-maturity analytes, a different comparison.)
+
+**Lot-code mapping questions, resolved with evidence (each checked
+live, not inferred):**
+
+- **`MA22CSV2`'s apparent absence, confirmed, and doubly moot.** No
+  `MA22CSV2` lot_code exists in `lot_analyses` under any spelling
+  (confirmed: `lot_code ILIKE '%CSV2%'` returns only `MA24CSV2` and
+  `MA23CSV2-AP`). But it wouldn't matter if one did: ETS's `MA22CSV2`
+  sample (`402070908`, 2024-02-08) is 100% a Scorpion microbial panel
+  -- 9 rows, zero chemistry -- and `lot_analyses` has never stored a
+  microbial analyte under any lot. Nothing to match even in principle.
+
+- **The `-AP` suffix: InnoVint carries genuine duplicate lot objects
+  for the same physical wine, not a naming variant to pick one of.**
+  Checked byte-for-byte: `MA23CSV3` (80 rows) and `MA23CSV3-AP` (80
+  rows) are an EXACT 1:1 duplicate -- every single row identical in
+  `analysis_type`/`value`/`recorded_at` (confirmed: 0 of 80 `MA23CSV3`
+  rows lack an identical `MA23CSV3-AP` counterpart). `MA23CSV322` (33
+  rows, 2023-10-27 to 2023-11-16 only) is a third duplicate covering
+  just the early-fermentation window. `MA23ZIN` (127 rows, through
+  2025-03-12) and `MA23ZIN-AP` (92 rows, through 2024-07-11 only) agree
+  exactly everywhere `-AP` has data, but the bare lot keeps going for
+  35 more rows after `-AP` stops -- through bottling and an alcohol
+  reading in January 2025. `MA23CSV2-AP` has NO bare-code sibling at
+  all (confirmed above). Read together: `-AP` looks like an earlier or
+  parallel InnoVint lot object for the same wine that a bare-code lot
+  sometimes "takes over" from (CSV3, ZIN) and sometimes never gets one
+  (CSV2) -- but nothing in the data says what `AP` stands for, and this
+  is stated as an open question, not guessed at. **The bare ETS code
+  should be checked against BOTH the bare and `-AP` `lot_analyses`
+  codes when both exist** (this diff did exactly that); when only
+  `-AP` exists (`MA23CSV2`), that's the only candidate.
+
+- **`25CHMR-LF`/`25CH MR-LF` (two spellings, same wine by ETS's own
+  chemistry): NOT corroborated by `lot_analyses` as the same lot as
+  `MA25CH`, or as existing under any lot at all.** Queried every
+  `lot_analyses` row in the entire Oct 2025-Feb 2026 window (the full
+  span these three ETS samples cover): zero Chardonnay rows of any
+  kind -- the only lots active in that window are `MA24CSV2`,
+  `MA24CSV3`, `MA23CS`, `LA24CF-MARS2` (all red wine). `MA25CH` itself
+  doesn't start in `lot_analyses` until 2026-06-05, four months after
+  `25CHMR-LF`'s last ETS record (2026-02-26). The ETS-side evidence for
+  "one wine, two stages" is real and internally consistent (VA rising
+  smoothly 0.40->0.44->0.44->0.46 g/L across all four dates spanning
+  both spellings, malic acid essentially flat ~1.96-1.99 g/L, free-SO2
+  climbing 7->9->16 mg/L as expected from topping), but `lot_analyses`
+  provides no independent corroboration -- no shared `lot_id`, no
+  overlapping dates, nothing. **Left genuinely ambiguous, not
+  resolved**: plausible the same physical lot only got a formal
+  InnoVint lot object (and the `MA25CH` name) at or near bottling in
+  June 2026, with nothing recorded in InnoVint before that -- but that
+  is inference from the ETS side alone, not something the database
+  confirms.
+
+- **`23 Zinfandel`/`23 Zin 90/10` (Feb 2025 blend trial): no
+  counterpart.** Queried every `lot_analyses` row from 2025-01-20 to
+  2025-02-12 (see bucket-D detail above): zero Zinfandel-anything: the
+  only lots active that window are `MA24CSV3`/`MA23CS`/`MA24CSV2`.
+  `MA23ZIN`/`MA23ZIN-AP`'s own ethanol readings are all from December
+  2023, nowhere near this window or these values (16.14%/14.87% vs.
+  15.74%). This reads as an off-books bench blending trial (testing a
+  90/10 blend ratio) that never got its own InnoVint lot -- plausible
+  since a blend trial is exploratory, not a lot in production.
+
+- **`T-7 V-2 (fermenting)`, Nov 2023: no counterpart, and no such
+  vessel exists in InnoVint at all.** Queried `vessels` for any code
+  matching `T-7`/`T7`: zero rows -- InnoVint has never tracked a tank
+  by that name. Queried every `lot_analyses` row from 2023-10-28 to
+  2023-11-05 (see detail above, 134 rows across `MA23CS`/`MA23CSV2-AP`/
+  `MA23CSV3`(+dupes)/`MA22ZIN`/`MA23ZIN`(+dupe)): nothing matches
+  ETS's `ethanol at 20C=8.1%`/`glucose+fructose=115 g/L` (a clearly
+  mid-fermentation pair of readings) at or near that date for any lot.
+  Same shape as Phase 1's own `BUCKET FERMENT` trial sample: a
+  small experimental micro-ferment run entirely outside InnoVint's
+  system of record, not a mis-mapped real lot.
+
+- **`26MARCH` (2026 Mars Chardonnay must, Aug 2026): no 2026
+  Chardonnay lot exists yet.** Queried every `lot_analyses` row from
+  2026-06-19 onward (the day after `MA25CH`'s last recorded row):
+  seven rows, all `MA24CS` (red wine, 2026-07-31). `MA25CH` -- the
+  2025 vintage -- stops at 2026-06-18, well before `26MARCH`'s
+  2026-08-14 date, and represents the PRIOR vintage's wine, not this
+  one's must. Corroborates the original Phase 0 reconciliation
+  finding (`harvest_receipts` has zero Chardonnay rows ever,
+  `block_lots` has no Chardonnay block) from the `lot_analyses` side
+  too: as of this database's current state, the 2026 Chardonnay crop
+  has no InnoVint lot object of any kind yet -- `26MARCH` is
+  unconditionally ETS-only.
+
+**Scope discipline**: no migration file, no ingestion module, no
+schema change accompanies this entry -- purely a read-only diff, per
+the round's explicit instruction. Any winery-side ingestion design is
+future work, informed by this diff but not started here.

@@ -5115,3 +5115,31 @@ InnoVint's own internal tracking) -- checked directly.
 
 TypeScript verified via `tsc --noEmit` -- zero `TS1xxx` syntax errors,
 brace/paren counts balanced.
+
+### Deployed and verified live (2026-09-20, code commit `83ca0fa`)
+
+`supabase functions deploy chat --use-api` run by the owner. Deployed-
+branch identity confirmed explicitly rather than assumed: at deploy
+time there were FIVE unmerged branches with different
+`supabase/functions/chat/` states (this one, `feat/winery-ets-
+ingestion`, `fix/block-lots-grants`, `fix/harvest-receipts-exclusion`,
+and `main`), so a plain "diff looks clean" check wasn't enough --
+downloaded into an isolated `--workdir` and diffed against all three
+candidates that touch `tools.ts`. Zero-line diff against THIS branch
+(`fix/lot-analyses-multi-reading-disclosure`); 37 lines different from
+`main`; 194 lines different from `feat/winery-ets-ingestion` (missing
+`get_wine_lab_results` entirely). Confirms the owner deployed from
+this branch specifically -- **`get_wine_lab_results` (Part D) is NOT
+yet live**, a separate deploy is still needed for that tool.
+`index.ts` and the four untouched files all also byte-identical.
+
+Live re-ask through the real app (authenticated Demo operator browser
+session, Kimi K3): *"What was the lab chemistry for lot MA22CS around
+May 2024?"* -- chosen to land exactly on the confirmed multi-reading
+case. Response reported every value from both real submissions rather
+than averaging or dropping one (VA 0.62/0.59 g/L, free SO2 39/36 ppm,
+total SO2 133/127 ppm, TA 6.3/6.3 g/L), and stated explicitly: *"the
+paired readings are confirmed separate InnoVint records (different
+vessels or submissions), not duplicates."* Every cited figure matches
+the live database exactly (already independently verified earlier in
+this entry). The disclosure fix works as designed in production.

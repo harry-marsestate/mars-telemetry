@@ -4895,6 +4895,42 @@ against the changed file -- zero `TS1xxx` syntax errors, only the
 expected Deno-import module-resolution errors. Brace/paren/backtick
 counts confirmed balanced.
 
-**Not yet deployed as of this entry** -- `supabase functions deploy chat
---use-api` is gated in this environment; prepared and committed, owner
-to run it.
+### Deployed and verified live (2026-09-20, code commit `e2400d5`)
+
+`supabase functions deploy chat --use-api` run by the owner; downloaded
+into an isolated `--workdir` (never the working tree directly) and
+diffed -- `tools.ts` and `index.ts` byte-for-byte identical to the
+committed source, `deno.json`/`kimi.ts`/`labour-totals.ts`/`profile.ts`
+also confirmed unchanged.
+
+Live re-ask through the real app (existing authenticated Demo operator
+browser session, model switched to Kimi K3 via the UI's own dropdown --
+not a minted session), asking exactly the question this bug's fix
+targets: *"What's the lab analysis history for the Cabernet Sauvignon
+V3 lot?"* -- deliberately vague on vintage, the shape most likely to
+trigger both bugs at once. Response opened with the fix's own new
+warning, verbatim in the model's own words: *"'V3' matches three
+separate lots across vintages -- MA22CSV3, MA23CSV3, and MA24CSV3."*
+The model picked `MA24CSV3` (most recent/complete) as its primary
+answer, said so explicitly, and separately surfaced `MA23CSV3`'s own
+figures in a "flags worth noting" section -- disambiguated, not
+blended, exactly the fix's intent. No duplicate or tripled values
+appeared anywhere in the response (the `-AP`/`322` exclusion held).
+
+Every specific figure the model cited for `MA24CSV3`'s 2026-02-03
+reading (free SO2 34, total SO2 107, pH 4.04, TA 6.15, VA 0.66) checked
+against a fresh independent SQL query -- exact match, all five values.
+
+**One real inaccuracy found, unrelated to this fix, reported plainly
+rather than folded into the "success" framing:** the model stated
+`MA23CSV3`'s history runs *"Mar 2023-Jul 2024."* The lot's actual date
+range, confirmed live, is **2023-10-27 to 2024-07-11** -- correct end
+date, wrong start month (October misstated as March). The pH/TA/VA
+figures the model attached to that claim (4.22 / 5.4 / 0.70-0.73) are
+all genuinely present in `MA23CSV3`'s real data, so this reads as a
+narrative/recall error in Kimi's prose, not a wrong tool result or a
+regression in the data layer -- the underlying `get_lot_analyses` call
+that produced this figure necessarily returned the correct 2023-10-27
+timestamp, since that's the only place a value like 4.22 exists in the
+real rows. Recorded here rather than glossed over; not something this
+round's fix could have caused or should be expected to catch.

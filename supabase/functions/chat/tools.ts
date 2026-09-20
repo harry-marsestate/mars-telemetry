@@ -1,3 +1,4 @@
+import { labourResult } from "./labour-totals.ts";
 import type Anthropic from "@anthropic-ai/sdk";
 
 // series_bucketed's own aggregation is bounded by the caller's date range
@@ -147,7 +148,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_labour_summary",
     description:
-      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026, ingested month by month as new invoices arrive). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 is a partial, still-growing season -- the exact month range is NOT fixed here, always read it from this tool's own returned Coverage note rather than assuming a specific month or month count. 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Pass period_month to scope the answer to ONE specific calendar month (e.g. 'what did we spend in August specifically') instead of the whole vintage -- without it, results are summed across every month on file for that vintage, which is almost certainly NOT what a month-specific question wants. Operator access only -- returns no rows for customer or pending accounts.",
+      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026, ingested month by month as new invoices arrive). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 is a partial, still-growing season -- the exact month range is NOT fixed here, always read it from this tool's own returned Coverage note rather than assuming a specific month or month count. 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Pass period_month to scope the answer to ONE specific calendar month (e.g. 'what did we spend in August specifically') instead of the whole vintage -- without it, results are summed across every month on file for that vintage, which is almost certainly NOT what a month-specific question wants. Use the supplied totals.display values verbatim for headline totals and the total row; NEVER sum category rows yourself or average category rates. totals contains exact decimal sums; display rounds once to two decimals. Empty categories mean no records, NOT known zero spend. Operator access only -- returns no rows for customer or pending accounts.",
     input_schema: {
       type: "object",
       properties: {
@@ -455,11 +456,8 @@ function monthLabel(isoDate: string): string {
 // so far -- see docs/SECURITY.md's investigation entry -- so this adds a
 // query path onto the new labour_actuals_by_month view (additive sibling
 // to labour_actuals_by_category, same migration round) rather than
-// changing any schema. Omitting period_month must behave EXACTLY as
-// before this change -- that's the regression risk, guarded by keeping
-// the original vintage/category query and coverage-note logic completely
-// untouched in its own branch below, not restructured or merged with the
-// new one.
+// changing any schema. Both paths now share exact decimal totals while
+// retaining their own filter scope, category grain, and coverage notes.
 // deno-lint-ignore no-explicit-any
 async function getLabourSummary(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
   const { vintage, job_category, period_month: periodMonthInput } = input as {
@@ -480,7 +478,7 @@ async function getLabourSummary(supabase: any, input: Record<string, unknown>): 
   if (periodMonth) {
     let query = supabase
       .from("labour_actuals_by_month")
-      .select("vintage, period_month, job_category, labor_hours, labor_cost, expense_cost, total_cost, cost_per_hour")
+      .select("vintage, period_month, job_category, labor_hours::text, labor_cost::text, expense_cost::text, total_cost::text, cost_per_hour::text")
       .eq("period_month", periodMonth)
       .limit(500);
     if (vintage) query = query.eq("vintage", vintage);
@@ -501,26 +499,24 @@ async function getLabourSummary(supabase: any, input: Record<string, unknown>): 
       // the vintage's real coverage range as context rather than a bare
       // zero, reusing the same month-name/inclusive phrasing.
       const impliedVintage = vintage ?? Number(periodMonth.slice(0, 4));
-      const { data: cov } = await supabase
+      const { data: cov, error: coverageError } = await supabase
         .from("labour_vintage_coverage")
         .select("first_month, last_month, month_count")
         .eq("vintage", impliedVintage)
         .maybeSingle();
+      if (coverageError) return formatErrorForModel(coverageError);
       const rangeNote = cov
         ? ` This vintage's actual coverage is ${cov.first_month === cov.last_month ? monthLabel(cov.first_month) : `${monthLabel(cov.first_month)} through ${monthLabel(cov.last_month)} INCLUSIVE`} (${cov.month_count} of 12 months).`
         : ` No labour records exist for vintage ${impliedVintage} at all -- not simulated, genuinely absent.`;
-      note = `\n\nNo labour records exist for ${label} specifically.${rangeNote}`;
+      note = `\n\nNo labour records match ${label} specifically${job_category ? ` with job category filter "${job_category}"` : ""}.${rangeNote}`;
     }
-    return { content: JSON.stringify(data) + note, isError: false };
+    return { content: labourResult(data ?? [], { vintage: vintage ?? null, period_month: periodMonth, job_category: job_category ?? null }) + note, isError: false };
   }
 
-  // Unchanged from before period_month existed -- same query, same
-  // coverage-note construction, byte-for-byte, so a caller that never
-  // passes period_month sees identical behavior to the round-4 verified
-  // response.
+  // Vintage path retains its category grain and vintage-wide coverage.
   let query = supabase
     .from("labour_actuals_by_category")
-    .select("vintage, job_category, labor_hours, labor_cost, expense_cost, total_cost, cost_per_hour")
+    .select("vintage, job_category, labor_hours::text, labor_cost::text, expense_cost::text, total_cost::text, cost_per_hour::text")
     .limit(500);
   if (vintage) query = query.eq("vintage", vintage);
   if (job_category) query = query.ilike("job_category", `%${job_category}%`);
@@ -536,11 +532,12 @@ async function getLabourSummary(supabase: any, input: Record<string, unknown>): 
   const vintagesInResult = [...new Set((data ?? []).map((r: any) => r.vintage))] as number[];
   const coverageNotes: string[] = [];
   for (const v of vintagesInResult) {
-    const { data: cov } = await supabase
+    const { data: cov, error: coverageError } = await supabase
       .from("labour_vintage_coverage")
       .select("first_month, last_month, month_count")
       .eq("vintage", v)
       .maybeSingle();
+    if (coverageError) return formatErrorForModel(coverageError);
     if (cov) {
       const span = cov.first_month === cov.last_month
         ? monthLabel(cov.first_month)
@@ -553,6 +550,6 @@ async function getLabourSummary(supabase: any, input: Record<string, unknown>): 
   }
   const note = coverageNotes.length
     ? `\n\nCoverage: ${coverageNotes.join("; ")}.`
-    : (vintage ? `\n\nNo labour records exist for ${vintage} -- not simulated, genuinely absent.` : "");
-  return { content: JSON.stringify(data) + note, isError: false };
+    : (vintage ? `\n\nNo labour records match vintage ${vintage}${job_category ? ` with job category filter "${job_category}"` : ""} -- not simulated, genuinely absent for this scope.` : "");
+  return { content: labourResult(data ?? [], { vintage: vintage ?? null, period_month: periodMonth, job_category: job_category ?? null }) + note, isError: false };
 }

@@ -2,6 +2,7 @@ import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { DomainReality, fetchDomainReality, runTool, TOOLS } from "./tools.ts";
+import { callerProfile, resolveDisplayName } from "./profile.ts";
 import { callKimi, KIMI_MODEL } from "./kimi.ts";
 
 // RAG chat for Mars Estate/Mars Telemetry. ctx.supabase is RLS-scoped to the
@@ -132,23 +133,9 @@ export default {
         return Response.json({ error: "could not resolve caller role" }, { status: 500 });
       }
 
-      // Personalization only -- not fatal if it fails, unlike role resolution above.
-      //
-      // NOTE: this bare .maybeSingle() (no explicit id filter) has the
-      // same latent multi-row risk for an admin caller that
-      // current_data_mode() below was built specifically to avoid (see
-      // that RPC's comment) -- own_profile_read narrows correctly for a
-      // non-admin, but an admin also matches admin_reads_all_profiles
-      // (no row restriction), and RLS combines permissive policies with
-      // OR. Pre-existing, unrelated to this change, and left as-is here
-      // (a speculative ctx.supabase.auth.getUser()-based fix was tried
-      // and reverted after it broke the chat response entirely in live
-      // testing -- not safe to fix under this task without further
-      // investigation into why that approach failed).
-      const { data: profile, error: profileErr } = await ctx.supabase
-        .from("user_profiles")
-        .select("first_name, last_name")
-        .maybeSingle();
+      // The auth wrapper has already verified this identity. Never use a body
+      // user id or repeat auth.getUser() on its stateless database client.
+      const { data: profile, error: profileErr } = await callerProfile(ctx.supabase, ctx.userClaims);
       if (profileErr) console.error("chat: could not resolve caller profile", profileErr);
       const displayName = resolveDisplayName(role, profile?.first_name ?? null, profile?.last_name ?? null);
       // real-only-data-mode project (2026-09-13): resolved once per
@@ -592,11 +579,6 @@ function withCacheBreakpoint(msgs: Anthropic.MessageParam[]): Anthropic.MessageP
     }
   }
   return out;
-}
-
-function resolveDisplayName(role: string, firstName: string | null, lastName: string | null): string | null {
-  if (!firstName) return null;
-  return role === "operator" ? firstName : (lastName ? `${firstName} ${lastName}` : firstName);
 }
 
 function buildSystemPrompt(role: string, displayName: string | null, dataMode: string): string {

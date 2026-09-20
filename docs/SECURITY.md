@@ -3813,3 +3813,64 @@ reviewing a Kimi labour answer should treat a stated grand total as
 needing independent verification against either the detail table it
 came with or a direct query, even when every line of that detail table
 is individually right.
+
+## 2026-09-20: labour totals, caller-scoped chat profile, and empty-month verification
+
+Started from clean `main` at `f3cd0e0570bb310fbd2fdef8e03933ffee058553`,
+confirmed remote main matches, and created `fix/labour-totals-caller-profile`.
+The Downloads handoff is historical context; the current user prompt authorizes
+these fixes and live deployment verification. No applicable AGENTS.md was found
+in the repository or its ancestor directories. No ingestion, stored data, grants,
+RLS policies, real-only gate, or schema changes are required.
+
+Investigation confirmed both labour query paths supplied only category rows,
+leaving headline arithmetic to the model. Both now return scope, record status,
+exact backend decimal totals, two-decimal display totals, and the original
+category detail plus coverage note. NUMERIC columns are cast to text by
+PostgREST before JSON encoding; scaled BigInt arithmetic preserves fractional
+cents and rounds only display values. Aggregate cost/hour divides labour cost
+by labour hours (null for zero hours), excludes expenses, and never averages
+category rates. Tool guidance shared by Kimi and Claude directs models to copy
+supplied display totals. Empty filtered scopes say which filter matched no
+records; coverage query errors remain errors rather than becoming absence.
+
+Read the prior failed/reverted auth.getUser approach and its live-failure evidence
+in this file and index.ts. The official @supabase/server 1.7.0 package's context
+and JWT verification implementation confirm `ctx.userClaims.id` comes from the
+verified JWT subject. The stateless database client is not a stored auth session;
+an additional getUser() lookup is unnecessary. Historical notes do not contain
+a stack trace proving the precise prior failure, so no stronger diagnosis is
+claimed. The new helper filters `user_profiles.id` by trusted userClaims only,
+never JSON body input, and skips the query if claims are absent. Existing name
+fallback and RLS-scoped client are retained.
+
+Live pre-deploy verification: existing test-operator admin can see 15 profiles;
+the new caller-scoped query returns only Test Operator, without PGRST116.
+Direct base-table SQL independently reconciles both view paths and category
+filters. July: 581.24 h, 29331.39 labour, 4346.092800000000316 expenses.
+August: 365.19 h, 20281.18 labour, 5531.16480000000038 expenses.
+2026 combined: 946.43 h, 49612.57 labour, 9877.257600000000696 expenses,
+59489.83 combined at two decimals; labour/hour 52.42. The tiny trailing decimals
+are already stored numeric values, not new ingestion or changed coverage.
+Historical four-decimal expense targets still reconcile. August Irrigation:
+23.68 h, 1154.14 labour, 0 expenses, 1154.14 combined, 48.74 labour/hour.
+January 2026 remains empty with vintage coverage July–August inclusive (2/12);
+June 2025 and vintage 2025 remain genuinely absent. Category counts include
+expense-only categories (August has 12 categories, not just 10 labour categories).
+
+Focused Node built-in regression tests live in `tests/chat-regressions.test.mjs`
+and import production TypeScript directly, following the existing harness's
+Node/TypeScript approach. Tests cover monthly, vintage, combined filters,
+empty month/vintage, zero hours, sub-cent rounding, negative credits, weighted
+rates, query failures, multi-profile admin, operator, and missing/null names.
+Six tests pass. Deno type-check and deployment/live chat evidence follow below;
+pre-deploy SQL and helper tests alone do not complete any live verification gap.
+
+RULE: Calculate financial totals over the exact returned query scope in decimal
+arithmetic; preserve sub-cent precision until the display boundary.
+RULE: Backend totals do not prove model compliance. Check generated headlines,
+detail rows, and combined totals independently against base-table aggregates.
+RULE: RLS visibility does not establish singular caller identity for admins;
+filter personalization by the already verified authentication context.
+RULE: Empty results are not known zero spend, and failed coverage reads are not
+proof of absence. Inspect tool calls/results as well as generated prose.

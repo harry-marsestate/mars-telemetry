@@ -3962,3 +3962,342 @@ all 62 local migration versions match remote through `20260918120000` (no pendin
 migration). No migration command that writes schema or data was run.
 Correction to the preceding count: there are **61**, not 62, migration files;
 all 61 local/remote versions match. The sync conclusion is unchanged.
+
+## ETS Labs berry-sampling ingestion (Phase 1) -- CSV investigation, the two-method-string trap, and what did/didn't verify
+
+Source: `ETSLabsReport_17798_09_20_2026.csv` (414 rows, `Data, Sample
+Description, Group #, Sample #, Sample Status, Analysis Name, Comment,
+Result, Units`), copied into `seed-data/lab_raw/`. First home for
+berry/maturity/brix-sampling data in this project -- grepped the
+migrations for `berry`, `brix`, `maturity`, `veraison`, `ripeness`,
+`sample`, `lab` before starting: confirmed green field. The one prior
+brix-bearing table, `harvest_lots`, was dropped in `20260830000007` as
+leftover mock data (see that migration's own investigation) -- not a
+prior home for this.
+
+**Encoding.** The file's embedded micro-sign bytes (`\xc2\xb5`, valid
+UTF-8 for µ) decode correctly only as `encoding="utf-8"`. Reading it as
+`latin-1` (an easy first instinct for a CSV with odd bytes) mis-decodes
+every µg unit into `Âµg` -- caught before it reached the parser by
+diffing the same byte offset under both encodings.
+
+**Embedded newlines.** Two rows (both winery-side `MA25CH`, out of scope
+this round) have multi-line quoted `Result` values (a conductivity-test
+disclaimer, a heat-stability-trial protocol). `csv.DictReader` over the
+whole file handles this correctly; a line-by-line reader would not.
+
+**Phase 1 scope: 18 lab_sample_no, 17 physical samples, 321 rows --
+asserted, not guessed.** The round's own brief estimated "roughly 274
+records" for Phase 1; summing the same brief's own per-category counts
+(8×~29 Dyostem + 4×3 + 2×15 + 2×15 + 2+15 trial-ferment) already gives
+321, and the actual parse matches that arithmetic exactly, not the 274
+headline figure. Reported as the real number rather than rounded toward
+the estimate -- the same principle as this file's other "don't match my
+guess, verify and reconcile" entries. Full CSV has 43 distinct sample
+numbers; the other 25 are winery-side wine-chemistry lots (MA22*/MA23*/
+MA24*/MA25CH/25CHMR-LF/23 Zinfandel/23 Zin 90/10/T-7 V-2) and the
+26MARCH Chardonnay must panel, deliberately excluded -- see the
+migration's header comment for why (substantial overlap with
+`lot_analyses`, needs its own row-level reconciliation round).
+
+**Sample-number date decoding**, confirmed across every one of the 43
+distinct sample numbers in the file (Phase 1 and out-of-scope alike):
+`[last digit of year][MM][DD][4-digit seq][optional reissue letter]`
+encodes the LAB RECEIPT date. `609150514` -> 2026-09-15, `310180098` ->
+2023-10-18, `402070908` (out-of-scope MA22CSV2) -> 2024-02-07 -- all
+three checked directly against that row's own `Date` column context
+before trusting the rule. `collected_on` uses this decoded date
+(`collected_on_source='inferred_from_receipt'`) except for the two
+sample pairs whose own description embeds an explicit collection date
+(`collected_on_source='description'`) -- `Mars Blk 2/3 08/25/26
+(berries)` and `MRS 2/3 9/6/24`. The 2024 pair is the one case in Phase 1
+where the two genuinely differ: collected 2024-09-06, received
+2024-09-07 (`409070336`/`409070337`).
+
+**Block mapping: 14 distinct berry-sample descriptions, one explicit
+dict, asserted complete.** Five spellings of "block 2" alone appear
+across four years (`MARS 2`, `Mars 2`, `MARS2`, `Mars Blk 2`, `Mars, blk:
+2`, `MRS 2`, `Mars Estate Blk: 2` -- seven, not five, once all Phase-1
+descriptions are counted). `parse.py`'s `DESCRIPTION_BLOCK` is the sole
+mechanism (not a regex fallback) and `parse()` raises if any Phase-1
+description isn't a key in it. `BUCKET FERMENT` (the trial micro-ferment,
+2025-11-11) names no block and none is inferred -- stored `block_id
+IS NULL` rather than guessed as B2 or B3. Flagged for the owner: which
+block(s) fed this ferment, or whether it was a blend, is unknown from the
+source data alone.
+
+**Reissue handling.** `511110861` (2025-11-11, group 2250681, 2 rows:
+4-methylguaiacol 3.9 µg/L, guaiacol 9.4 µg/L) and `511110861A` (same
+date, group 2251416, 15 rows including those same two values,
+byte-identical) are one physical bucket-ferment sample with a re-issued,
+expanded lab report -- not two samples. Both ingested losslessly into
+`lab_samples`/`lab_results` (`lab_samples.reissue_of` self-references the
+base `lab_sample_no`); `berry_maturity_by_block` filters to `reissue_of
+IS NULL` so a consumer never double-counts. Detection rule: a trailing
+letter suffix on an otherwise-numeric sample number (`base_sample_no()`
+in `parse.py`). Confirmed no other Phase-1 or out-of-scope sample number
+matches this shape except the one pair. Group `2322163R` (Dyostem
+samples `608250190`/`608250191`) carries an `R` suffix on the GROUP
+number instead -- no dedup needed there since the two samples' own
+numbers are distinct; `lab_group_no` is stored as raw text with no
+parsing applied to it.
+
+**The two-method-string trap.** ETS reports the same nine free volatile
+phenols (4-methylguaiacol, 4-methylsyringol, guaiacol, m-cresol,
+o-cresol, p-cresol, phenol, syringol, cresols (sum)) under two different
+`Analysis Name` conventions depending on which lab batch ran them: `"X
+(GC/MS)"` for the 2025-08 berry-mass-basis samples (µg/kg) and `"X GC
+MS/MS"` for the 2025-09 fruit/juice-basis and bucket-ferment samples
+(µg/L). A normalizer that doesn't specifically strip both suffixes treats
+these as eighteen distinct analytes instead of nine.
+`analysis_code_for()` strips either suffix to the same `analysis_code`
+(e.g. `guaiacol`) while `analysis_name_raw` and `units` preserve the
+original string and mass-vs-liquid basis untouched -- µg/kg and µg/L are
+never converted into each other, matching this project's standing rule
+(cf. Open-Meteo/irrigation unit-preservation entries) that unlike units
+never get silently unified.
+
+**Censored (detection-limit) values.** 22 of the 161 Phase-1
+`lab_results` rows are `< 0.5`/`< 1.0`/`< 1.5`/`< 2.0`/`< 5.0` style,
+concentrated in the two 2025 smoke-screen samples' phenol panels.
+`result_operator`/`result_numeric`/`result_raw` store the comparison, the
+limit, and the original string separately -- none silently coerced to a
+bare number or to null.
+
+**Dyostem berry-volume histogram: 8 samples × 20 bins = 160 rows,
+verified bin-for-bin.** `berry_count` sums: 608250190=100, 608250191=103,
+609010427=97, 609010428=98, 609080462=100, 609080463=98, 609150514=100,
+609150515=99. Six of eight land in the 97-100 range this round's brief
+expected; `608250191` (Mars Blk 3, 2026-08-25) sums to 103. Investigated
+before accepting, not rounded past: pulled all 20 raw CSV rows for that
+sample directly, confirmed all 20 bins present exactly once each, no
+duplicate or extra bin rows, values summing to 103 in the source file
+itself. This is ETS's own reported count for that sample, not a parsing
+artifact -- Dyostem sample size varies in practice and 100 is a typical
+target, not a hard constraint. Recorded here rather than silently
+matching the expected range.
+
+**`berry_maturity_by_block` returns 12 rows, not the round's own guessed
+14.** The view is one row per (`block_id`, `collected_on`) over
+`sample_type='berry_maturity'` samples only: 6 distinct `collected_on`
+dates (2023-10-18, 2024-09-06, 2026-08-25, 2026-09-01, 2026-09-08,
+2026-09-15) × 2 blocks = 12. The brief's "7 dates" framing (implicitly
+including the two 2025 `berry_smoke` collection dates and/or the
+2025-11-11 `trial_ferment` date) doesn't correspond to any actual
+`berry_maturity`-typed sample date -- those three sample types never
+share a `collected_on`. Verified live against the deployed view, not
+assumed from the row-count arithmetic alone.
+
+**`domain_reality()` verified live**, post-backfill, for the new
+`berry_sampling` Tier-3 clause: `is_real` = false for 2022, true for
+2023/2024/2025/2026 -- matches `lab_samples.vintage` coverage exactly.
+Not registered in `real_data_sources`: that table only gates
+`series_bucketed()`/`sensor_readings`-backed metrics (confirmed against
+`20260826000001`'s own scope), which `lab_samples`/`lab_results` never
+flow through -- this follows the `harvest_receipts`/`labour`
+existence-based Tier-3 pattern instead.
+
+**RLS verified adversarially, using the `SET LOCAL`-in-a-transaction
+pattern this file's own "Adversarial `set role` leaks across the
+transaction pooler" entry requires** (never a bare `SET ROLE` against the
+pooled `DATABASE_URL`): as plain `authenticated` with no operator claim,
+`lab_samples`/`lab_results`/`berry_volume_histogram`/
+`berry_maturity_by_block` all return 0 rows; impersonating a real
+`user_profiles` operator row (`set_config('request.jwt.claim.sub',
+<uuid>, true)` inside the same transaction) returns the full live counts
+(18/161/160/12). `select current_user` confirmed `postgres` again
+immediately after each rollback -- no leaked role carried forward onto
+the pooled connection.
+
+**Separate issue noticed, not part of this round's write path:
+`block_lots` (varietal per block) has RLS enabled with zero policies
+AND no `SELECT` grant to `authenticated`/`anon`/`service_role` at all**
+(only the table owner can read it) -- confirmed live via
+`pg_policies`/`information_schema.role_table_grants`. Not touched by
+this round (blocks 2 and 3 are both 100% Cabernet Sauvignon per the
+prior reconciliation investigation, so varietal carries no information
+for this dataset either way, and `block_lots` is deliberately not joined
+anywhere in `ets_labs/`). Flagged for a future fix, not fixed here --
+this round's scope is additive (three new tables, one view, one
+`domain_reality()` clause) and doesn't touch `block_lots`'s own grants/
+policies.
+
+**What did NOT get independently verified**: whether ETS's own
+`collected_on`-vs-`received_on` convention generalizes beyond this
+dataset's one differing pair (409070336/409070337) -- only one example
+exists to check against. Whether 511110861/511110861A is truly the only
+reissue pattern ETS ever produces, versus just the only one in this
+file, is likewise unverified beyond "grep the other 42 sample numbers for
+the same shape, find none."
+
+## ETS Labs berry-sampling ingestion -- idempotency demonstrated, and a real duplication bug in the reissue guard (fixed, not just documented)
+
+Two gaps flagged in review before merge: idempotency was asserted, not
+shown; and the reissue guard, on inspection, turned out to protect
+nothing. Both closed on `feat/ets-berry-ingestion` before merge, same
+branch.
+
+**Idempotency, demonstrated.** Snapshotted live state before a second
+backfill run: 18/161/160 rows (`lab_samples`/`lab_results`/
+`berry_volume_histogram`), every `lab_samples.ingested_at` recorded
+individually, and an `md5(string_agg(id || ':' || ingested_at, ',' order
+by id))` hash over all of `lab_results`. Re-ran `poetry run python -m
+ets_labs.backfill` against the same live database (not a fresh one).
+After: counts unchanged (18/161/160), the 18 `lab_samples.ingested_at`
+values diffed byte-for-byte identical against the snapshot, and the
+`lab_results` hash matched exactly. Both tables' `ingested_at` columns
+are correctly excluded from the `ON CONFLICT DO UPDATE SET` clauses in
+`db.py` (they were never in `_SAMPLE_COLUMNS`/`_RESULT_COLUMNS` to begin
+with) -- confirmed by outcome, not just by reading that code.
+`berry_volume_histogram` has no `ingested_at` column at all, so this
+check doesn't apply to it (only `id`/`sample_id`/`bin_ml`/`berry_count`/
+`analyzed_at`).
+
+**Conflict-key uniqueness, checked against the source data, not
+assumed.** `lab_results`' upsert key is `(sample_id, analysis_name_raw,
+analyzed_at)`. Ran the equivalent of `GROUP BY (lab_sample_no,
+analysis_name_raw, analyzed_at) HAVING count(*) > 1` over all 161 parsed
+Phase-1 result rows in Python (`Counter` over the same tuples the upsert
+keys on, before `lab_sample_no` resolves to `sample_id` -- a 1:1 mapping
+via `lab_samples.lab_sample_no`'s own unique constraint, so this is
+equivalent to checking the real key): 161 distinct keys for 161 rows,
+zero duplicates. Had this come back non-empty, it would have meant the
+upsert was silently collapsing genuinely distinct results into one row
+-- it doesn't, but this was verified rather than inferred from "the
+schema has a unique constraint, so it must be fine."
+
+**The reissue guard protected nothing -- confirmed live before fixing
+it.** `berry_maturity_by_block`'s `s.reissue_of is null` filter is
+scoped to `sample_type = 'berry_maturity'`, but the only sample this
+round that has ever been reissued (`511110861` -> `511110861A`) is
+`sample_type = 'trial_ferment'` -- a type that view never reads. Queried
+`lab_results` directly for the bucket ferment's `guaiacol`/
+`4_methylguaiacol` before making any fix: both values came back TWICE,
+once from each of the two samples, byte-identical (`3.9` / `9.4`, same
+`analyzed_at`) -- 17 raw rows total for a sample whose current report
+only has 15 lines. Real duplication, reachable by any direct query of
+`lab_results`, not a hypothetical.
+
+**Worth stating plainly, not just noting the coverage gap: the guard's
+own logic was backwards, and only ever avoided being wrong by
+coincidence.** `reissue_of is null` is true for `511110861` (an
+ORIGINAL sample -- it isn't itself a reissue of anything) and false for
+`511110861A` (which IS a reissue). Had a berry_maturity sample ever been
+reissued, that filter would have kept the SUPERSEDED base and dropped
+the CURRENT reissue -- the exact opposite of "filter to the current
+version" that the original migration's own comment claimed it did. It
+happened to be harmless in Phase 1 purely because no `berry_maturity`
+sample has ever been reissued, not because the logic was right.
+
+**The fix (`20260920130000_lab_results_current.sql`): a `lab_results_current`
+view, covering all `sample_type`s, using the inverse (correct) condition
+-- a sample is current unless some other sample's `reissue_of` names it:**
+
+```sql
+create view lab_results_current as
+select r.*
+from lab_results r
+join lab_samples s on s.id = r.sample_id
+where not exists (
+  select 1 from lab_samples newer where newer.reissue_of = s.lab_sample_no
+);
+```
+
+This is now the documented read surface for `lab_results` -- consumers
+should query `lab_results_current`, not `lab_results` directly, unless
+they specifically need the lossless raw table (e.g. an audit of what ETS
+actually reported, reissues included). `berry_maturity_by_block` was
+redefined to join `lab_results_current` and dropped its own now-redundant
+`reissue_of is null` clause -- correct by construction rather than by
+the coincidence noted above. Observably unchanged for that view this
+round (still 12 rows: still no `berry_maturity` reissue exists), but no
+longer silently wrong-by-luck if one appears later.
+
+**Verified live, post-fix:** `lab_results_current` for the bucket ferment
+returns exactly `511110861A`'s 15 rows (base sample `511110861`'s 2 rows
+excluded); `guaiacol`/`4_methylguaiacol` each appear once, not twice.
+Overall totals: `lab_results` stays lossless at 161 (unchanged -- the fix
+adds a view, it doesn't touch the base table), `lab_results_current`
+returns 159 (161 minus the 2 superseded-base rows). `berry_maturity_by_block`
+still returns 12 rows, confirming the redefinition didn't change its
+observable output. RLS re-verified on the new view with the same
+`SET LOCAL`-in-a-transaction adversarial pattern as the rest of this
+round: 0 rows unauthenticated, 159 rows impersonating a real operator,
+`current_user` confirmed `postgres` again after each rollback -- no
+leaked role.
+
+## ETS Labs berry-sampling ingestion -- the same reissue gap, extended to lab_samples and berry_volume_histogram
+
+`lab_results_current`'s fix was correct but incomplete: it closed the
+duplication exposure for `lab_results`, but `lab_samples` and
+`berry_volume_histogram` have the exact same shape and were left
+covered by nothing. Decision: **extend the pattern, not document an
+exception.** The reasoning against leaving it stands on this file's own
+words from the previous entry -- the old `berry_maturity_by_block`
+filter was "harmless by coincidence, not because the logic was right."
+Declaring `berry_volume_histogram`/`lab_samples` out of scope on the
+theory that a Dyostem sample "probably won't" be reissued would be the
+identical bet that already lost once this round (nothing about
+`berry_maturity`'s samples suggested a reissue was likely either, and
+one still turned up, just on a different sample_type than the guard
+covered). Two more views is cheap; a second live duplication bug
+discovered after merge is not.
+
+**The exposure, concretely, before this fix:**
+- `lab_samples`: `SELECT COUNT(*)` returns 18 where 17 physical samples
+  exist -- `511110861` and its reissue `511110861A` both count.
+- `berry_volume_histogram`: not live-observable today (no Dyostem sample
+  has been reissued -- confirmed: all 8 have `reissue_of is null` and
+  none is named by another sample's `reissue_of`), but structurally
+  identical to the bug that WAS live for `lab_results`. If a Dyostem
+  sample is ever reissued, its 20 bins would exist twice (one set per
+  sample version) and a plain read would return 40 bins with every
+  `berry_count` sum doubled -- the same failure shape, one table over,
+  just not yet triggered by data that happens not to exist yet.
+
+**The fix (`20260920140000_lab_samples_current.sql`): `lab_samples_current`
+as the single source of truth for "current," everything else joins
+through it rather than repeating the condition.**
+
+```sql
+create view lab_samples_current as
+select s.*
+from lab_samples s
+where not exists (
+  select 1 from lab_samples newer where newer.reissue_of = s.lab_sample_no
+);
+```
+
+`lab_results_current` was refactored (`create or replace`, same output
+columns, same 159 rows) to join `lab_samples_current` instead of
+repeating the `NOT EXISTS` inline -- one definition of "current," not
+three copies that could drift. `berry_volume_histogram_current` is new,
+same join shape. `berry_maturity_by_block` now sources
+`block_id`/`collected_on`/`vintage` from `lab_samples_current` rather
+than `lab_samples` directly, on top of already reading
+`lab_results_current` -- belt and suspenders, not load-bearing on its
+own, since `lab_results_current` alone already excludes superseded rows.
+
+**The three `*_current` views (`lab_samples_current`, `lab_results_current`,
+`berry_volume_histogram_current`) are now, together, the documented read
+surface** for this ingestion -- a consumer should reach for the `_current`
+view unless it specifically needs the raw reissue history (an audit of
+what ETS actually reported, superseded versions included), in which case
+the base table is still there, lossless.
+
+**Verified live:**
+- `lab_samples`: 18 raw / **17** via `lab_samples_current` -- the excluded
+  row is `511110861` (the superseded base), confirmed by name.
+- `berry_volume_histogram`: 160 raw / **160** via
+  `berry_volume_histogram_current` -- correct no-op today, matching "not
+  live-observable yet" above; the view exists and is correct, it simply
+  has nothing to exclude until a Dyostem sample is reissued.
+- `lab_results_current` unchanged at 159 after the refactor (same rows,
+  now reached via the shared `lab_samples_current` join instead of a
+  duplicated condition).
+- `berry_maturity_by_block` unchanged at 12.
+- RLS re-verified with the same `SET LOCAL`-in-a-transaction adversarial
+  pattern as every other object this round: `lab_samples_current` and
+  `berry_volume_histogram_current` both return 0 rows unauthenticated,
+  17 and 160 respectively impersonating a real operator row, and
+  `current_user` confirmed `postgres` again after each rollback.

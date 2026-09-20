@@ -5026,3 +5026,44 @@ panel (pH 4.22, TA 5.4, VA 0.73, free SO2 25, total SO2 67) -- all
 exact. The model also correctly noted coverage stops at July 2024 with
 nothing on file after -- true, and precisely the kind of claim this
 round's fix exists to make reliable rather than inferred.
+
+## block_lots: both RLS gates fixed, mirroring blocks exactly
+
+`block_lots` (varietal per block -- B1's Cab Franc/Cab Sauvignon/Petit
+Verdot split, B2/B3 as 100% Cabernet Sauvignon) had RLS enabled with
+ZERO policies AND no `SELECT` grant to any non-owner role, confirmed
+live (`information_schema.role_table_grants` had no `SELECT` row for
+`authenticated`/`anon`/`service_role`; `pg_policies` had zero rows for
+this table) -- flagged as a separate issue during the earlier ETS
+berry-ingestion reconciliation, fixed now. Both gates had failed since
+the table's creation in the very first schema migration
+(`20260805221617_core_schema.sql`); invisible to the dashboard, chat,
+and every real account the whole time, silently (a join against it
+returns zero rows, not an error -- exactly why nothing surfaced this
+sooner).
+
+**Fix mirrors `blocks`' own grant+policy exactly**, not a new or
+tighter shape -- confirmed live before choosing this: `blocks` grants
+`SELECT` to `authenticated` (no `anon` grant either) and has one open
+`using (true)` read policy, already visible to customers as well as
+operators. No reason found to restrict varietal-per-block beyond
+block-geometry's own openness -- both are the same reference-data
+character, nothing customer-sensitive in either.
+
+```sql
+grant select on block_lots to authenticated;
+create policy block_lots_read on block_lots for select using (true);
+```
+
+**Verified adversarially, `SET LOCAL`-in-a-transaction, all three
+cases:**
+- Plain `authenticated` (no operator claim, i.e. customer-equivalent):
+  5 of 5 rows -- confirms customer visibility matches `blocks`.
+- `authenticated` impersonating a real operator
+  (`request.jwt.claim.sub` set to a real `user_profiles` operator row):
+  5 of 5 rows, `current_role_name()` confirmed `operator`.
+- `anon`: correctly DENIED (`permission denied for table block_lots`)
+  -- no grant, matching `blocks`' own convention (no `anon` `SELECT`
+  grant there either).
+`current_user` confirmed `postgres` again after each rollback -- no
+leaked role.

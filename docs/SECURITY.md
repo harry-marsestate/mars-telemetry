@@ -4301,3 +4301,159 @@ the base table is still there, lossless.
   `berry_volume_histogram_current` both return 0 rows unauthenticated,
   17 and 160 respectively impersonating a real operator row, and
   `current_user` confirmed `postgres` again after each rollback.
+
+## Phase 1B: berry data surfaced in chat (get_berry_maturity/get_smoke_markers) -- deploy verification and a live Kimi K3 re-ask, numbers checked
+
+Chat-tool-only round (`feat/berry-chat-tools`, off the freshly merged
+`main`) -- no dashboard/`web/index.html` changes, per explicit scope.
+Two tools added to `supabase/functions/chat/tools.ts`: `get_berry_maturity`
+(reads `berry_maturity_by_block`) and `get_smoke_markers` (reads
+`lab_results_current` filtered to the nine free volatile phenols and six
+glycosylated markers). Both read ONLY the `*_current` views -- never
+`lab_samples`/`lab_results` directly, so the chat surface can't
+reintroduce the exact duplication bug the two previous entries fixed.
+Both are gated operator-only purely by each view's own RLS
+(`security_invoker` + operator-only policy), no application-level check,
+matching `get_lot_analyses`/`get_vessels`/`get_labour_summary`. Neither is
+gated by real-only mode -- same choice and reasoning as
+`get_labour_summary`: no simulated counterpart has ever existed for this
+data (`domain_reality()`'s `berry_sampling` clause is existence-based
+against `lab_samples` itself, nothing to distinguish real from simulated
+here). Coverage notes always describe all five known vintages regardless
+of the call's own filters, spelled out in words via a new `dayLabel()`
+helper (`"August 25, 2026"`, never a bare ISO string) -- the exact failure
+shape that made both Kimi and Sonnet 5 misread the labour coverage range
+during the August round. Deliberately does NOT expose the 20-bin Dyostem
+histogram -- noted as a deliberate omission in `get_berry_maturity`'s own
+tool description, not left looking like missing data.
+
+**TypeScript verified without deno.** No `deno` binary in this
+environment; used `npx -y -p typescript tsc --noEmit` instead (installed
+fresh, confirmed via `tsc --version`) against both changed files. Zero
+`TS1xxx` (genuine syntax) errors on either file -- only expected
+module-resolution errors for the Deno-style `.ts`-extension and
+`@anthropic-ai/sdk` imports (`TS5097`/`TS2307`), which a Deno runtime
+resolves and `tsc` alone cannot. Brace/paren/bracket/backtick counts in
+the edited file were also confirmed balanced before this. The
+coverage-note logic itself (which vintages get which message, exact
+figures) was hand-traced against a live pull of `berry_maturity_by_block`
+and `lab_samples_current` before deploy, not just read for plausibility --
+confirmed it would correctly produce the 2023/2024 "three-analyte panel"
+note, the 2025 "smoke screening only" note for `get_berry_maturity`, and
+the exact per-block/per-date smoke-sample listing for `get_smoke_markers`.
+
+**Deploy verification, same discipline as every other object this
+round.** `supabase functions deploy chat --use-api` is gated in this
+environment (requires the owner's own shell) -- prepared and committed
+the code first (`481fe10`), then asked the owner to run it. First
+download-and-diff (before the owner's deploy had actually run) correctly
+caught that the live function was still the OLD code -- the two-step
+"push schema, deploy function separately" trap this project's own prior
+round (`Real-labour-ingestion, round 2`) already documented, confirmed
+again rather than assumed fixed. After the owner ran the deploy command
+(stdout captured: six assets uploaded, `"message":"Deployed Functions."`),
+downloaded again into an isolated `--workdir` (never the working tree
+directly, so a stale download can't silently clobber committed source)
+and diffed: `tools.ts` and `index.ts` byte-for-byte identical to the
+committed source, and the three untouched files
+(`deno.json`/`kimi.ts`/`labour-totals.ts`/`profile.ts`) also confirmed
+identical -- proving the deploy carried exactly this round's diff and
+nothing else.
+
+**Live Kimi K3 re-ask, via the real app, not a minted session.** Calling
+the deployed `chat` endpoint directly requires a real authenticated user
+JWT (`withSupabase({auth:["user"]})`). Attempted the service-role
+`admin/generate_link` route for the project's own
+`test-operator@marsestates.com` throwaway account first (same account
+prior rounds used) -- blocked by this environment's own permission
+classifier (`Credential Materialization`), correctly, and not routed
+around. Used the same substitute a prior round already established
+instead: `telemetry.marsestates.com` already had a live, authenticated
+"Demo" operator session in the browser (Claude in Chrome) -- switched the
+existing UI's model dropdown to Kimi K3 (`document.getElementById(
+'chatModelSelect')`, native setter + `change` event, since it's a plain
+`<select>`) and asked the exact question specified: *"How did brix
+progress across our 2026 berry samples, and what did the 2025 smoke
+testing show?"*
+
+Verbatim response (provider badge read directly off the rendered page:
+`MARS TELEMETRY · KIMI K3`):
+
+> Answer first: 2026 ripening was steady and healthy -- both blocks
+> climbed from ~22-23° Brix in late August to ~24.5-24.8 by mid-September
+> with acids holding well (pH ≤ 3.43, TA ~7). The 2025 smoke screening
+> showed meaningful glycosylated marker loads at the berry level in late
+> August (e.g. syringol gentiobioside 23-27 µg/kg) but very low free
+> volatile phenols in the September juice samples -- while the November
+> trial bucket ferment showed elevated free markers (guaiacol 9.4 µg/L,
+> phenol 16.7 µg/L), consistent with bound glycosides releasing during
+> fermentation.
+>
+> **The detail -- 2026 brix progression (4 collection dates, both
+> blocks):** [table: Aug 25 23.0/22.1, Sep 1 23.6/22.5, Sep 8 23.9/23.4,
+> Sep 15 24.8/24.5 (B2/B3)]. B2 was the riper block throughout, leading
+> B3 by ~0.9° early; the gap closed to 0.3° by Sep 15 as B3 ripened
+> faster late (+2.4 over the window vs B2's +1.8). Sugars came with sound
+> chemistry: by Sep 15, pH 3.37 (B2) / 3.43 (B3), TA 7.5 / 7.0, malic
+> down to ~2.3 in both. Berry weight dropped from ~1.17-1.20 g to 1.04 g
+> in the final week with sugar per berry flat-to-down (237→200 mg B2,
+> 203→190 mg B3) -- that last brix jump was partly dehydration/
+> concentration, not pure sugar accumulation. Volume variability rose
+> into the low 30s (%), normal late-season heterogeneity.
+>
+> **The detail -- 2025 smoke testing:** Aug 26 berries (µg/kg): free
+> volatiles mostly at/below detection limits (guaiacol 0.5-0.9, most
+> others '<'), but glycosylated markers present -- syringol gentiobioside
+> 27 (B2) / 23 (B3), cresol rutinoside ~10-11. Sep 18 juice (µg/L): B2
+> guaiacol 3.6, cresols sum 4.0, phenol 3.9; B3 slightly lower (3.2 / 3.7
+> / 3.2). Free 4-methylguaiacol, syringol, p-cresol all below limits.
+> Nov 11 bucket ferment (µg/L): free guaiacol 9.4, phenol 16.7, cresols
+> sum 15.8, syringol 6.4, plus large glycosylated residuals (syringol
+> gentiobioside 64.7). Fermentation hydrolysis clearly liberated bound
+> phenols -- free guaiacol roughly tripled the juice-basis numbers.
+>
+> Takeaways: the 2025 data is the classic smoke-exposure signature --
+> clean-looking free phenols in juice, real risk revealed only after
+> fermentation. For 2026, the maturity curve suggests harvest windows in
+> mid-to-late September with well-retained acidity for the mountain
+> site; the ripening-uniformity trend (variability climbing to ~30-32%)
+> is worth watching for sorting decisions.
+
+**Every cited figure checked against a fresh, independent live SQL
+query (not re-derived from the tool's own output) -- all matched
+exactly:** the full four-date brix/pH/TA/malic/berry-weight/sugar-per-
+berry/volume-variability table for both blocks; the Aug 26 2025
+guaiacol (0.9 B2 / 0.5 B3), syringol gentiobioside (27.0 B2 / 23.0 B3),
+and cresol rutinoside (10.2 B2 / 11.3 B3) figures; the Sep 18 2025
+guaiacol/cresols-sum/phenol triplet for both blocks (3.6/4.0/3.9 B2,
+3.2/3.7/3.2 B3); and the Nov 11 bucket-ferment guaiacol/phenol/
+cresols-sum/syringol/syringol-gentiobioside figures (9.4/16.7/15.8/6.4/
+64.7). No figure in the response was unverifiable or wrong.
+
+**Detection-limit handling verified correct, the specific thing this
+round required checking.** `508260304`'s (B3, Aug 26) `cresols_sum` is
+stored `result_operator='<'`, `result_numeric=1.5` -- a genuinely
+censored value. The model never reported it, or any other censored
+value, as a bare number: it grouped them qualitatively ("most others
+'<'", "all below limits") and only ever cited plain numbers for rows
+that are genuinely `result_operator='='` (guaiacol 0.9/0.5, syringol
+gentiobioside 27.0/23.0, etc, all confirmed `=` live). This is the
+correct behavior the tool description asks for, observed in the actual
+model output, not just implied by the schema.
+
+**What this does NOT prove.** The raw SSE tool-call arguments
+(`get_berry_maturity`/`get_smoke_markers` invocations with their exact
+`vintage`/`block_id` inputs) were not captured -- `read_network_requests`
+only tracks requests made after it is first called on a tab, and this
+was a single deliberate re-ask (the round's own instruction), not
+re-run a second time just to capture that log. The evidence instead is
+indirect but strong: ~20 independently-verified figures across two
+tools, two vintages, and both censored and uncensored results, all
+exact -- not plausible from a wrong tool call or a hallucinated table.
+Claude/Sonnet 5 was not exercised live on this exact question (Kimi was
+requested and succeeded on the first attempt, so the documented fallback
+was never needed). Only this one question was asked; other filter
+combinations (e.g. a single-vintage `get_berry_maturity(vintage=2022)`
+call, which should return the "genuinely absent" message) are
+unverified live, though the coverage-note logic was hand-traced against
+live data before deploy (see above).

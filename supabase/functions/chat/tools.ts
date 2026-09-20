@@ -684,6 +684,16 @@ async function getBerryMaturity(supabase: any, input: Record<string, unknown>): 
 // The nine free volatile phenols (both ETS method-string variants
 // normalize to these codes -- see ingestion/ets_labs/parse.py's
 // analysis_code_for()) plus the six glycosylated conjugate markers.
+//
+// Verified exhaustively against the live database (2026-09-20), not just
+// against the questions a re-ask happened to cite: `select distinct
+// analysis_code from lab_results_current` returns exactly 24 codes --
+// these 15 plus the 9 non-smoke maturity-panel codes get_berry_maturity
+// already covers (brix, ph, titratable_acidity, l_malic_acid,
+// glucose_fructose, berry_weight, berry_volume,
+// berry_volume_variability, sugar_per_berry_by_volume). All 15 literals
+// below match a live code exactly; none is a typo that would silently
+// and permanently drop an analyte from this tool.
 const SMOKE_ANALYSIS_CODES = [
   "guaiacol", "4_methylguaiacol", "4_methylsyringol", "m_cresol", "o_cresol", "p_cresol",
   "phenol", "syringol", "cresols_sum",

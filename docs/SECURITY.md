@@ -4457,3 +4457,20 @@ combinations (e.g. a single-vintage `get_berry_maturity(vintage=2022)`
 call, which should return the "genuinely absent" message) are
 unverified live, though the coverage-note logic was hand-traced against
 live data before deploy (see above).
+
+**Follow-up: `SMOKE_ANALYSIS_CODES` verified exhaustively, not just via
+the re-ask.** The live Kimi re-ask above only exercises whichever
+analytes the model happened to cite (8 of 15) -- not proof the other 7
+literals are typo-free, since a wrong string there fails silently
+(`.in("analysis_code", ...)` just returns fewer rows, no error). Ran
+`select distinct analysis_code from lab_results_current order by 1`
+directly: 24 codes total. All 15 `SMOKE_ANALYSIS_CODES` literals
+(`guaiacol`, `4_methylguaiacol`, `4_methylsyringol`, `m_cresol`,
+`o_cresol`, `p_cresol`, `phenol`, `syringol`, `cresols_sum`, and the six
+`smoke_glycosylated_markers_lcms_ms_qqq_*` rutinoside/gentiobioside
+codes) matched a live code exactly -- zero typos, zero silent gaps. The
+remaining 9 live codes (`brix`, `ph`, `titratable_acidity`,
+`l_malic_acid`, `glucose_fructose`, `berry_weight`, `berry_volume`,
+`berry_volume_variability`, `sugar_per_berry_by_volume`) are exactly
+`get_berry_maturity`'s own analytes -- 15 + 9 = 24, with nothing left
+uncovered by either tool.

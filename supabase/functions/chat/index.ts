@@ -471,6 +471,8 @@ const TOOL_LABELS: Record<string, string> = {
   get_lot_analyses: "lab analyses",
   get_vessels: "tank inventory",
   get_labour_summary: "labour records",
+  get_berry_maturity: "berry maturity data",
+  get_smoke_markers: "smoke-taint markers",
 };
 const METRIC_LABELS: Record<string, string> = {
   air_temp: "air temperature",
@@ -607,7 +609,7 @@ You only ever know what your tools return. If a tool returns no data for a quest
     ? `This user is an operator (team member).${nameNote} Be direct and technical. Lead with the data -- figures, comparisons, specific numbers -- before commentary; don't preface with pleasantries. Assume vineyard/winery domain fluency: don't explain what GDD or VPD are unless asked. Offer a proactive next step when relevant (e.g. "want me to compare this to last vintage?"), but keep it to one line.`
     : `This user is a customer (an Obsidian Member).${nameNote} Write the way a knowledgeable host at the estate would speak to a valued guest -- warm, genuine, and precise, never corporate or over-eager. Lead every answer with a short, plain-language explanation of what the data means for their wine or their block; don't open with a wall of numbers or a bulleted data dump. Mention specific figures in service of that explanation, and offer to go deeper ("I can pull the exact soil moisture readings if you'd like") rather than front-loading them. If a term needs it, gloss it briefly in the same sentence ("GDD -- the heat the vines have banked this season -- is running..."), not as a separate definition. Avoid generic luxury-marketing language (no "exquisite," "indulge," "unparalleled," "crafted") -- the tone should read as genuinely knowledgeable, not like ad copy. If something isn't available at their access level, say so warmly and redirect rather than stating it as a bare restriction (e.g. "That's something our team tracks internally -- happy to walk through your block's conditions or this vintage's story instead" rather than "That data is only available to operator accounts").`;
 
-  const accessNote = `\n\nTools backed by RLS policies enforce access automatically -- get_lot_analyses, get_vessels, and get_labour_summary are operator-only and will return zero rows for a customer or pending user. Don't call an operator-only tool for a non-operator and then act surprised by the empty result -- you already know their role from this prompt.`;
+  const accessNote = `\n\nTools backed by RLS policies enforce access automatically -- get_lot_analyses, get_vessels, get_labour_summary, get_berry_maturity, and get_smoke_markers are operator-only and will return zero rows for a customer or pending user. Don't call an operator-only tool for a non-operator and then act surprised by the empty result -- you already know their role from this prompt.`;
 
   // real-only-data-mode project (2026-09-13). Only added when it applies
   // -- the existing "you only know what your tools return, say so
@@ -617,7 +619,7 @@ You only ever know what your tools return. If a tool returns no data for a quest
   // data without this: without this note the model has no way to know
   // that shape carries an explicit reason, not just an absence.
   const realOnlyNote = dataMode === "real_only"
-    ? `\n\nThis account is set to real-data-only mode. Any tool result containing "real_only_mode_blocked": true means the data exists but is simulated, not real, and has been withheld because of this account's setting -- read its "message" field and explain that plainly (e.g. "cellar humidity is simulated data, and this account is set to show only real data, so I can't report a figure there"). Never describe that as "no data exists" or as an error -- it's neither. Note get_labour_summary never returns this shape (real-labour-ingestion project, 2026-09-14): labour has no simulated data left to withhold, so a vintage with no rows (2022, 2025) is a genuine, real absence -- describe it the normal "no data" way, not as real-only-mode withholding.`
+    ? `\n\nThis account is set to real-data-only mode. Any tool result containing "real_only_mode_blocked": true means the data exists but is simulated, not real, and has been withheld because of this account's setting -- read its "message" field and explain that plainly (e.g. "cellar humidity is simulated data, and this account is set to show only real data, so I can't report a figure there"). Never describe that as "no data exists" or as an error -- it's neither. Note get_labour_summary, get_berry_maturity, and get_smoke_markers never return this shape: none of these three have any simulated data left (or ever existing) to withhold, so a vintage with no rows (e.g. 2022 for labour; 2022 for berry maturity/smoke markers) is a genuine, real absence -- describe it the normal "no data" way, not as real-only-mode withholding.`
     : "";
 
   return `${shared}\n\n${toneBlock}${accessNote}${realOnlyNote}`;

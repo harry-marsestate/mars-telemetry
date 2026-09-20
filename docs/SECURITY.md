@@ -3980,3 +3980,99 @@ exists to check against. Whether 511110861/511110861A is truly the only
 reissue pattern ETS ever produces, versus just the only one in this
 file, is likewise unverified beyond "grep the other 42 sample numbers for
 the same shape, find none."
+
+## ETS Labs berry-sampling ingestion -- idempotency demonstrated, and a real duplication bug in the reissue guard (fixed, not just documented)
+
+Two gaps flagged in review before merge: idempotency was asserted, not
+shown; and the reissue guard, on inspection, turned out to protect
+nothing. Both closed on `feat/ets-berry-ingestion` before merge, same
+branch.
+
+**Idempotency, demonstrated.** Snapshotted live state before a second
+backfill run: 18/161/160 rows (`lab_samples`/`lab_results`/
+`berry_volume_histogram`), every `lab_samples.ingested_at` recorded
+individually, and an `md5(string_agg(id || ':' || ingested_at, ',' order
+by id))` hash over all of `lab_results`. Re-ran `poetry run python -m
+ets_labs.backfill` against the same live database (not a fresh one).
+After: counts unchanged (18/161/160), the 18 `lab_samples.ingested_at`
+values diffed byte-for-byte identical against the snapshot, and the
+`lab_results` hash matched exactly. Both tables' `ingested_at` columns
+are correctly excluded from the `ON CONFLICT DO UPDATE SET` clauses in
+`db.py` (they were never in `_SAMPLE_COLUMNS`/`_RESULT_COLUMNS` to begin
+with) -- confirmed by outcome, not just by reading that code.
+`berry_volume_histogram` has no `ingested_at` column at all, so this
+check doesn't apply to it (only `id`/`sample_id`/`bin_ml`/`berry_count`/
+`analyzed_at`).
+
+**Conflict-key uniqueness, checked against the source data, not
+assumed.** `lab_results`' upsert key is `(sample_id, analysis_name_raw,
+analyzed_at)`. Ran the equivalent of `GROUP BY (lab_sample_no,
+analysis_name_raw, analyzed_at) HAVING count(*) > 1` over all 161 parsed
+Phase-1 result rows in Python (`Counter` over the same tuples the upsert
+keys on, before `lab_sample_no` resolves to `sample_id` -- a 1:1 mapping
+via `lab_samples.lab_sample_no`'s own unique constraint, so this is
+equivalent to checking the real key): 161 distinct keys for 161 rows,
+zero duplicates. Had this come back non-empty, it would have meant the
+upsert was silently collapsing genuinely distinct results into one row
+-- it doesn't, but this was verified rather than inferred from "the
+schema has a unique constraint, so it must be fine."
+
+**The reissue guard protected nothing -- confirmed live before fixing
+it.** `berry_maturity_by_block`'s `s.reissue_of is null` filter is
+scoped to `sample_type = 'berry_maturity'`, but the only sample this
+round that has ever been reissued (`511110861` -> `511110861A`) is
+`sample_type = 'trial_ferment'` -- a type that view never reads. Queried
+`lab_results` directly for the bucket ferment's `guaiacol`/
+`4_methylguaiacol` before making any fix: both values came back TWICE,
+once from each of the two samples, byte-identical (`3.9` / `9.4`, same
+`analyzed_at`) -- 17 raw rows total for a sample whose current report
+only has 15 lines. Real duplication, reachable by any direct query of
+`lab_results`, not a hypothetical.
+
+**Worth stating plainly, not just noting the coverage gap: the guard's
+own logic was backwards, and only ever avoided being wrong by
+coincidence.** `reissue_of is null` is true for `511110861` (an
+ORIGINAL sample -- it isn't itself a reissue of anything) and false for
+`511110861A` (which IS a reissue). Had a berry_maturity sample ever been
+reissued, that filter would have kept the SUPERSEDED base and dropped
+the CURRENT reissue -- the exact opposite of "filter to the current
+version" that the original migration's own comment claimed it did. It
+happened to be harmless in Phase 1 purely because no `berry_maturity`
+sample has ever been reissued, not because the logic was right.
+
+**The fix (`20260920130000_lab_results_current.sql`): a `lab_results_current`
+view, covering all `sample_type`s, using the inverse (correct) condition
+-- a sample is current unless some other sample's `reissue_of` names it:**
+
+```sql
+create view lab_results_current as
+select r.*
+from lab_results r
+join lab_samples s on s.id = r.sample_id
+where not exists (
+  select 1 from lab_samples newer where newer.reissue_of = s.lab_sample_no
+);
+```
+
+This is now the documented read surface for `lab_results` -- consumers
+should query `lab_results_current`, not `lab_results` directly, unless
+they specifically need the lossless raw table (e.g. an audit of what ETS
+actually reported, reissues included). `berry_maturity_by_block` was
+redefined to join `lab_results_current` and dropped its own now-redundant
+`reissue_of is null` clause -- correct by construction rather than by
+the coincidence noted above. Observably unchanged for that view this
+round (still 12 rows: still no `berry_maturity` reissue exists), but no
+longer silently wrong-by-luck if one appears later.
+
+**Verified live, post-fix:** `lab_results_current` for the bucket ferment
+returns exactly `511110861A`'s 15 rows (base sample `511110861`'s 2 rows
+excluded); `guaiacol`/`4_methylguaiacol` each appear once, not twice.
+Overall totals: `lab_results` stays lossless at 161 (unchanged -- the fix
+adds a view, it doesn't touch the base table), `lab_results_current`
+returns 159 (161 minus the 2 superseded-base rows). `berry_maturity_by_block`
+still returns 12 rows, confirming the redefinition didn't change its
+observable output. RLS re-verified on the new view with the same
+`SET LOCAL`-in-a-transaction adversarial pattern as the rest of this
+round: 0 rows unauthenticated, 159 rows impersonating a real operator,
+`current_user` confirmed `postgres` again after each rollback -- no
+leaked role.

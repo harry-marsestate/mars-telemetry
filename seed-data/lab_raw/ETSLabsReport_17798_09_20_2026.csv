@@ -1,0 +1,422 @@
+Date,Sample Description,Group #,Sample #,Sample Status,Analysis Name,Comment,Result,Units
+2026-09-15 15:45,MARS 2 (berries),2333379,609150514,Reported,L-malic acid,,2.31,g/L
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 0.1,,0,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 0.2,,0,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 0.3,,2,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 0.4,,1,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 0.6,,11,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 0.7,,17,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 0.8,,19,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 0.9,,16,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.0,,7,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.1,,10,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.2,,5,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.3,,5,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.4,,2,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.5,,2,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.6,,0,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.7,,0,""
+2026-09-15 13:46,MARS 2 (berries),2333379,609150514,Reported,berry weight,,1.04,g/berry
+2026-09-15 15:45,MARS 2 (berries),2333379,609150514,Reported,pH,,3.37,""
+2026-09-15 16:23,MARS 2 (berries),2333379,609150514,Reported,sugar per berry (by volume),,200,mg/berry
+2026-09-15 15:45,MARS 2 (berries),2333379,609150514,Reported,titratable acidity,,7.5,g/L
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 0.1,,0,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 0.2,,1,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 0.3,,1,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 0.4,,3,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 0.5,,6,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 0.6,,11,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 0.7,,15,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 0.8,,18,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 0.9,,14,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.0,,12,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.1,,7,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.2,,7,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.3,,1,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.4,,2,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.5,,1,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.6,,0,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.7,,0,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.8,,0,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 1.9,,0,""
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,Dyostem Histogram : 2.0,,0,""
+2026-09-15 15:45,MARS 3 (berries),2333379,609150515,Reported,L-malic acid,,2.29,g/L
+2026-09-15 15:45,MARS 3 (berries),2333379,609150515,Reported,brix,,24.5,degrees
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,berry volume,,0.78,mL/berry
+2026-09-15 13:16,MARS 3 (berries),2333379,609150515,Reported,berry volume variability,,32.1,%
+2026-09-15 15:45,MARS 3 (berries),2333379,609150515,Reported,glucose + fructose,,251,g/L
+2026-09-15 13:46,MARS 3 (berries),2333379,609150515,Reported,berry weight,,1.04,g/berry
+2026-09-15 15:45,MARS 3 (berries),2333379,609150515,Reported,pH,,3.43,""
+2026-09-15 16:23,MARS 3 (berries),2333379,609150515,Reported,sugar per berry (by volume),,190,mg/berry
+2026-09-15 15:45,MARS 3 (berries),2333379,609150515,Reported,titratable acidity,,7.0,g/L
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 0.5,,3,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,berry volume variability,,30.3,%
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.9,,0,""
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 2.0,,0,""
+2026-09-15 15:45,MARS 2 (berries),2333379,609150514,Reported,brix,,24.8,degrees
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,berry volume,,0.81,mL/berry
+2026-09-15 15:45,MARS 2 (berries),2333379,609150514,Reported,glucose + fructose,,256,g/L
+2026-09-15 13:10,MARS 2 (berries),2333379,609150514,Reported,Dyostem Histogram : 1.8,,0,""
+2026-09-08 13:36,Mars 3 (berries),2329246,609080463,Reported,berry weight,,1.17,g/berry
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 0.2,,0,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 0.3,,0,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 0.4,,0,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 0.5,,1,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 0.6,,5,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 0.7,,9,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 0.8,,10,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.0,,17,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.1,,12,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.2,,9,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.3,,8,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.4,,6,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.5,,5,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.6,,1,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.7,,3,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.8,,1,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 1.9,,1,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 2.0,,1,""
+2026-09-08 15:50,Mars 2 (berries),2329246,609080462,Reported,L-malic acid,,2.39,g/L
+2026-09-08 15:50,Mars 2 (berries),2329246,609080462,Reported,brix,,23.9,degrees
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,berry volume,,1.00,mL/berry
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,berry volume variability,,29.5,%
+2026-09-08 15:50,Mars 2 (berries),2329246,609080462,Reported,glucose + fructose,,248,g/L
+2026-09-08 13:36,Mars 2 (berries),2329246,609080462,Reported,berry weight,,1.20,g/berry
+2026-09-08 15:50,Mars 2 (berries),2329246,609080462,Reported,pH,,3.38,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 0.1,,0,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 0.2,,0,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 0.3,,0,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 0.4,,0,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 0.5,,3,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 0.6,,7,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 0.7,,10,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 0.8,,23,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 0.9,,18,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.0,,10,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.1,,8,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.3,,7,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.4,,2,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.5,,2,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.6,,0,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.7,,2,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.8,,1,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.9,,0,""
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 2.0,,0,""
+2026-09-08 15:48,Mars 3 (berries),2329246,609080463,Reported,L-malic acid,,2.36,g/L
+2026-09-08 15:48,Mars 3 (berries),2329246,609080463,Reported,brix,,23.4,degrees
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,berry volume,,0.88,mL/berry
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,berry volume variability,,30.6,%
+2026-09-08 15:48,Mars 3 (berries),2329246,609080463,Reported,glucose + fructose,,240,g/L
+2026-09-08 15:48,Mars 3 (berries),2329246,609080463,Reported,pH,,3.37,""
+2026-09-08 15:59,Mars 3 (berries),2329246,609080463,Reported,sugar per berry (by volume),,203,mg/berry
+2026-09-08 15:48,Mars 3 (berries),2329246,609080463,Reported,titratable acidity,,7.1,g/L
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 0.1,,0,""
+2026-09-08 15:59,Mars 2 (berries),2329246,609080462,Reported,sugar per berry (by volume),,237,mg/berry
+2026-09-08 15:50,Mars 2 (berries),2329246,609080462,Reported,titratable acidity,,7.0,g/L
+2026-09-08 12:48,Mars 3 (berries),2329246,609080463,Reported,Dyostem Histogram : 1.2,,5,""
+2026-09-08 12:43,Mars 2 (berries),2329246,609080462,Reported,Dyostem Histogram : 0.9,,11,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.8,,0,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 0.1,,0,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 0.2,,0,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 0.3,,0,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 0.4,,1,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 0.6,,5,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 0.7,,11,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 0.8,,12,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 0.9,,15,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.0,,17,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.1,,11,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.2,,10,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.3,,5,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.4,,3,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.5,,3,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.6,,1,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.7,,0,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.8,,0,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 1.9,,0,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 2.0,,0,""
+2026-09-01 15:28,Mars 2 (berries),2325732,609010427,Reported,brix,,23.6,degrees
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,berry volume,,0.92,mL/berry
+2026-09-01 15:28,Mars 2 (berries),2325732,609010427,Reported,glucose + fructose,,241,g/L
+2026-09-01 14:12,Mars 2 (berries),2325732,609010427,Reported,berry weight,,1.19,g/berry
+2026-09-01 15:28,Mars 2 (berries),2325732,609010427,Reported,pH,,3.34,""
+2026-09-01 15:57,Mars 2 (berries),2325732,609010427,Reported,sugar per berry (by volume),,215,mg/berry
+2026-09-01 15:28,Mars 2 (berries),2325732,609010427,Reported,titratable acidity,,7.3,g/L
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 0.1,,0,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 0.2,,0,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 0.3,,0,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 0.4,,1,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 0.5,,2,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 0.6,,5,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 0.8,,25,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 0.9,,14,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.0,,12,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.1,,9,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.2,,7,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.3,,5,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.4,,4,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.5,,2,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.6,,2,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.7,,0,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 1.9,,0,""
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 2.0,,0,""
+2026-09-01 15:29,Mars 3 (berries),2325732,609010428,Reported,brix,,22.5,degrees
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,berry volume,,0.89,mL/berry
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,berry volume variability,,28.6,%
+2026-09-01 15:29,Mars 3 (berries),2325732,609010428,Reported,glucose + fructose,,229,g/L
+2026-09-01 14:12,Mars 3 (berries),2325732,609010428,Reported,berry weight,,1.17,g/berry
+2026-09-01 15:28,Mars 2 (berries),2325732,609010427,Reported,L-malic acid,,2.30,g/L
+2026-09-01 15:29,Mars 3 (berries),2325732,609010428,Reported,pH,,3.37,""
+2026-09-01 15:57,Mars 3 (berries),2325732,609010428,Reported,sugar per berry (by volume),,196,mg/berry
+2026-09-01 15:29,Mars 3 (berries),2325732,609010428,Reported,titratable acidity,,7.2,g/L
+2026-09-01 13:04,Mars 3 (berries),2325732,609010428,Reported,Dyostem Histogram : 0.7,,10,""
+2026-09-01 15:29,Mars 3 (berries),2325732,609010428,Reported,L-malic acid,,2.52,g/L
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,Dyostem Histogram : 0.5,,3,""
+2026-09-01 12:05,Mars 2 (berries),2325732,609010427,Reported,berry volume variability,,28.5,%
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 0.4,,1,""
+2026-08-25 11:37,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,titratable acidity,,8.8,g/L
+2026-08-25 12:02,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,sugar per berry (by volume),,192,mg/berry
+2026-08-25 11:37,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,pH,,3.30,""
+2026-08-25 10:57,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,berry weight,,1.14,g/berry
+2026-08-25 11:37,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,glucose + fructose,,226,g/L
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,berry volume variability,,26.8,%
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,berry volume,,0.89,mL/berry
+2026-08-25 11:37,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,brix,,22.1,degrees
+2026-08-25 11:37,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,L-malic acid,,3.22,g/L
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 2.0,,0,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.9,,0,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.8,,0,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.7,,1,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.6,,1,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.5,,2,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.4,,3,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.3,,5,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.2,,7,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.1,,14,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 1.0,,14,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 0.9,,18,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 0.8,,17,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 0.7,,12,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 0.6,,5,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 0.5,,2,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 0.3,,1,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 0.2,,0,""
+2026-08-25 10:29,Mars Blk 3 08/25/26 (berries),2322163R,608250191,Reported,Dyostem Histogram : 0.1,,0,""
+2026-08-25 11:37,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,titratable acidity,,8.2,g/L
+2026-08-25 12:02,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,sugar per berry (by volume),,204,mg/berry
+2026-08-25 11:37,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,pH,,3.28,""
+2026-08-25 10:57,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,berry weight,,1.14,g/berry
+2026-08-25 11:37,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,glucose + fructose,,237,g/L
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,berry volume variability,,27.4,%
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,berry volume,,0.90,mL/berry
+2026-08-25 11:37,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,brix,,23.0,degrees
+2026-08-25 11:37,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,L-malic acid,,2.52,g/L
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 2.0,,0,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.9,,0,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.8,,0,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.7,,0,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.6,,1,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.5,,2,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.4,,6,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.3,,5,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.2,,8,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.1,,14,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 1.0,,13,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 0.9,,13,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 0.8,,15,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 0.7,,12,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 0.6,,6,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 0.5,,4,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 0.4,,1,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 0.3,,0,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 0.2,,0,""
+2026-08-25 10:25,Mars Blk 2 08/25/26 (berries),2322163R,608250190,Reported,Dyostem Histogram : 0.1,,0,""
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,alpha-amino compounds (as N),,174,mg/L
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,volatile acidity (acetic acid),,< 0.05,g/L
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,L-malic acid,,2.46,g/L
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,tartaric acid,,6.4,g/L
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,brix,,23.8,degrees
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,glucose + fructose,,246,g/L
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,potassium,,1550,mg/L
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,ammonia,,97,mg/L
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,pH,,3.43,""
+2026-08-14 15:24,26MARCH,2318198,608140601,Reported,titratable acidity,,6.5,g/L
+2026-08-14 15:36,26MARCH,2318198,608140601,Reported,yeast assimilable nitrogen,,254,mg/L (as N)
+2026-06-18 11:31,MA25CH,2303794,606180131,Reported,ethanol at 20C,,14.83,% vol
+2026-06-18 11:37,MA25CH,2303794,606180131,Reported,ethanol at 60F,,14.75,% vol
+2026-06-15 18:35,MA25CH,2302871,606150055,Reported,'Scorpion' Yeast & Bacteria Panel : L. brevis/hilgardii/fermentum,,< 10,cells/mL
+2026-06-15 18:35,MA25CH,2302871,606150055,Reported,'Scorpion' Yeast & Bacteria Panel : Acetic acid bacteria,,10,cells/mL
+2026-06-15 18:35,MA25CH,2302871,606150055,Reported,'Scorpion' Yeast & Bacteria Panel : Brettanomyces bruxellensis,,< 10,cells/mL
+2026-06-15 18:35,MA25CH,2302871,606150055,Reported,'Scorpion' Yeast & Bacteria Panel : Lactobacillus kunkeei,,< 10,cells/mL
+2026-06-15 18:35,MA25CH,2302871,606150055,Reported,'Scorpion' Yeast & Bacteria Panel : Lactobacillus plantarum/casei/mali,,< 10,cells/mL
+2026-06-15 18:35,MA25CH,2302871,606150055,Reported,'Scorpion' Yeast & Bacteria Panel : Oenococcus oeni,,< 10,cells/mL
+2026-06-15 18:35,MA25CH,2302871,606150055,Reported,'Scorpion' Yeast & Bacteria Panel : Pediococcus species,,< 10,cells/mL
+2026-06-15 18:35,MA25CH,2302871,606150055,Reported,'Scorpion' Yeast & Bacteria Panel : Saccharomyces cerevisiae,,22300,cells/mL
+2026-06-15 18:35,MA25CH,2302871,606150055,Reported,'Scorpion' Yeast & Bacteria Panel : Zygosaccharomyces species,,60,cells/mL
+2026-06-08 18:29,MA25CH,2301085,606050014A,Reported,conductivity test-DIT,,"- wine filtered through 0.45µm membrane filter prior to analysis
+- see attached report
+- for interpretation of result, please contact your provider of cold stabilization technology
+",""
+2026-06-05 09:31,MA25CH,2301084,606050014,Reported,ethanol at 20C,,15.14,% vol
+2026-06-05 09:45,MA25CH,2301084,606050014,Reported,ethanol at 60F,,15.06,% vol
+2026-06-08 17:35,MA25CH,2301083,606050013,Reported,heat stab 5.0 lbs/Kgal bent,,8.9,NTU
+2026-06-08 17:35,MA25CH,2301083,606050013,Reported,fining trial (Pocock & Waters) - control,,83,NTU
+2026-06-08 17:35,MA25CH,2301083,606050013,Reported,heat stab 1.0 lbs/Kgal bent,,63,NTU
+2026-06-08 17:35,MA25CH,2301083,606050013,Reported,heat stab 2.0 lbs/Kgal bent,,50,NTU
+2026-06-08 17:35,MA25CH,2301083,606050013,Reported,heat stab 3.0 lbs/Kgal bent,,40,NTU
+2026-06-08 17:35,MA25CH,2301083,606050013,Reported,heat stab 4.0 lbs/Kgal bent,,16.8,NTU
+2026-06-05 11:51,MA25CH,2301083,606050013,Reported,Heat Stability Trial - KWK Krystal Klear,,"Heat Stability Trial performed with KWK Krystal Klear bentonite prepared to manufacturer specifications
+Slurry concentration: 8%
+DI Water Temperature: Hot
+Hydration period: 8-24 hours
+",""
+2026-02-26 17:44,25CHMR-LF,2278585,602260982,Reported,L-malic acid,,1.96,g/L
+2026-02-26 17:44,25CHMR-LF,2278585,602260982,Reported,volatile acidity (acetic acid),,0.46,g/L
+2026-02-26 17:22,25CHMR-LF,2278585,602260982,Reported,free sulfur dioxide,,16,mg/L
+2026-02-25 15:56,MA24CS,2278122,602250939,Reported,ethanol at 60F,,15.14,% vol
+2026-02-25 15:39,MA24CS,2278122,602250939,Reported,ethanol at 20C,,15.22,% vol
+2026-01-15 18:12,25CHMR-LF,2267170,601151376,Reported,L-malic acid,,1.99,g/L
+2026-01-15 18:31,25CHMR-LF,2267170,601151376,Reported,free sulfur dioxide,,9,mg/L
+2026-01-15 18:14,25CHMR-LF,2267170,601151376,Reported,volatile acidity (acetic acid),,0.44,g/L
+2025-12-12 17:57,25CH MR-LF,2260138,512120918,Reported,ethanol at 20C,,15.14,% vol
+2025-12-12 18:17,25CH MR-LF,2260138,512120918,Reported,ethanol at 60F,,15.06,% vol
+2025-12-12 17:28,25CH MR-LF,2260138,512120918,Reported,free sulfur dioxide,,7,mg/L
+2025-12-12 15:36,25CH MR-LF,2260138,512120918,Reported,glucose + fructose,,0.3,g/L
+2025-12-12 18:17,25CH MR-LF,2260138,512120918,Reported,molecular sulfur dioxide,,0.15,mg/L
+2025-12-12 17:57,25CH MR-LF,2260138,512120918,Reported,pH,,3.48,""
+2025-12-12 17:57,25CH MR-LF,2260138,512120918,Reported,titratable acidity,,6.1,g/L
+2025-12-12 16:40,25CH MR-LF,2260138,512120918,Reported,volatile acidity (acetic acid),,0.44,g/L
+2025-11-12 14:24,BUCKET FERMENT,2251416,511110861A,Reported,p-cresol GC MS/MS,,< 1.0,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2251416,511110861A,Reported,cresols (sum),,15.8,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2251416,511110861A,Reported,syringol GC MS/MS,,6.4,µg/L
+2025-11-14 11:45,BUCKET FERMENT,2251416,511110861A,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylguaiacol rutinoside,,17.4,µg/L
+2025-11-14 11:45,BUCKET FERMENT,2251416,511110861A,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylsyringol gentiobioside,,17.2,µg/L
+2025-11-14 11:45,BUCKET FERMENT,2251416,511110861A,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : cresol rutinoside,,14.2,µg/L
+2025-11-14 11:45,BUCKET FERMENT,2251416,511110861A,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : guaiacol rutinoside,,10.0,µg/L
+2025-11-14 11:45,BUCKET FERMENT,2251416,511110861A,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : phenol rutinoside,,13.6,µg/L
+2025-11-14 11:45,BUCKET FERMENT,2251416,511110861A,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : syringol gentiobioside,,64.7,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2251416,511110861A,Reported,phenol GC MS/MS,,16.7,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2251416,511110861A,Reported,4-methylguaiacol GC MS/MS,,3.9,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2251416,511110861A,Reported,4-methylsyringol GC MS/MS,,< 5.0,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2251416,511110861A,Reported,guaiacol GC MS/MS,,9.4,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2251416,511110861A,Reported,m-cresol GC MS/MS,,9.7,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2251416,511110861A,Reported,o-cresol GC MS/MS,,6.1,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2250681,511110861,Reported,4-methylguaiacol GC MS/MS,,3.9,µg/L
+2025-11-12 14:24,BUCKET FERMENT,2250681,511110861,Reported,guaiacol GC MS/MS,,9.4,µg/L
+2025-10-14 14:06,25CHMR-LF,2237660,510140813,Reported,glucose + fructose,,< 0.1,g/L
+2025-10-14 14:09,25CHMR-LF,2237660,510140813,Reported,volatile acidity (acetic acid),,0.40,g/L
+2025-10-14 14:06,25CHMR-LF,2237660,510140813,Reported,L-malic acid,,1.97,g/L
+2025-09-20 17:41,MARS2,2220088,509181100,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylguaiacol rutinoside,,6.6,µg/L
+2025-09-20 17:41,MARS2,2220088,509181100,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylsyringol gentiobioside,,2.3,µg/L
+2025-09-20 17:41,MARS2,2220088,509181100,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : cresol rutinoside,,14.3,µg/L
+2025-09-20 17:41,MARS2,2220088,509181100,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : guaiacol rutinoside,,7.8,µg/L
+2025-09-20 17:41,MARS2,2220088,509181100,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : phenol rutinoside,,8.8,µg/L
+2025-09-20 17:41,MARS2,2220088,509181100,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : syringol gentiobioside,,22.7,µg/L
+2025-09-19 02:26,MARS2,2220088,509181100,Reported,4-methylsyringol GC MS/MS,,< 5.0,µg/L
+2025-09-19 02:26,MARS2,2220088,509181100,Reported,guaiacol GC MS/MS,,3.6,µg/L
+2025-09-19 02:26,MARS2,2220088,509181100,Reported,m-cresol GC MS/MS,,2.0,µg/L
+2025-09-19 02:26,MARS2,2220088,509181100,Reported,o-cresol GC MS/MS,,2.0,µg/L
+2025-09-19 02:26,MARS2,2220088,509181100,Reported,p-cresol GC MS/MS,,< 1.0,µg/L
+2025-09-19 02:26,MARS2,2220088,509181100,Reported,phenol GC MS/MS,,3.9,µg/L
+2025-09-19 02:26,MARS2,2220088,509181100,Reported,syringol GC MS/MS,,< 5.0,µg/L
+2025-09-19 02:26,MARS2,2220088,509181100,Reported,cresols (sum),,4.0,µg/L
+2025-09-20 17:57,MARS3,2220088,509181101,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylguaiacol rutinoside,,8.2,µg/L
+2025-09-20 17:57,MARS3,2220088,509181101,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylsyringol gentiobioside,,1.8,µg/L
+2025-09-20 17:57,MARS3,2220088,509181101,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : cresol rutinoside,,18.3,µg/L
+2025-09-20 17:57,MARS3,2220088,509181101,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : guaiacol rutinoside,,10.9,µg/L
+2025-09-20 17:57,MARS3,2220088,509181101,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : phenol rutinoside,,10.9,µg/L
+2025-09-20 17:57,MARS3,2220088,509181101,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : syringol gentiobioside,,19.3,µg/L
+2025-09-19 02:42,MARS3,2220088,509181101,Reported,4-methylguaiacol GC MS/MS,,< 1.0,µg/L
+2025-09-19 02:42,MARS3,2220088,509181101,Reported,4-methylsyringol GC MS/MS,,< 5.0,µg/L
+2025-09-19 02:42,MARS3,2220088,509181101,Reported,guaiacol GC MS/MS,,3.2,µg/L
+2025-09-19 02:42,MARS3,2220088,509181101,Reported,m-cresol GC MS/MS,,1.9,µg/L
+2025-09-19 02:42,MARS3,2220088,509181101,Reported,o-cresol GC MS/MS,,1.8,µg/L
+2025-09-19 02:42,MARS3,2220088,509181101,Reported,p-cresol GC MS/MS,,< 1.0,µg/L
+2025-09-19 02:42,MARS3,2220088,509181101,Reported,phenol GC MS/MS,,3.2,µg/L
+2025-09-19 02:42,MARS3,2220088,509181101,Reported,syringol GC MS/MS,,< 5.0,µg/L
+2025-09-19 02:42,MARS3,2220088,509181101,Reported,cresols (sum),,3.7,µg/L
+2025-09-19 02:26,MARS2,2220088,509181100,Reported,4-methylguaiacol GC MS/MS,,< 1.0,µg/L
+2025-08-28 02:58,"Mars, blk: 3 (berries)",2208155,508260304,Reported,p-cresol (GC/MS),,< 0.5,µg/kg
+2025-08-28 02:42,"Mars, blk: 2 (berries)",2208155,508260303,Reported,4-methylsyringol (GC/MS),,< 2.0,µg/kg
+2025-08-27 17:39,"Mars, blk: 2 (berries)",2208155,508260303,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylguaiacol rutinoside,,5.1,µg/kg
+2025-08-27 17:39,"Mars, blk: 2 (berries)",2208155,508260303,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylsyringol gentiobioside,,9.2,µg/kg
+2025-08-27 17:39,"Mars, blk: 2 (berries)",2208155,508260303,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : cresol rutinoside,,10.2,µg/kg
+2025-08-27 17:39,"Mars, blk: 2 (berries)",2208155,508260303,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : guaiacol rutinoside,,3.0,µg/kg
+2025-08-27 17:39,"Mars, blk: 2 (berries)",2208155,508260303,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : phenol rutinoside,,1.6,µg/kg
+2025-08-27 17:39,"Mars, blk: 2 (berries)",2208155,508260303,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : syringol gentiobioside,,27.0,µg/kg
+2025-08-28 02:42,"Mars, blk: 2 (berries)",2208155,508260303,Reported,4-methylguaiacol (GC/MS),,< 0.5,µg/kg
+2025-08-28 02:42,"Mars, blk: 2 (berries)",2208155,508260303,Reported,guaiacol (GC/MS),,0.9,µg/kg
+2025-08-28 02:42,"Mars, blk: 2 (berries)",2208155,508260303,Reported,m-cresol (GC/MS),,0.7,µg/kg
+2025-08-28 02:42,"Mars, blk: 2 (berries)",2208155,508260303,Reported,o-cresol (GC/MS),,1.2,µg/kg
+2025-08-28 02:42,"Mars, blk: 2 (berries)",2208155,508260303,Reported,p-cresol (GC/MS),,< 0.5,µg/kg
+2025-08-28 02:42,"Mars, blk: 2 (berries)",2208155,508260303,Reported,phenol (GC/MS),,< 2.0,µg/kg
+2025-08-28 02:42,"Mars, blk: 2 (berries)",2208155,508260303,Reported,syringol (GC/MS),,< 2.0,µg/kg
+2025-08-28 02:42,"Mars, blk: 2 (berries)",2208155,508260303,Reported,cresols (sum),,1.9,µg/kg
+2025-08-27 17:55,"Mars, blk: 3 (berries)",2208155,508260304,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylguaiacol rutinoside,,3.5,µg/kg
+2025-08-27 17:55,"Mars, blk: 3 (berries)",2208155,508260304,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : 4-methylsyringol gentiobioside,,8.5,µg/kg
+2025-08-27 17:55,"Mars, blk: 3 (berries)",2208155,508260304,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : cresol rutinoside,,11.3,µg/kg
+2025-08-27 17:55,"Mars, blk: 3 (berries)",2208155,508260304,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : guaiacol rutinoside,,3.0,µg/kg
+2025-08-27 17:55,"Mars, blk: 3 (berries)",2208155,508260304,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : phenol rutinoside,,1.1,µg/kg
+2025-08-27 17:55,"Mars, blk: 3 (berries)",2208155,508260304,Reported,Smoke Glycosylated Markers LCMS/MS (QQQ) : syringol gentiobioside,,23.0,µg/kg
+2025-08-28 02:58,"Mars, blk: 3 (berries)",2208155,508260304,Reported,4-methylguaiacol (GC/MS),,< 0.5,µg/kg
+2025-08-28 02:58,"Mars, blk: 3 (berries)",2208155,508260304,Reported,4-methylsyringol (GC/MS),,< 2.0,µg/kg
+2025-08-28 02:58,"Mars, blk: 3 (berries)",2208155,508260304,Reported,guaiacol (GC/MS),,0.5,µg/kg
+2025-08-28 02:58,"Mars, blk: 3 (berries)",2208155,508260304,Reported,m-cresol (GC/MS),,< 0.5,µg/kg
+2025-08-28 02:58,"Mars, blk: 3 (berries)",2208155,508260304,Reported,o-cresol (GC/MS),,0.8,µg/kg
+2025-08-28 02:58,"Mars, blk: 3 (berries)",2208155,508260304,Reported,cresols (sum),,< 1.5,µg/kg
+2025-08-28 02:58,"Mars, blk: 3 (berries)",2208155,508260304,Reported,syringol (GC/MS),,< 2.0,µg/kg
+2025-08-28 02:58,"Mars, blk: 3 (berries)",2208155,508260304,Reported,phenol (GC/MS),,< 2.0,µg/kg
+2025-02-05 16:16,23 Zinfandel,2148715,502050833,Reported,ethanol at 60F,,16.04,% vol
+2025-02-05 16:16,23 Zin 90/10,2148715,502050834,Reported,ethanol at 60F,,14.79,% vol
+2025-02-05 15:36,23 Zinfandel,2148715,502050833,Reported,ethanol at 20C,,16.14,% vol
+2025-02-05 15:37,23 Zin 90/10,2148715,502050834,Reported,ethanol at 20C,,14.87,% vol
+2025-01-10 11:44,MA23ZIN,2139623,501100084,Reported,ethanol at 60F,,15.94,% vol
+2025-01-10 11:24,MA23ZIN,2139623,501100084,Reported,ethanol at 20C,,16.04,% vol
+2024-11-13 18:09,MA24CSV2,2121098,411131659,Reported,ethanol at 20C,,14.85,% vol
+2024-11-13 18:10,MA24CSV3,2121098,411131660,Reported,ethanol at 20C,,14.82,% vol
+2024-11-13 18:45,MA24CSV3,2121098,411131660,Reported,ethanol at 60F,,14.74,% vol
+2024-11-13 18:45,MA24CSV2,2121098,411131659,Reported,ethanol at 60F,,14.77,% vol
+2024-09-07 13:43,MRS 3 9/6/24,2072803,409070337,Reported,pH,,3.26,""
+2024-09-07 13:42,MRS 2 9/6/24,2072803,409070336,Reported,brix,,24.7,degrees
+2024-09-07 13:42,MRS 2 9/6/24,2072803,409070336,Reported,pH,,3.28,""
+2024-09-07 13:42,MRS 2 9/6/24,2072803,409070336,Reported,titratable acidity,,7.4,g/L
+2024-09-07 13:43,MRS 3 9/6/24,2072803,409070337,Reported,brix,,24.2,degrees
+2024-09-07 13:43,MRS 3 9/6/24,2072803,409070337,Reported,titratable acidity,,8.0,g/L
+2024-03-21 08:11,MA22CS,2019045,403201161,Reported,ethanol at 20C,,15.11,% vol
+2024-03-21 08:16,MA22CS,2019045,403201161,Reported,ethanol at 60F,,15.06,% vol
+2024-03-15 07:54,MA22ZIN,2017293,403141272,Reported,ethanol at 60F,,15.40,% vol
+2024-03-15 07:48,MA22ZIN,2017293,403141272,Reported,ethanol at 20C,,15.45,% vol
+2024-02-08 12:50,MA22CSV2,2004709,402070908,Reported,'Scorpion' Yeast & Bacteria Panel : Acetic acid bacteria,,80900,cells/mL
+2024-02-08 12:50,MA22CSV2,2004709,402070908,Reported,'Scorpion' Yeast & Bacteria Panel : Zygosaccharomyces species,,5380,cells/mL
+2024-02-08 12:50,MA22CSV3,2004709,402070909,Reported,'Scorpion' Yeast & Bacteria Panel : Acetic acid bacteria,,42000,cells/mL
+2024-02-08 12:50,MA22CSV3,2004709,402070909,Reported,'Scorpion' Yeast & Bacteria Panel : Brettanomyces bruxellensis,,< 10,cells/mL
+2024-02-08 12:50,MA22CSV3,2004709,402070909,Reported,'Scorpion' Yeast & Bacteria Panel : L. brevis/hilgardii/fermentum,,< 10,cells/mL
+2024-02-08 12:50,MA22CSV3,2004709,402070909,Reported,'Scorpion' Yeast & Bacteria Panel : Lactobacillus kunkeei,,< 10,cells/mL
+2024-02-08 12:50,MA22CSV3,2004709,402070909,Reported,'Scorpion' Yeast & Bacteria Panel : Lactobacillus plantarum/casei/mali,,40,cells/mL
+2024-02-08 12:50,MA22CSV3,2004709,402070909,Reported,'Scorpion' Yeast & Bacteria Panel : Oenococcus oeni,,1500000,cells/mL
+2024-02-08 12:50,MA22CSV3,2004709,402070909,Reported,'Scorpion' Yeast & Bacteria Panel : Saccharomyces cerevisiae,,60,cells/mL
+2024-02-08 12:50,MA22CSV3,2004709,402070909,Reported,'Scorpion' Yeast & Bacteria Panel : Zygosaccharomyces species,,22000,cells/mL
+2024-02-08 12:50,MA22CSV3,2004709,402070909,Reported,'Scorpion' Yeast & Bacteria Panel : Pediococcus species,,< 10,cells/mL
+2024-02-08 12:50,MA22CSV2,2004709,402070908,Reported,'Scorpion' Yeast & Bacteria Panel : Brettanomyces bruxellensis,,850,cells/mL
+2024-02-08 12:50,MA22CSV2,2004709,402070908,Reported,'Scorpion' Yeast & Bacteria Panel : L. brevis/hilgardii/fermentum,,< 10,cells/mL
+2024-02-08 12:50,MA22CSV2,2004709,402070908,Reported,'Scorpion' Yeast & Bacteria Panel : Lactobacillus kunkeei,,10,cells/mL
+2024-02-08 12:50,MA22CSV2,2004709,402070908,Reported,'Scorpion' Yeast & Bacteria Panel : Lactobacillus plantarum/casei/mali,,510,cells/mL
+2024-02-08 12:50,MA22CSV2,2004709,402070908,Reported,'Scorpion' Yeast & Bacteria Panel : Oenococcus oeni,,1500000,cells/mL
+2024-02-08 12:50,MA22CSV2,2004709,402070908,Reported,'Scorpion' Yeast & Bacteria Panel : Pediococcus species,,< 10,cells/mL
+2024-02-08 12:50,MA22CSV2,2004709,402070908,Reported,'Scorpion' Yeast & Bacteria Panel : Saccharomyces cerevisiae,,730,cells/mL
+2024-01-23 10:51,MA22ZIN,1998687,401221562,Reported,ethanol at 60F,,16.86,% vol
+2024-01-23 10:26,MA22ZIN,1998687,401221562,Reported,ethanol at 20C,,16.91,% vol
+2023-12-22 10:18,MA23CSV3,1990013,312211153,Reported,ethanol at 60F,,14.58,% vol
+2023-12-22 10:18,MA23CSV2,1990013,312211152,Reported,ethanol at 60F,,14.69,% vol
+2023-12-22 10:18,MA23ZIN,1990013,312211154,Reported,ethanol at 60F,,15.69,% vol
+2023-12-22 10:00,MA23CSV3,1990013,312211153,Reported,ethanol at 20C,,14.63,% vol
+2023-12-22 09:59,MA23CSV2,1990013,312211152,Reported,ethanol at 20C,,14.74,% vol
+2023-12-22 10:00,MA23ZIN,1990013,312211154,Reported,ethanol at 20C,,15.74,% vol
+2023-11-01 15:03,T-7 V-2 (fermenting),1965454,310310429,Reported,ethanol at 20C,,8.1,% vol
+2023-11-01 15:03,T-7 V-2 (fermenting),1965454,310310429,Reported,glucose + fructose,,115,g/L
+2023-10-18 10:14,Mars Estate Blk: 2 (berries),1954155,310180098,Reported,titratable acidity,,5.5,g/L
+2023-10-18 10:15,Mars Estate Blk: 3 (berries),1954155,310180099,Reported,pH,,3.45,""
+2023-10-18 10:15,Mars Estate Blk: 3 (berries),1954155,310180099,Reported,titratable acidity,,6.6,g/L
+2023-10-18 10:14,Mars Estate Blk: 2 (berries),1954155,310180098,Reported,brix,,26.4,degrees
+2023-10-18 10:14,Mars Estate Blk: 2 (berries),1954155,310180098,Reported,pH,,3.47,""
+2023-10-18 10:15,Mars Estate Blk: 3 (berries),1954155,310180099,Reported,brix,,25.4,degrees

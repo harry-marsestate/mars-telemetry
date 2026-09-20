@@ -3813,3 +3813,170 @@ reviewing a Kimi labour answer should treat a stated grand total as
 needing independent verification against either the detail table it
 came with or a direct query, even when every line of that detail table
 is individually right.
+
+## ETS Labs berry-sampling ingestion (Phase 1) -- CSV investigation, the two-method-string trap, and what did/didn't verify
+
+Source: `ETSLabsReport_17798_09_20_2026.csv` (414 rows, `Data, Sample
+Description, Group #, Sample #, Sample Status, Analysis Name, Comment,
+Result, Units`), copied into `seed-data/lab_raw/`. First home for
+berry/maturity/brix-sampling data in this project -- grepped the
+migrations for `berry`, `brix`, `maturity`, `veraison`, `ripeness`,
+`sample`, `lab` before starting: confirmed green field. The one prior
+brix-bearing table, `harvest_lots`, was dropped in `20260830000007` as
+leftover mock data (see that migration's own investigation) -- not a
+prior home for this.
+
+**Encoding.** The file's embedded micro-sign bytes (`\xc2\xb5`, valid
+UTF-8 for µ) decode correctly only as `encoding="utf-8"`. Reading it as
+`latin-1` (an easy first instinct for a CSV with odd bytes) mis-decodes
+every µg unit into `Âµg` -- caught before it reached the parser by
+diffing the same byte offset under both encodings.
+
+**Embedded newlines.** Two rows (both winery-side `MA25CH`, out of scope
+this round) have multi-line quoted `Result` values (a conductivity-test
+disclaimer, a heat-stability-trial protocol). `csv.DictReader` over the
+whole file handles this correctly; a line-by-line reader would not.
+
+**Phase 1 scope: 18 lab_sample_no, 17 physical samples, 321 rows --
+asserted, not guessed.** The round's own brief estimated "roughly 274
+records" for Phase 1; summing the same brief's own per-category counts
+(8×~29 Dyostem + 4×3 + 2×15 + 2×15 + 2+15 trial-ferment) already gives
+321, and the actual parse matches that arithmetic exactly, not the 274
+headline figure. Reported as the real number rather than rounded toward
+the estimate -- the same principle as this file's other "don't match my
+guess, verify and reconcile" entries. Full CSV has 43 distinct sample
+numbers; the other 25 are winery-side wine-chemistry lots (MA22*/MA23*/
+MA24*/MA25CH/25CHMR-LF/23 Zinfandel/23 Zin 90/10/T-7 V-2) and the
+26MARCH Chardonnay must panel, deliberately excluded -- see the
+migration's header comment for why (substantial overlap with
+`lot_analyses`, needs its own row-level reconciliation round).
+
+**Sample-number date decoding**, confirmed across every one of the 43
+distinct sample numbers in the file (Phase 1 and out-of-scope alike):
+`[last digit of year][MM][DD][4-digit seq][optional reissue letter]`
+encodes the LAB RECEIPT date. `609150514` -> 2026-09-15, `310180098` ->
+2023-10-18, `402070908` (out-of-scope MA22CSV2) -> 2024-02-07 -- all
+three checked directly against that row's own `Date` column context
+before trusting the rule. `collected_on` uses this decoded date
+(`collected_on_source='inferred_from_receipt'`) except for the two
+sample pairs whose own description embeds an explicit collection date
+(`collected_on_source='description'`) -- `Mars Blk 2/3 08/25/26
+(berries)` and `MRS 2/3 9/6/24`. The 2024 pair is the one case in Phase 1
+where the two genuinely differ: collected 2024-09-06, received
+2024-09-07 (`409070336`/`409070337`).
+
+**Block mapping: 14 distinct berry-sample descriptions, one explicit
+dict, asserted complete.** Five spellings of "block 2" alone appear
+across four years (`MARS 2`, `Mars 2`, `MARS2`, `Mars Blk 2`, `Mars, blk:
+2`, `MRS 2`, `Mars Estate Blk: 2` -- seven, not five, once all Phase-1
+descriptions are counted). `parse.py`'s `DESCRIPTION_BLOCK` is the sole
+mechanism (not a regex fallback) and `parse()` raises if any Phase-1
+description isn't a key in it. `BUCKET FERMENT` (the trial micro-ferment,
+2025-11-11) names no block and none is inferred -- stored `block_id
+IS NULL` rather than guessed as B2 or B3. Flagged for the owner: which
+block(s) fed this ferment, or whether it was a blend, is unknown from the
+source data alone.
+
+**Reissue handling.** `511110861` (2025-11-11, group 2250681, 2 rows:
+4-methylguaiacol 3.9 µg/L, guaiacol 9.4 µg/L) and `511110861A` (same
+date, group 2251416, 15 rows including those same two values,
+byte-identical) are one physical bucket-ferment sample with a re-issued,
+expanded lab report -- not two samples. Both ingested losslessly into
+`lab_samples`/`lab_results` (`lab_samples.reissue_of` self-references the
+base `lab_sample_no`); `berry_maturity_by_block` filters to `reissue_of
+IS NULL` so a consumer never double-counts. Detection rule: a trailing
+letter suffix on an otherwise-numeric sample number (`base_sample_no()`
+in `parse.py`). Confirmed no other Phase-1 or out-of-scope sample number
+matches this shape except the one pair. Group `2322163R` (Dyostem
+samples `608250190`/`608250191`) carries an `R` suffix on the GROUP
+number instead -- no dedup needed there since the two samples' own
+numbers are distinct; `lab_group_no` is stored as raw text with no
+parsing applied to it.
+
+**The two-method-string trap.** ETS reports the same nine free volatile
+phenols (4-methylguaiacol, 4-methylsyringol, guaiacol, m-cresol,
+o-cresol, p-cresol, phenol, syringol, cresols (sum)) under two different
+`Analysis Name` conventions depending on which lab batch ran them: `"X
+(GC/MS)"` for the 2025-08 berry-mass-basis samples (µg/kg) and `"X GC
+MS/MS"` for the 2025-09 fruit/juice-basis and bucket-ferment samples
+(µg/L). A normalizer that doesn't specifically strip both suffixes treats
+these as eighteen distinct analytes instead of nine.
+`analysis_code_for()` strips either suffix to the same `analysis_code`
+(e.g. `guaiacol`) while `analysis_name_raw` and `units` preserve the
+original string and mass-vs-liquid basis untouched -- µg/kg and µg/L are
+never converted into each other, matching this project's standing rule
+(cf. Open-Meteo/irrigation unit-preservation entries) that unlike units
+never get silently unified.
+
+**Censored (detection-limit) values.** 22 of the 161 Phase-1
+`lab_results` rows are `< 0.5`/`< 1.0`/`< 1.5`/`< 2.0`/`< 5.0` style,
+concentrated in the two 2025 smoke-screen samples' phenol panels.
+`result_operator`/`result_numeric`/`result_raw` store the comparison, the
+limit, and the original string separately -- none silently coerced to a
+bare number or to null.
+
+**Dyostem berry-volume histogram: 8 samples × 20 bins = 160 rows,
+verified bin-for-bin.** `berry_count` sums: 608250190=100, 608250191=103,
+609010427=97, 609010428=98, 609080462=100, 609080463=98, 609150514=100,
+609150515=99. Six of eight land in the 97-100 range this round's brief
+expected; `608250191` (Mars Blk 3, 2026-08-25) sums to 103. Investigated
+before accepting, not rounded past: pulled all 20 raw CSV rows for that
+sample directly, confirmed all 20 bins present exactly once each, no
+duplicate or extra bin rows, values summing to 103 in the source file
+itself. This is ETS's own reported count for that sample, not a parsing
+artifact -- Dyostem sample size varies in practice and 100 is a typical
+target, not a hard constraint. Recorded here rather than silently
+matching the expected range.
+
+**`berry_maturity_by_block` returns 12 rows, not the round's own guessed
+14.** The view is one row per (`block_id`, `collected_on`) over
+`sample_type='berry_maturity'` samples only: 6 distinct `collected_on`
+dates (2023-10-18, 2024-09-06, 2026-08-25, 2026-09-01, 2026-09-08,
+2026-09-15) × 2 blocks = 12. The brief's "7 dates" framing (implicitly
+including the two 2025 `berry_smoke` collection dates and/or the
+2025-11-11 `trial_ferment` date) doesn't correspond to any actual
+`berry_maturity`-typed sample date -- those three sample types never
+share a `collected_on`. Verified live against the deployed view, not
+assumed from the row-count arithmetic alone.
+
+**`domain_reality()` verified live**, post-backfill, for the new
+`berry_sampling` Tier-3 clause: `is_real` = false for 2022, true for
+2023/2024/2025/2026 -- matches `lab_samples.vintage` coverage exactly.
+Not registered in `real_data_sources`: that table only gates
+`series_bucketed()`/`sensor_readings`-backed metrics (confirmed against
+`20260826000001`'s own scope), which `lab_samples`/`lab_results` never
+flow through -- this follows the `harvest_receipts`/`labour`
+existence-based Tier-3 pattern instead.
+
+**RLS verified adversarially, using the `SET LOCAL`-in-a-transaction
+pattern this file's own "Adversarial `set role` leaks across the
+transaction pooler" entry requires** (never a bare `SET ROLE` against the
+pooled `DATABASE_URL`): as plain `authenticated` with no operator claim,
+`lab_samples`/`lab_results`/`berry_volume_histogram`/
+`berry_maturity_by_block` all return 0 rows; impersonating a real
+`user_profiles` operator row (`set_config('request.jwt.claim.sub',
+<uuid>, true)` inside the same transaction) returns the full live counts
+(18/161/160/12). `select current_user` confirmed `postgres` again
+immediately after each rollback -- no leaked role carried forward onto
+the pooled connection.
+
+**Separate issue noticed, not part of this round's write path:
+`block_lots` (varietal per block) has RLS enabled with zero policies
+AND no `SELECT` grant to `authenticated`/`anon`/`service_role` at all**
+(only the table owner can read it) -- confirmed live via
+`pg_policies`/`information_schema.role_table_grants`. Not touched by
+this round (blocks 2 and 3 are both 100% Cabernet Sauvignon per the
+prior reconciliation investigation, so varietal carries no information
+for this dataset either way, and `block_lots` is deliberately not joined
+anywhere in `ets_labs/`). Flagged for a future fix, not fixed here --
+this round's scope is additive (three new tables, one view, one
+`domain_reality()` clause) and doesn't touch `block_lots`'s own grants/
+policies.
+
+**What did NOT get independently verified**: whether ETS's own
+`collected_on`-vs-`received_on` convention generalizes beyond this
+dataset's one differing pair (409070336/409070337) -- only one example
+exists to check against. Whether 511110861/511110861A is truly the only
+reissue pattern ETS ever produces, versus just the only one in this
+file, is likewise unverified beyond "grep the other 42 sample numbers for
+the same shape, find none."

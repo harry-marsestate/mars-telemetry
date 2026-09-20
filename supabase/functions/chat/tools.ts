@@ -580,6 +580,42 @@ async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Pr
     notes.push(`(${code} lab-analysis date range across every matching row: ${rangeLabel(r.min, r.max)}.)`);
   }
 
+  // Multi-reading disclosure (2026-09-20): lot_analyses genuinely
+  // contains more than one reading of the same analysis_type for the
+  // same lot_code on the same date -- confirmed live, not a duplication
+  // bug (see the within-lot-duplicates entry in docs/SECURITY.md): a
+  // live InnoVint API call confirmed a distinct, populated `vesselId`
+  // per reading for a multi-vessel case (MA24CSV3's three brix values
+  // on one timestamp) and a distinct `actionId` per reading for a
+  // same-day-different-submission case (MA22CS's two 2024-05-01
+  // panels) -- both real, separate InnoVint records, not a sync
+  // artifact. lot_analyses stores NEITHER field today (confirmed
+  // against ingest-innovint's own InnoVintAnalysis interface, which
+  // never declared them) -- the real fix is syncing one of them, not
+  // built this round (see docs/SECURITY.md for the recommendation).
+  // Until then, a model reading two identical values on one timestamp
+  // can misread it as a duplicate record (and drop one), or divergent
+  // values as measurement inconsistency (and average or pick one) --
+  // neither matches reality. Disclosed explicitly, computed from the
+  // rows actually returned (what the model can see), not the full
+  // scope -- this is about explaining multiplicity already in the
+  // response, not detecting rows hidden by the cap (the separate
+  // concern the scope query above already covers).
+  // deno-lint-ignore no-explicit-any
+  const multiReadingGroups = new Map<string, { lot: string; type: string; date: string; values: number[] }>();
+  // deno-lint-ignore no-explicit-any
+  for (const r of data as any[]) {
+    const dateKey = String(r.recorded_at).slice(0, 10);
+    const key = `${r.lot_code}|${r.analysis_type}|${dateKey}`;
+    if (!multiReadingGroups.has(key)) multiReadingGroups.set(key, { lot: r.lot_code, type: r.analysis_type, date: dateKey, values: [] });
+    multiReadingGroups.get(key)!.values.push(r.value);
+  }
+  const multiGroups = [...multiReadingGroups.values()].filter((g) => g.values.length > 1);
+  if (multiGroups.length > 0) {
+    const listing = multiGroups.map((g) => `${g.lot} ${g.type} on ${dayLabel(g.date)} has ${g.values.length} readings (${g.values.join(", ")})`).join("; ");
+    notes.push(`(Note: this result has more than one reading for the same lot/analyte/date in ${multiGroups.length} case(s) -- ${listing}. lot_analyses has no vessel or sample identifier to label these individually (InnoVint's own API exposes one, not yet synced -- see docs/SECURITY.md), but they are CONFIRMED real, separate InnoVint records -- different vessels or different lab submissions, not duplicate rows. Report every value; never average them, and never drop one as a suspected duplicate.)`);
+  }
+
   const truncated = data.length === cappedLimit;
   if (truncated) {
     notes.push(`(Returned the maximum ${cappedLimit} rows -- there may be more. Narrow with lot_code, lot_name, analysis_type, or a date range if this doesn't cover what you need.)`);

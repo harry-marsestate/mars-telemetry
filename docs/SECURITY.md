@@ -4843,12 +4843,46 @@ about):**
 - `lot_name='Cabernet Sauvignon, V3'` + `analysis_type='brix'`, no
   date filter, default limit 50: 3 distinct lot_codes in the result
   (`MA22CSV3`, `MA23CSV3`, `MA24CSV3`) -- confirms bug (ii) is real for
-  a realistic query shape and that the new multi-lot-code note would
-  fire; the exact unfiltered-all-analytes case happens to NOT trigger
-  it (recency ordering + the default 50-row cap push 2023's older rows
-  out of the window entirely before mixing becomes visible) -- recorded
-  as a real, if narrower-than-hoped, confirmation rather than glossed
-  over.
+  a realistic query shape and that the multi-lot-code note fires.
+
+**A second review pass on this same entry caught that the FIRST version
+of the multi-lot-code warning had its own bug -- worse than bug (ii)
+itself, not just a weaker test of it.** The warning inspected distinct
+`lot_code`s in the RETURNED (capped, recency-ordered) rows. Tried the
+one case that exercises this directly -- `lot_name='Cabernet Sauvignon,
+V3'`, no date filter, no `analysis_type` filter, default limit 50 --
+and confirmed live: the returned rows are 100% `MA24CSV3` (it has 176
+rows, all more recent than anything in `MA23CSV3`'s or `MA22CSV3`'s
+history, so they fill the entire 50-row window before older lots'
+genuinely-matching rows ever appear). Checking `data` alone therefore
+saw exactly one distinct `lot_code` and stayed silent -- a question
+about the 2023 V3 lot would have been answered with 100% 2024 data,
+with NO warning at all. The plain cross-vintage blend (bug ii on its
+own) at least hands the model two lot_codes to be suspicious of; this
+handed it nothing -- a silent-wrong-answer bug, not merely a narrower
+confirmation of the one being fixed.
+
+**Fix:** the multi-lot-code check now runs against a separate, cheap,
+row-cap-independent scope query -- `select lot_code, lot_name` with the
+identical filters (same `applyFilters()` closure used for the main
+query, so the two conditions can't drift apart), no `order`/no
+`cappedLimit`, just a defensive `.limit(1000)` (`lot_analyses` is 1,405
+rows total; any filtered subset is far smaller). Verified live with
+exactly the failing case: the scope query for `lot_name='Cabernet
+Sauvignon, V3'` (no other filters) returns all 3 real matches
+(`MA22CSV3`, `MA23CSV3`, `MA24CSV3`), while the capped display query
+still returns 100% `MA24CSV3`. The tool now emits BOTH notes the fix
+requires: which lots the name matches (all 3, named), and which of
+those actually survived into the capped result (`MA24CSV3` only,
+`MA22CSV3`/`MA23CSV3` named as pushed out by recency + the row limit,
+not silently absent). Regression-checked the three previously-verified
+cases against the new scope-query logic -- all unchanged: the 2023-V3-
+brix case and the ZIN case each scope to exactly one lot (no warning,
+correctly), and the broad "Cabernet Sauvignon" case now correctly
+scopes to all 6 real matches (up from whatever a naive check of the
+capped result would have shown), `MA23CS`/`MA23CSV2-AP` still both
+present among them, unresolved cluster still untouched.
+
 - `fetchSupersededLotMap()`'s fail-closed error path: verified by code
   inspection (unconditional `if (error) return formatErrorForModel(error)`
   before any query is built, same pattern as every other error check in

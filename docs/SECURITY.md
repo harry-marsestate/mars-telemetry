@@ -3960,3 +3960,5 @@ create accounts or mutate roles just to manufacture a verification case.
 Separate migration verification: `supabase migration list` completed successfully;
 all 62 local migration versions match remote through `20260918120000` (no pending
 migration). No migration command that writes schema or data was run.
+Correction to the preceding count: there are **61**, not 62, migration files;
+all 61 local/remote versions match. The sync conclusion is unchanged.

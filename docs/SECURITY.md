@@ -4934,3 +4934,72 @@ that produced this figure necessarily returned the correct 2023-10-27
 timestamp, since that's the only place a value like 4.22 exists in the
 real rows. Recorded here rather than glossed over; not something this
 round's fix could have caused or should be expected to catch.
+
+## get_lot_analyses date-range bug: third instance of one pattern -- precompute, don't ask the model to derive from capped rows
+
+The MA23CSV3 "Mar 2023" inaccuracy above turned out not to be an
+isolated model slip -- it's the third confirmed instance of one
+pattern in this project: **tool figures exact, a DERIVED claim wrong**,
+because the model computed something itself from a row set that either
+was capped or the model implicitly assumed was complete. The first two
+instances were labour's arithmetic totals (the August round's headline-
+sum bugs), fixed by having `labour-totals.ts` precompute exact decimal
+totals backend-side rather than asking the model to sum category rows.
+This is the same remedy applied to a different derived quantity: a
+per-lot date RANGE.
+
+**Why the wrong start date specifically, not a random error:**
+`MA23CSV3` has 80 rows total. A follow-up `get_lot_analyses` call for
+that lot with the default `limit=50`, ordered most-recent-first, would
+return only its 50 MOST RECENT rows -- silently hiding the true (older)
+start of its history. That's a plausible-but-wrong start date, not an
+obviously-missing one -- the exact failure shape observed, and a
+different exposure from the multi-lot-code bug fixed earlier in this
+same entry, though caught by the same root cause (trusting the capped,
+recency-ordered result to represent the full matching set).
+
+**Fix:** `getLotAnalyses`'s existing scope query (added for the multi-
+lot-code fix) now also selects `recorded_at` and computes each matched
+lot_code's true `MIN`/`MAX` client-side -- independent of the display
+query's row cap, same "separate cheap query, not derived from the
+capped result" shape as the multi-lot-code fix itself. One consolidated
+note appended to every result:
+- Single matched lot: `"(MA23CSV3 lab-analysis date range across every
+  matching row: October 27, 2023 through July 11, 2024.)"` -- spelled
+  out in words via the existing `dayLabel()` helper (the same "never a
+  bare ISO string" rule as every other date this project reports back
+  to a model), not a raw timestamp pair.
+- Multiple matched lots: the existing multi-lot-code note, plus a
+  per-lot date-range listing for all of them in one place, so a model
+  asking a vintage-vague question can disambiguate on the FIRST call
+  without a follow-up round trip.
+
+**Verified live** against the real data (not just read from the code):
+`MA23CSV3` explicit-lot_code scope query: `2023-10-27 17:20:00+00` to
+`2024-07-11 07:00:00+00` -- exactly the range that should have been
+reported, confirming the fix would have produced the correct answer
+Kimi got wrong. Three-lot `lot_name='Cabernet Sauvignon, V3'` scope
+query: `MA22CSV3` (2022-07-11 to 2024-02-08), `MA23CSV3` (2023-10-27 to
+2024-07-11), `MA24CSV3` (2024-10-01 to 2026-02-03) -- all three ranges
+correct and none derived from a capped row set.
+
+**Recommendation on extending the same treatment to `get_berry_maturity`/
+`get_smoke_markers`: hold off, don't build it.** Both already carry
+the same remedy category from their original build -- a server-
+computed, word-formatted coverage note (the per-vintage analyte-
+presence/absence paragraph, `dayLabel()`-formatted collection dates)
+that the model is meant to read rather than infer from raw rows. The
+failure pattern behind all three confirmed bugs so far is specifically
+an AGGREGATE over many rows the model computed itself (a 50+ row SUM
+for labour, an 80-row MIN/MAX-across-a-capped-window here) -- not
+something either berry tool's raw payload currently invites: their
+whole dataset is 160 rows across all of `lab_results_current`/
+`lab_samples_current` combined, comfortably under any row cap, and the
+one thing a model might still derive from the raw rows it's shown --
+"brix rose X points from date A to date B" -- is a two-point delta
+over numbers already adjacent in the same payload, a qualitatively
+lower-risk shape than a many-row aggregate and not something observed
+to fail live. Fixing a confirmed bug is different from preemptively
+hardening against one that hasn't manifested; recommend waiting for an
+actual live failure in either berry tool before adding more
+precomputed fields there.

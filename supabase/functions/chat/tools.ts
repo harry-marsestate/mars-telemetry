@@ -468,26 +468,61 @@ async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Pr
     return q;
   };
 
-  // Bug (ii), corrected: the multi-lot-code warning must be based on
-  // EVERY distinct lot_code the filters match, not on whichever ones
-  // happen to survive the row cap below. Confirmed live this
-  // distinction is load-bearing, not theoretical: lot_name='Cabernet
-  // Sauvignon, V3' with no date filter returns 100% MA24CSV3 rows (176
-  // available, all more recent than MA23CSV3's) -- recency ordering
-  // plus the default 50-row cap fill the entire window before
-  // MA22CSV3/MA23CSV3's genuinely-matching rows ever appear, so a
-  // check against the returned `data` alone sees exactly one lot_code
-  // and stays silent. A separate, cheap, unordered/unlimited-within-
-  // reason query (lot_analyses is 1,405 rows total; any filtered
-  // subset is far smaller) is the only way to see the true match set.
-  let allMatchedLots: Map<string, string> | null = null;
-  if (!lot_code) {
-    const scopeQuery = applyFilters(supabase.from("lot_analyses").select("lot_code, lot_name")).limit(1000);
-    const { data: scopeRows, error: scopeError } = await scopeQuery;
-    if (scopeError) return formatErrorForModel(scopeError);
-    // deno-lint-ignore no-explicit-any
-    allMatchedLots = new Map((scopeRows as any[]).map((r) => [r.lot_code, r.lot_name]));
+  // Scope query: EVERY distinct lot_code the filters match, and each
+  // one's true min/max recorded_at -- both computed independently of
+  // the row cap below, for two separate reasons that happen to share
+  // one query:
+  //
+  // (a) The multi-lot-code warning must be based on the true match set,
+  // not on whichever lot_codes happen to survive the cap. Confirmed
+  // live this distinction is load-bearing, not theoretical:
+  // lot_name='Cabernet Sauvignon, V3' with no date filter returns 100%
+  // MA24CSV3 rows (176 available, all more recent than MA23CSV3's) --
+  // recency ordering plus the default 50-row cap fill the entire
+  // window before MA22CSV3/MA23CSV3's genuinely-matching rows ever
+  // appear, so a check against the returned `data` alone sees exactly
+  // one lot_code and stays silent.
+  //
+  // (b) The per-lot date-RANGE has the identical exposure, and it's
+  // what actually produced a wrong answer live: asked for "the
+  // Cabernet Sauvignon V3 lot's history," Kimi correctly named all
+  // three lots (the fix above), picked MA24CSV3 as primary, but then
+  // separately stated MA23CSV3's own range as "Mar 2023-Jul 2024" --
+  // real end date, wrong start. MA23CSV3 has 80 rows; a follow-up call
+  // with the default 50-row cap and recency ordering would show only
+  // its MOST RECENT 50 rows, silently hiding the true (older) start of
+  // its history -- exactly the shape that produces a plausible-but-
+  // wrong start date instead of an obviously-missing one. Same remedy
+  // this project already applied to labour's arithmetic totals
+  // (labour-totals.ts precomputes backend-side rather than asking the
+  // model to sum capped/possibly-partial rows): compute the date range
+  // server-side from every matching row, not from whatever fits in the
+  // display window.
+  //
+  // lot_analyses is 1,405 rows total; any filtered subset is far
+  // smaller, so one unordered, capped-generously-not-tightly query
+  // (recorded_at only, no full row payload) is cheap regardless of
+  // whether lot_code was given.
+  const scopeQuery = applyFilters(supabase.from("lot_analyses").select("lot_code, lot_name, recorded_at")).limit(1000);
+  const { data: scopeRows, error: scopeError } = await scopeQuery;
+  if (scopeError) return formatErrorForModel(scopeError);
+
+  const lotRanges = new Map<string, { name: string; min: string; max: string }>();
+  // deno-lint-ignore no-explicit-any
+  for (const r of scopeRows as any[]) {
+    const existing = lotRanges.get(r.lot_code);
+    if (!existing) {
+      lotRanges.set(r.lot_code, { name: r.lot_name, min: r.recorded_at, max: r.recorded_at });
+    } else {
+      if (r.recorded_at < existing.min) existing.min = r.recorded_at;
+      if (r.recorded_at > existing.max) existing.max = r.recorded_at;
+    }
   }
+  const rangeLabel = (min: string, max: string) => {
+    const a = dayLabel(min.slice(0, 10));
+    const b = dayLabel(max.slice(0, 10));
+    return a === b ? a : `${a} through ${b}`;
+  };
 
   const query = applyFilters(
     supabase
@@ -506,17 +541,23 @@ async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Pr
     notes.push(`(Note: ${lot_code} is a superseded duplicate lot_code -- InnoVint has two lot objects for this same physical wine. The canonical/complete record is ${superseded.map.get(lot_code)}.)`);
   }
 
-  if (allMatchedLots && allMatchedLots.size > 1) {
-    const matchedListing = [...allMatchedLots.entries()].map(([code, name]) => `${code} (${name})`).join(", ");
-    notes.push(`(Note: this lot_name search matches ${allMatchedLots.size} distinct lots, not one -- ${matchedListing}. Treat these as separate lots/vintages unless you intend a cross-vintage comparison; narrow with lot_code for a single lot.)`);
+  if (lotRanges.size > 1) {
+    const matchedListing = [...lotRanges.entries()].map(([code, r]) => `${code} (${r.name})`).join(", ");
+    notes.push(`(Note: this lot_name search matches ${lotRanges.size} distinct lots, not one -- ${matchedListing}. Treat these as separate lots/vintages unless you intend a cross-vintage comparison; narrow with lot_code for a single lot.)`);
 
     // deno-lint-ignore no-explicit-any
     const returnedLots = new Set((data as any[]).map((r) => r.lot_code));
-    if (returnedLots.size < allMatchedLots.size) {
+    if (returnedLots.size < lotRanges.size) {
       const returnedListing = [...returnedLots].join(", ") || "none";
-      const missingListing = [...allMatchedLots.keys()].filter((c) => !returnedLots.has(c)).join(", ");
+      const missingListing = [...lotRanges.keys()].filter((c) => !returnedLots.has(c)).join(", ");
       notes.push(`(This capped, most-recent-first result only actually CONTAINS rows from: ${returnedListing}. Rows from ${missingListing} matched the same search but were pushed entirely out of the ${cappedLimit}-row window by more recent data from another lot -- pass lot_code to see one specifically, or narrow analysis_type/date range.)`);
     }
+
+    const rangeListing = [...lotRanges.entries()].map(([code, r]) => `${code}: ${rangeLabel(r.min, r.max)}`).join("; ");
+    notes.push(`(Date ranges (computed from every matching row, not just what's shown above, so this is reliable even where the row cap isn't) -- ${rangeListing}.)`);
+  } else if (lotRanges.size === 1) {
+    const [[code, r]] = lotRanges;
+    notes.push(`(${code} lab-analysis date range across every matching row: ${rangeLabel(r.min, r.max)}.)`);
   }
 
   const truncated = data.length === cappedLimit;

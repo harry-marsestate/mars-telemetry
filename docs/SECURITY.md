@@ -5207,3 +5207,144 @@ returns `true` for 2026, and a real-only account now sees the "Not
 available in real-only mode" empty state instead. This is a genuine,
 newly-corrected user-visible behavior change, reported here rather than
 only implied by the domain_reality() numbers above.
+
+## ETS Labs winery-side ingestion (Phase 2): into the existing lab_samples/lab_results tables, a reconciliation view, and a real domain_reality() regression caught by this round's own verification
+
+Ingests the 93 winery-side ETS CSV rows (25 sample numbers, outside
+Phase 1's vineyard-side scope) into the SAME `lab_samples`/`lab_results`
+tables Phase 1 uses -- no new base tables, per the owner's decision.
+Re-verified rather than re-litigated what the prior Phase 2
+investigation already established: overlap with `lot_analyses` is 5
+rows (all same-day ethanol, zero value conflicts, zero date-near
+matches), lot-code mapping (V2/V3 = B2/B3, `T-7 V-2` = tank 7/block 2,
+`MA22CS`/`MA23CS`/`MA24CS` = estate blends with no single block),
+vintage-from-lot-code, and the Chardonnay lineage's `fruit_source`.
+
+**Schema changes**: `lab_samples.sample_type` widened to add `'ferment'`
+(`'must'`/`'wine'`/`'stability_trial'` were already reserved by Phase
+1's own migration for this exact round). `lab_results.result_numeric`/
+`result_operator` widened to nullable -- two rows (MA25CH's
+conductivity-test disclaimer, its Heat Stability Trial protocol note)
+carry multi-line free-text `Result` content with no number to extract.
+No `CHECK` constraint change needed for `result_operator`: Postgres
+treats `x IN (...)` as satisfied (not violated) when `x IS NULL`,
+confirmed against Postgres's own documented semantics before relying
+on it, not assumed.
+
+**sample_type assignment, checked per sample not assumed uniform**:
+`'must'` for the one pre-fermentation juice sample (`26MARCH`).
+`'ferment'` for the one active-fermentation sample (`T-7 V-2
+(fermenting)` -- the only description naming its own phase).
+`'stability_trial'` for the five samples whose CSV rows are 100%
+specialty QC content with zero routine chemistry -- the two Scorpion
+microbial-panel samples, `MA25CH`'s heat-stability/fining-trial sample,
+and its conductivity-test sample. Every other sample (18 of 25) is
+`'wine'`.
+
+**Reissue detection, corrected from a naive suffix match.**
+`606050014A`'s trailing letter matches Phase 1's reissue SHAPE
+(`base_sample_no()` would strip it to `606050014`), but checked before
+applying it: `606050014` (ethanol, 2 rows) and `606050014A` (a
+conductivity-test free-text note, 1 row) share ZERO analytes and sit 3
+days apart, unlike Phase 1's actual reissue
+(`511110861`/`511110861A`), which shared two byte-identical values at
+the same `recorded_at`. Not a reissue -- two independent lab
+deliverables for (plausibly) the same bottle, routed through different
+lab workflows. `reissue_of` is NOT set for it, deliberately overriding
+what the generic suffix-detection helper would produce.
+
+**Reconciliation: `ets_lot_bridge`/`ets_analyte_bridge` + a view**,
+operationalizing the investigation's own matching logic as a live,
+auditable mapping rather than a one-off script -- the "flag overlaps"
+mechanism the owner chose over skipping. Two small lookup tables
+(which ETS lot code maps to which InnoVint `lot_code`(s); which ETS
+`analysis_code` maps to which `lot_analyses.analysis_type`) rather than
+a `CASE` tree buried in a view -- same explicit-mapping precedent as
+`block_innovint_map`/`lot_canonical_map`. `ets_lot_analyses_reconciliation`
+classifies every winery ETS result into `exact`/`value_conflict`/
+`date_near`/`ets_only`, using a `LATERAL` join that searches across
+every valid `(lot_code, analyte)` candidate at once (not a join that
+fans out per candidate -- would have produced 3 redundant rows for a
+single `MA23CSV3` result, since `MA23CSV3`/`MA23CSV3-AP`/`MA23CSV322`
+are exact duplicates of each other).
+
+**Verified live: bucket counts match the investigation exactly.** 5
+`exact`, 0 `value_conflict`, 0 `date_near`, 88 `ets_only` -- the 5
+exact matches are the same 5 rows the investigation found (`MA23CSV2`/
+`MA23CSV3`/`MA23ZIN` ethanol on 2023-12-22, `MA25CH` ethanol-20c/60f on
+2026-06-18), values and matched lot_codes identical.
+
+**Backfill verified**: self-check passed (414 total CSV rows, 93
+winery rows, 25 samples, 25 non-reissue, 2 text-result rows, 93
+`lab_results` rows, 14 censored). Live totals after: 43 `lab_samples`
+(18 Phase 1 + 25 Phase 2), 254 `lab_results` (161 + 93),
+`berry_volume_histogram` unchanged at 160. **Idempotency demonstrated**,
+same discipline as Phase 1: re-ran the backfill against the live
+database, `lab_samples.ingested_at` for all 25 winery samples
+byte-identical to the pre-rerun snapshot, an `md5` hash over all of
+`lab_results.ingested_at` unchanged, counts unchanged (43/254/160).
+
+**A real regression, caught by this round's own verification, fixed
+before moving on.** `domain_reality()`'s `berry_sampling` clause was
+never scoped to berry `sample_type`s -- `exists(select 1 from
+lab_samples ls where ls.vintage = v.vintage)` silently meant "any
+`lab_samples` row of any kind," which was harmless only because every
+`lab_samples` row happened to be berry-side until this exact backfill.
+Confirmed live before writing the fix: `berry_sampling(2022)` had
+flipped from `false` (correct -- 2022 has no berry data) to `true`
+(wrong -- only the four winery wine-chemistry samples, `MA22CS`/
+`CSV2`/`CSV3`/`ZIN`, exist for 2022). Fixed by scoping the `exists()`
+to `sample_type in ('berry_maturity','berry_smoke','trial_ferment')`;
+re-verified live afterward: `berry_sampling` restored to its exact
+pre-backfill values (`f,t,t,t,t` for 2022-2026), `harvest_receipts`
+(Part C's own fix) unaffected. Added a new, correctly-scoped
+`wine_lab_results` domain in the same migration for symmetry (real for
+all five vintages, matching the winery data's own coverage) -- nothing
+currently depends on it; added for completeness, not because a bug
+required it.
+
+**`get_wine_lab_results`**: new chat tool, following the berry tools'
+established rules -- reads `lab_samples_current`/`lab_results_current`
+only, operator-only via RLS (no application-level check), never
+real-only-mode gated (no simulated counterpart exists), `result_operator`
+surfaced on every row. Built the substring-collision fix (proven
+necessary by `get_lot_analyses`'s own bug earlier this round) in from
+the start rather than discovering it live: `sample_description='MA22CS'`
+is a confirmed real collision (matches `MA22CS`/`MA22CSV2`/`MA22CSV3`,
+all three vintage 2022 -- `vintage` alone does NOT disambiguate this
+case, unlike what might be assumed). Every response states which
+distinct `sample_description` values actually matched, computed from
+the full (uncapped -- 25 samples/93 rows total, far under any limit)
+sample set, and a precomputed per-lot date range in words
+(`dayLabel()`-formatted, never inferred from counting rows). Each
+result row also carries its `ets_lot_analyses_reconciliation` status
+(`lot_analyses_match`/`lot_analyses_lot_code`/`lot_analyses_value`),
+extending the "flag overlaps" surface into chat directly.
+
+**Verified live, every query shape (real Postgres data, not reasoned
+about):**
+- `sample_description='MA22CS'`: confirmed matches 3 distinct
+  descriptions (`MA22CS`/`MA22CSV2`/`MA22CSV3`) -- the exact collision
+  the tool description warns about.
+- `sample_description='25CHMR-LF'`: 9 rows across 3 samples, date range
+  2025-10-14 through 2026-02-26 -- matches the investigation exactly.
+- Reconciliation join, `MA23CSV2`: `ethanol_at_20c` -> `exact`,
+  matched `MA23CSV2-AP`, value `14.74`; `ethanol_at_60f` -> `ets_only`
+  (no counterpart) -- both exactly as the investigation found.
+- The two free-text rows: `result_numeric`/`result_operator` both
+  `NULL`, `result_raw` carries the full text -- confirmed, not dropped.
+
+**RLS verified adversarially** (`SET LOCAL`-in-a-transaction):
+`ets_lot_bridge`/`ets_analyte_bridge` open to plain `authenticated` (13
+and 14 rows respectively, static reference data, no operator claim
+needed) -- `ets_lot_analyses_reconciliation` and raw winery
+`lab_samples` rows correctly return 0 for plain `authenticated`, 93 and
+25 respectively for an impersonated real operator. `current_user`
+confirmed `postgres` after each rollback.
+
+TypeScript verified via `tsc --noEmit` on both changed files -- zero
+`TS1xxx` syntax errors, brace/paren counts balanced.
+
+**Not yet deployed as of this entry** -- gated in this environment;
+prepared and committed, owner to run
+`supabase functions deploy chat --use-api`.

@@ -186,6 +186,24 @@ export const TOOLS: Anthropic.Tool[] = [
       required: [],
     },
   },
+  {
+    name: "get_wine_lab_results",
+    description:
+      "Real winery lab chemistry from ETS Labs (ethanol, VA, TA, pH, free/total SO2, YAN, ammonia, potassium, malic acid, glucose+fructose, brix, plus specialty QC panels -- microbial safety, heat/cold stability trials, fining trials, conductivity), sourced from the same CSV as get_berry_maturity/get_smoke_markers but covering wine/must/ferment/stability-trial samples instead of vineyard ones. Reads lab_results_current/lab_samples_current only -- never the raw lab_samples/lab_results tables, which intentionally retain superseded reissue rows. sample_description identifies the lot (e.g. 'MA23CS', '25CHMR-LF') -- partial match, and CAUTION: some codes are literal substrings of others in the SAME vintage (e.g. 'MA22CS' also matches 'MA22CSV2' and 'MA22CSV3' -- vintage alone does NOT disambiguate this case, since all three are 2022). The response always states which distinct sample_description values actually matched; read that before assuming a result is about one lot. Every result row carries result_operator ('=' or '<' -- a '<' row is a detection-limit censored result, never report it as a plain number), units, and a reconciliation status against InnoVint's own lot_analyses (lot_match: 'exact' = same lot/date/analyte/value already in lot_analyses, 'value_conflict' = same lot/date/analyte but a DIFFERENT value there, 'date_near' = matched within 3 days not same day, 'ets_only' = no InnoVint counterpart at all -- most rows are 'ets_only', that's expected, not a data quality problem). Date coverage per matched lot is precomputed server-side and spelled out in words in the response -- never infer a lot's date range from counting rows yourself. Operator access only (RLS-enforced). Never gated by real-only mode -- no simulated counterpart exists for this data. Two rows (MA25CH's conductivity-test disclaimer and its Heat Stability Trial protocol note) have result_numeric=null and only a free-text result_raw -- report their content as text, not as a missing number.",
+    input_schema: {
+      type: "object",
+      properties: {
+        sample_description: { type: "string", description: "Partial match on the ETS/InnoVint lot code, e.g. 'MA23CS' or '25CHMR-LF'. Omit for all winery samples." },
+        vintage: { type: "integer", description: "Year, e.g. 2023. Omit for all vintages." },
+        sample_type: { type: "string", enum: ["must", "wine", "ferment", "stability_trial"], description: "Narrow to one sample phase. Omit for all." },
+        analysis_code: { type: "string", description: "Exact analysis code, e.g. 'ethanol_at_20c', 'volatile_acidity_acetic_acid', 'ph'." },
+        start_date: { type: "string", description: "ISO date lower bound on analyzed_at." },
+        end_date: { type: "string", description: "ISO date upper bound on analyzed_at." },
+        limit: { type: "integer", description: "Max rows to return, default 100, max 300." },
+      },
+      required: [],
+    },
+  },
 ];
 
 export interface ToolResult {
@@ -229,6 +247,8 @@ export async function runTool(
         return await getBerryMaturity(supabase, input);
       case "get_smoke_markers":
         return await getSmokeMarkers(supabase, input);
+      case "get_wine_lab_results":
+        return await getWineLabResults(supabase, input);
       default:
         return { content: `Unknown tool: ${name}`, isError: true };
     }
@@ -911,4 +931,138 @@ async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): P
   }
   const note = `\n\nCoverage (all vintages, regardless of this call's filters): ${coverageLines.join(" ")} Units are basis-specific (µg/kg = berry mass, µg/L = liquid/juice) and are never interchangeable -- always read the units field on each row.`;
   return { content: JSON.stringify(rows) + note, isError: false };
+}
+
+const WINERY_SAMPLE_TYPES = ["must", "wine", "ferment", "stability_trial"];
+
+// ETS winery ingestion (2026-09-20): lab_samples/lab_results are the same
+// lossless base tables Phase 1's berry tools already guard against --
+// this tool reads lab_samples_current/lab_results_current for the exact
+// same reason (superseded reissue rows must never resurface). Never
+// gated by real-only mode, same reasoning as the berry tools: no
+// simulated counterpart has ever existed for ETS lab data.
+//
+// sample_description is a KNOWN substring-collision risk in this exact
+// dataset -- confirmed live: 'MA22CS' is a literal substring of
+// 'MA22CSV2'/'MA22CSV3', and all three are vintage 2022, so `vintage`
+// does NOT disambiguate the way it might look like it should. This is
+// the same class of bug get_lot_analyses had (confirmed live there
+// too, docs/SECURITY.md) -- fixed here from the start rather than
+// discovered later: every matching sample_description_raw is computed
+// from the full (uncapped -- this dataset is 25 samples/93 rows total,
+// nowhere near any row limit) sample set, not from whatever survives
+// the results row cap, and reported explicitly whenever a search
+// matches more than one.
+// deno-lint-ignore no-explicit-any
+async function getWineLabResults(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
+  const { sample_description, vintage, sample_type, analysis_code, start_date, end_date, limit } = input as {
+    sample_description?: string; vintage?: number; sample_type?: string; analysis_code?: string;
+    start_date?: string; end_date?: string; limit?: number;
+  };
+  const cappedLimit = Math.min(limit && limit > 0 ? limit : 100, 300);
+
+  let sampleQuery = supabase
+    .from("lab_samples_current")
+    .select("id, lab_sample_no, sample_description_raw, sample_type, vintage, collected_on, fruit_source")
+    .in("sample_type", sample_type ? [sample_type] : WINERY_SAMPLE_TYPES);
+  if (sample_description) sampleQuery = sampleQuery.ilike("sample_description_raw", `%${sample_description}%`);
+  if (vintage) sampleQuery = sampleQuery.eq("vintage", vintage);
+  const { data: samples, error: sampleErr } = await sampleQuery;
+  if (sampleErr) return formatErrorForModel(sampleErr);
+
+  // deno-lint-ignore no-explicit-any
+  const sampleById = new Map((samples as any[]).map((s) => [s.id, s]));
+  const sampleIds = [...sampleById.keys()];
+
+  let rows: unknown[] = [];
+  if (sampleIds.length > 0) {
+    let resultQuery = supabase
+      .from("lab_results_current")
+      .select("id, sample_id, analysis_name_raw, analysis_code, result_raw, result_numeric, result_operator, units, analyzed_at")
+      .in("sample_id", sampleIds)
+      .order("analyzed_at", { ascending: false })
+      .limit(cappedLimit);
+    if (analysis_code) resultQuery = resultQuery.eq("analysis_code", analysis_code);
+    if (start_date) resultQuery = resultQuery.gte("analyzed_at", start_date);
+    if (end_date) resultQuery = resultQuery.lte("analyzed_at", end_date);
+
+    const { data: results, error: resultsErr } = await resultQuery;
+    if (resultsErr) return formatErrorForModel(resultsErr);
+
+    // Reconciliation status per result row -- the "flag overlaps" surface
+    // the owner chose over skipping duplicated analytes. Fetched by id
+    // (the view's own lab_result_id), not re-derived here.
+    // deno-lint-ignore no-explicit-any
+    const resultIds = (results as any[]).map((r) => r.id);
+    const reconById = new Map<number, { status: string; lot: string | null; value: number | null }>();
+    if (resultIds.length > 0) {
+      const { data: recon, error: reconErr } = await supabase
+        .from("ets_lot_analyses_reconciliation")
+        .select("lab_result_id, match_status, matched_lot_code, matched_value")
+        .in("lab_result_id", resultIds);
+      if (reconErr) return formatErrorForModel(reconErr);
+      // deno-lint-ignore no-explicit-any
+      for (const r of recon as any[]) {
+        reconById.set(r.lab_result_id, { status: r.match_status, lot: r.matched_lot_code, value: r.matched_value });
+      }
+    }
+
+    // deno-lint-ignore no-explicit-any
+    rows = (results as any[]).map((r) => {
+      const s = sampleById.get(r.sample_id);
+      const recon = reconById.get(r.id);
+      return {
+        sample_description: s?.sample_description_raw,
+        sample_type: s?.sample_type,
+        vintage: s?.vintage,
+        collected_on: s?.collected_on,
+        fruit_source: s?.fruit_source,
+        lab_sample_no: s?.lab_sample_no,
+        analysis_name_raw: r.analysis_name_raw,
+        analysis_code: r.analysis_code,
+        result_operator: r.result_operator,
+        result_numeric: r.result_numeric,
+        result_raw: r.result_raw,
+        units: r.units,
+        analyzed_at: r.analyzed_at,
+        lot_analyses_match: recon?.status ?? "ets_only",
+        lot_analyses_lot_code: recon?.lot ?? null,
+        lot_analyses_value: recon?.value ?? null,
+      };
+    });
+  }
+
+  const notes: string[] = [];
+
+  // Precomputed per-description date range (dayLabel()-formatted, in
+  // words) -- same "don't let the model derive a range from a row set
+  // it can't fully see" fix as get_lot_analyses, applied from the start
+  // rather than discovered as a live bug.
+  const byDescription = new Map<string, { type: string; vintage: number; dates: string[] }>();
+  // deno-lint-ignore no-explicit-any
+  for (const s of samples as any[]) {
+    const key = s.sample_description_raw;
+    if (!byDescription.has(key)) byDescription.set(key, { type: s.sample_type, vintage: s.vintage, dates: [] });
+    byDescription.get(key)!.dates.push(s.collected_on);
+  }
+  if (byDescription.size === 0) {
+    notes.push(`(No winery samples match this search${sample_description ? ` for sample_description "${sample_description}"` : ""}${vintage ? ` in ${vintage}` : ""} -- not simulated, genuinely absent for this scope.)`);
+  } else {
+    const lines = [...byDescription.entries()].map(([desc, d]) => {
+      const sorted = [...new Set(d.dates)].sort();
+      const range = sorted.length === 1 ? dayLabel(sorted[0]) : `${dayLabel(sorted[0])} through ${dayLabel(sorted[sorted.length - 1])}`;
+      return `${desc} (${d.type}, ${d.vintage}): ${range}`;
+    });
+    if (byDescription.size > 1) {
+      notes.push(`(Note: this search matches ${byDescription.size} distinct sample_description values, not one -- ${[...byDescription.keys()].join(", ")}. Treat these as separate lots unless a cross-lot comparison is intended.)`);
+    }
+    notes.push(`(Date coverage per matched lot, computed from every matching sample, not just the rows shown -- ${lines.join("; ")}.)`);
+  }
+
+  const truncated = rows.length === cappedLimit;
+  if (truncated) {
+    notes.push(`(Returned the maximum ${cappedLimit} rows -- there may be more. Narrow with sample_description, analysis_code, or a date range if this doesn't cover what you need.)`);
+  }
+
+  return { content: JSON.stringify(rows) + (notes.length ? "\n\n" + notes.join(" ") : ""), isError: false };
 }

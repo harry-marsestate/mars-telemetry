@@ -3874,3 +3874,89 @@ RULE: RLS visibility does not establish singular caller identity for admins;
 filter personalization by the already verified authentication context.
 RULE: Empty results are not known zero spend, and failed coverage reads are not
 proof of absence. Inspect tool calls/results as well as generated prose.
+
+### Deployment and live evidence (2026-09-20, code commit 9c1ea57)
+
+Deno check passed using the function's own deno.json, and all six focused Node
+regressions passed before deploy. `git diff --check` passed. Branch pushed without
+merging. Vercel confirms Preview/Ready, source branch
+`fix/labour-totals-caller-profile`, source commit `9c1ea57a5e9cb16efad5023ea7c177801da3c55e`:
+https://mars-telemetry-bbji4k0qm-mars-estate1.vercel.app/
+Deployment details: https://vercel.com/mars-estate1/mars-telemetry/AtP8uqddNPMDfUgZkzD1zwqk1pqe
+
+`supabase functions deploy chat --use-api` succeeded against
+`wwdpunaefaiazsjamrkc` under the actual environment approval controls. Downloaded
+with `supabase functions download chat --project-ref wwdpunaefaiazsjamrkc --use-api
+--workdir /private/tmp/mars-deployed-20260920`; recursive comparison against the
+branch's chat directory was empty. All five TS file SHA-256 checksums also
+matched. The working tree was never the download destination. No migrations
+were added or pushed; function deployment is independent of migration state.
+
+Eight isolated deployed-function requests completed with SSE `done.provider =
+"kimi"` (Kimi K3, no fallback): three August questions, all-2026 combined,
+August Irrigation, January 2026, June 2025, and caller-name lookup. Each request
+used the existing test admin's real login. Request bodies deliberately included
+an unrelated `userId`; the name answer remained "Test". The direct scoped
+PostgREST lookup returned Test Operator despite visibility of 15 profiles.
+
+The three August answers all gave 365.19 hours, 20281.18 labour, 5531.16 expenses,
+25812.34 combined and 55.54 labour/hour. The combined answer gave 946.43 hours,
+49612.57 labour, 9877.26 expenses, 59489.83 combined, 52.42 labour/hour and
+July–August inclusive coverage (2/12, not a full season). Irrigation gave
+23.68 hours, 1154.14 labour, 0 expenses, 1154.14 combined and 48.74 labour/hour.
+An independent Python Decimal reconciliation checked exact tool sums against
+base-table SQL, every headline, and all 49 generated category-table rows across
+the three August answers and combined answer, including category rates and
+combined costs. All matched; this verifies generated answers, not merely tool
+results. Local raw SSE/tool/SQL evidence: `/private/tmp/mars-live-verification/evidence.json`;
+independent checker: `/private/tmp/mars-live-verification/reconcile.py`.
+
+SSE appended history confirmed actual calls (not inferred from prose):
+- August (three times): get_labour_summary({vintage:2026, period_month:"2026-08"}).
+- Combined: get_labour_summary({vintage:2026}).
+- Filtered: get_labour_summary({vintage:2026, period_month:"2026-08", job_category:"Irrigation"}).
+- January: get_labour_summary({vintage:2026, period_month:"2026-01"}); result:
+  "No labour records match January 2026 specifically. This vintage's actual
+  coverage is July 2026 through August 2026 INCLUSIVE (2 of 12 months)."
+- June: get_labour_summary({vintage:2025, period_month:"2025-06"}); result:
+  "No labour records match June 2025 specifically. No labour records exist for
+  vintage 2025 at all -- not simulated, genuinely absent."
+Both empty results carried record_status=no_records, empty categories and null
+cost/hour. Kimi described absence, not a query failure or simulated withholding.
+January explicitly said it was not confirmed zero spend.
+
+Real Chrome preview verification used the existing Test Operator admin, selected
+Kimi K3, and asked January, then June, then August. Both empty answers completed
+and rendered the correct coverage and explicit unknown-spend caveat. June said
+"genuine absence, not simulated or withheld data" and "don't quote it as zero".
+August rendered the correct headline, all 12 category rows, and a total row
+matching 365.19 / 20281.18 / 5531.16 / 25812.34 / 55.54. Browser UI shows the
+Kimi K3 provider badge; precise tool arguments/results were verified separately
+through the deployed endpoint's SSE appended history, not hidden browser state.
+
+Found an existing signed-in Demo Operator session on telemetry.marsestates.com;
+used a separate new tab sharing that authorized session, without disturbing its
+existing conversation. A fresh Kimi request addressed the user as "Demo" and
+completed with the correct August headline and all 12 category rows. Independent
+read-only RLS transactions confirmed Demo is an ordinary non-admin operator;
+all six existing non-admin operator profiles resolved their own names. Five
+existing null-first-name customer profiles returned null fallback. Transactions
+used SET LOCAL authenticated plus transaction-local claims and always rolled
+back; no account/role/name mutations or account creation occurred.
+
+Limits: no live model exchange was made as a null-name or missing-profile user;
+null-name behavior was verified with actual profile/RLS reads and the production
+name resolver, while missing-row/claims behavior is regression-tested. Both
+admin and ordinary-operator chat completed live. Claude was not exercised live;
+it consumes the same tool description and backend results. Some optional model
+commentary still speculates about farming activities from category labels;
+this work verifies totals/coverage/identity, not those narrative inferences.
+
+RULE: Record provider, actual tool inputs/results, independent reconciliation,
+and browser rendering separately; one successful layer does not prove another.
+RULE: Reuse existing test accounts and scoped read-only RLS transactions; never
+create accounts or mutate roles just to manufacture a verification case.
+
+Separate migration verification: `supabase migration list` completed successfully;
+all 62 local migration versions match remote through `20260918120000` (no pending
+migration). No migration command that writes schema or data was run.

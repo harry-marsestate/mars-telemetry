@@ -4660,3 +4660,207 @@ live, not inferred):**
 schema change accompanies this entry -- purely a read-only diff, per
 the round's explicit instruction. Any winery-side ingestion design is
 future work, informed by this diff but not started here.
+
+## get_lot_analyses duplicate-lot bug: two real production bugs confirmed, a third finding surfaced during review, lot_canonical_map built and verified live
+
+Follow-up to the previous entry's duplicate-lot-object finding. Two
+confirmed production bugs in `get_lot_analyses`
+(`supabase/functions/chat/tools.ts`), fixed on `fix/lot-canonical-map`:
+
+**(i) Duplicate InnoVint lot objects returned as independent readings.**
+`get_lot_analyses` filtered by `lot_name` (`ILIKE`) and `analysis_type`/
+date range, never `lot_code` -- confirmed live before the fix: a
+realistic "brix for the 2023 Cab Sauv V3 lot" call returned 8 real
+readings as 24 rows, one copy from each of `MA23CSV3`/`MA23CSV3-AP`/
+`MA23CSV322`, which all share the InnoVint-assigned `lot_name`
+"Cabernet Sauvignon, V3". The web dashboard's own "Lot lab history"
+panel was separately confirmed NOT affected (`renderFerm`/
+`fetchLotAnalyses` filter by `lot_id`, a genuinely unique key, never
+merged across `lot_name` matches) -- this was chat-tool-only.
+
+**(ii) Cross-vintage substring contamination, independent of (i).**
+`lot_name ILIKE '%X%'` is unanchored: 2023 InnoVint lot names have no
+year prefix ("Cabernet Sauvignon, V3") while 2024 names do ("2024
+Cabernet Sauvignon, V3"), so the 2023 name is a literal substring of
+the 2024 one. Confirmed live this WOULD have silently blended vintages
+in a realistic query (`lot_name` + `analysis_type='brix'`, no date
+filter, default limit 50): `MA22CSV3` (7 rows), `MA23CSV3` (8 rows),
+and `MA24CSV3` (25 rows) all came back in one undifferentiated result.
+`lot_analyses` has no `vintage` column to filter on independently, so
+this can't be fixed by adding a vintage param alone.
+
+**A third finding, surfaced by review before writing the fix's evidence
+into docs: within-lot exact-duplicate ROWS, distinct from the cross-lot
+duplication above.** The previous entry's cluster evidence used two
+different row counts for the same lots (Part 3's raw `COUNT(*)` --
+80/80, 92 -- vs. this entry's self-join evidence -- 78/78, 90) without
+reconciling why. Checked directly rather than assumed: the gap is real,
+and it's a `DISTINCT(analysis_type, value, recorded_at)` vs. raw-row-
+count difference -- confirmed live, `MA23CSV3` has exactly 2 rows
+sharing `(ph, 4.22, 2024-05-01 07:00:00+00)` and 2 more sharing
+`(titratable-acidity, 5.4, 2024-05-01 07:00:00+00)`, each pair with
+genuinely distinct `id` and `source_id` (two real, separate InnoVint
+analysis records, not a re-ingested duplicate -- `ingest-innovint`'s
+upsert key is `(source_system, source_id)`, which structurally prevents
+that). Widened the check to every lot_code, not just the 7 already
+flagged: **15 total extra rows, all dated exactly 2024-05-01
+07:00:00+00** (`ph`/`titratable-acidity`, sometimes `total-so2`),
+across `MA22CS`, `MA23CS`, `MA23CSV2-AP`, `MA23CSV3`, `MA23CSV3-AP`,
+`MA23ZIN`, `MA23ZIN-AP` -- a one-time systematic re-entry/re-sync event
+on InnoVint's side that appears to have touched most active 2023-vintage
+lots at once, `MA22CS` included even though it's not part of any
+cross-lot cluster. A second, unrelated within-lot duplicate cluster
+exists on `MA24CSV3` in October 2024 (10 groups, 11 extra rows, mostly
+`temperature`) -- different lot, different date, not part of the
+2024-05-01 pattern, not investigated further. **Neither is fixed by
+this round** -- `lot_canonical_map` resolves cross-lot duplication
+only; within-lot duplicate rows are a separate, unscoped problem left
+for later. The row counts written into `lot_canonical_map`'s own
+`notes` column (78/78, 33/33, 90) are the corrected `DISTINCT`-tuple
+figures, not the raw `COUNT(*)` the previous entry used -- that
+entry's own 80/80/92 figures should be read as raw row counts, not
+duplicate-cluster evidence, now that the two are known to differ.
+
+**`lot_canonical_map`: explicit mapping table**, following
+`block_innovint_map`'s precedent for this exact shape of problem
+(record which upstream id/object corresponds to which of ours, rather
+than guessing in query logic) -- but not copied verbatim.
+`block_innovint_map`'s `valid_from/valid_to_vintage` columns exist to
+handle a local entity being reissued to a DIFFERENT upstream id over
+time (the B1 replant); a duplicate-lot pairing has no analogous time
+dimension, so `duplicate_lot_code` is a plain primary key, no surrogate
+id or validity window. Neither column is a real FK (no standalone
+`lots` dimension table exists to reference -- the same limitation
+`block_innovint_map.innovint_block_id` already lives with).
+
+```sql
+create table lot_canonical_map (
+  duplicate_lot_code text primary key,
+  canonical_lot_code text not null check (canonical_lot_code <> duplicate_lot_code),
+  confidence         text not null check (confidence in ('confirmed', 'provisional')),
+  notes              text,
+  created_at         timestamptz not null default now()
+);
+```
+
+**RLS: open read to `authenticated`, and this is load-bearing, not a
+sensitivity call.** `get_lot_analyses` reads this table through
+`ctx.supabase` -- the caller's own RLS-scoped client, per this file's
+own header comment, never `ctx.supabaseAdmin`. Operator-only RLS would
+mean a non-operator session reaching this code path gets zero rows back
+-- indistinguishable from "no duplicates exist" -- and the exclusion
+filter would silently stop applying instead of erroring. The fetch is
+also coded fail-CLOSED regardless of RLS shape: `fetchSupersededLotMap()`
+returns `{error}` on any Postgres error, and `getLotAnalyses` returns
+that error to the model immediately, before building the main query --
+never defaults to an empty map. This is the OPPOSITE risk direction from
+`isDomainReal()`'s deliberate fail-open elsewhere in this same file:
+that fail-open protects an honest account from having real data hidden;
+this fail-open would silently let the exact bug this table exists to
+fix reappear. Verified live with the same `SET LOCAL`-in-a-transaction
+adversarial pattern as every other table this project has added:
+`authenticated` reads all 3 rows cleanly; `anon` is correctly denied (no
+grant, matching every other reference table here -- the chat endpoint's
+real caller is always `authenticated`, per `withSupabase({auth:["user"]})`,
+so this is consistent, not a gap). `current_user` confirmed `postgres`
+again after each rollback.
+
+**Canonical assignments, both resolved clusters, evidence-based:**
+
+- **CSV3 family -> canonical `MA23CSV3`.** `MA23CSV3-AP`: confirmed
+  byte-exact duplicate across the full shared range (2023-10-27 to
+  2024-07-11) -- 78 of 78 distinct row-tuples match on both sides,
+  neither has a row the other lacks. No completeness tiebreaker exists
+  between them; picked the bare code for consistency with the ZIN
+  cluster's pattern (bare code is the one InnoVint kept writing to
+  after `-AP` stopped) -- **stated plainly: for this pair specifically,
+  the tiebreak is informationless today** (both sides stop at the exact
+  same last date). `MA23CSV322`: confirmed duplicate of a strict subset
+  (33/33 rows, early-fermentation window only, 2023-10-27 to
+  2023-11-16) -- no tiebreak needed, strictly less complete.
+
+- **ZIN family -> canonical `MA23ZIN`.** `MA23ZIN-AP`: confirmed
+  duplicate of a subset (90 of its distinct rows match `MA23ZIN`
+  exactly), but `MA23ZIN` continues 35 more rows after `-AP` stops
+  (2024-07-11 -> 2025-03-12), including a January 2025 finished-wine
+  alcohol reading `-AP` never received. Unambiguous, no tiebreak.
+
+- **`MA23CS`/`MA23CSV2-AP` -- deliberately unresolved, no row added.**
+  100% chemistry overlap but DIFFERENT `lot_name`s ("Cabernet Sauvignon
+  - Estate" vs. "Cabernet Sauvignon, V2"), unlike both clusters above
+  where the paired codes share one name -- plausibly a real
+  block-designate-vs-estate-blend distinction rather than a duplicated
+  lot. Left for the owner to resolve; the mechanism needs no schema or
+  code change to add this later, only an `insert`.
+
+**Drift risk on the CSV3-AP tiebreak, documented rather than
+automated-detected (per instruction: don't build automated detection).**
+If InnoVint ever resumes writing NEW rows to `MA23CSV3-AP` that
+`MA23CSV3` doesn't also receive, the "informationless today" tiebreak
+becomes silently wrong -- the canonical lot would then be missing real
+data the superseded one has. Detection query (run periodically, or
+before trusting this mapping again after a long gap; returns empty
+today, confirmed live):
+
+```sql
+select m.duplicate_lot_code, m.canonical_lot_code, d.analysis_type, d.value, d.recorded_at
+from lot_canonical_map m
+join lot_analyses d on d.lot_code = m.duplicate_lot_code
+where not exists (
+  select 1 from lot_analyses c
+  where c.lot_code = m.canonical_lot_code
+    and c.analysis_type = d.analysis_type
+    and c.value = d.value
+    and c.recorded_at = d.recorded_at
+)
+order by m.duplicate_lot_code, d.recorded_at;
+```
+A non-empty result means some `duplicate_lot_code` row has no matching
+counterpart under its `canonical_lot_code` -- i.e. the superseded lot
+gained information the canonical one lacks, and the mapping needs
+re-review (possibly swapping which side is canonical, or adding a
+`valid_to`-style cutoff this table's current shape doesn't have).
+
+**`get_lot_analyses` behavior, verified live for every case (query
+shapes matched exactly against the real Postgres data, not reasoned
+about):**
+- `lot_name='Cabernet Sauvignon, V3'` + `analysis_type='brix'` + 2023
+  range, superseded codes excluded: exactly 8 rows, all `MA23CSV3`.
+- `lot_name='Zinfandel, Howell Mountain'` + `analysis_type='malic-acid'`,
+  no date filter: 9 rows, all `MA23ZIN`, date range through
+  2025-03-04 -- confirms the post-`-AP` tail survives the filter.
+- Broad `lot_name ILIKE '%Cabernet Sauvignon%'`, no other filter:
+  `MA23CS` and `MA23CSV2-AP` BOTH present, unchanged -- the unresolved
+  cluster is provably untouched. `MA23CSV3-AP`/`MA23CSV322`/
+  `MA23ZIN-AP` correctly absent; unrelated lots (`MA22CSV3`,
+  `MA24CSV2`, `MA24CSV3`) correctly unaffected.
+- Explicit `lot_code='MA23CSV3-AP'`: returns its own 80 rows directly
+  (not redirected) -- the canonical filter only applies to the fuzzy
+  path, exactly as designed; the app-level note identifying it as
+  superseded (pointing to `MA23CSV3`) is a straight code-review
+  confirmation of the `notes.push(...)` branch, not separately
+  live-tested against a running edge function.
+- `lot_name='Cabernet Sauvignon, V3'` + `analysis_type='brix'`, no
+  date filter, default limit 50: 3 distinct lot_codes in the result
+  (`MA22CSV3`, `MA23CSV3`, `MA24CSV3`) -- confirms bug (ii) is real for
+  a realistic query shape and that the new multi-lot-code note would
+  fire; the exact unfiltered-all-analytes case happens to NOT trigger
+  it (recency ordering + the default 50-row cap push 2023's older rows
+  out of the window entirely before mixing becomes visible) -- recorded
+  as a real, if narrower-than-hoped, confirmation rather than glossed
+  over.
+- `fetchSupersededLotMap()`'s fail-closed error path: verified by code
+  inspection (unconditional `if (error) return formatErrorForModel(error)`
+  before any query is built, same pattern as every other error check in
+  this file) -- not separately induced live, since RLS is open and a
+  real caller's read cannot fail short of a genuine outage.
+
+**TypeScript verified the same way as the berry-chat-tools round**: no
+`deno` binary in this environment, `npx -y -p typescript tsc --noEmit`
+against the changed file -- zero `TS1xxx` syntax errors, only the
+expected Deno-import module-resolution errors. Brace/paren/backtick
+counts confirmed balanced.
+
+**Not yet deployed as of this entry** -- `supabase functions deploy chat
+--use-api` is gated in this environment; prepared and committed, owner
+to run it.

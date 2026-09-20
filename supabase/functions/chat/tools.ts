@@ -118,11 +118,12 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_lot_analyses",
     description:
-      "Real winery lab analysis data per fermentation lot (Brix, pH, TA, and other chemistry), sourced from InnoVint. Operator access only -- returns no rows for customer or pending accounts. Returns at most 200 rows, most recent first; narrow with lot_name/analysis_type/date range for a specific question rather than relying on the default limit.",
+      "Real winery lab analysis data per fermentation lot (Brix, pH, TA, and other chemistry), sourced from InnoVint. Operator access only -- returns no rows for customer or pending accounts. Returns at most 200 rows, most recent first; narrow with lot_code/lot_name/analysis_type/date range for a specific question rather than relying on the default limit. InnoVint contains genuine duplicate lot objects for the same physical wine for a few 2023 lots (confirmed: byte-identical chemistry under two or three different lot_codes) -- pass lot_code when you already know it (exact match, unambiguous); a lot_name search (partial match) automatically excludes the known-superseded duplicates and, if it still matches more than one distinct lot_code (e.g. a name that's also a substring of a different vintage's lot name), says so explicitly rather than silently blending them. Querying a superseded lot_code directly still works (its own rows, not redirected) but the result notes which lot_code is canonical.",
     input_schema: {
       type: "object",
       properties: {
-        lot_name: { type: "string", description: "Partial lot name match, e.g. 'Zinfandel'." },
+        lot_code: { type: "string", description: "Exact lot code, e.g. 'MA23CSV3'. Unambiguous -- prefer this over lot_name when known. Bypasses the duplicate-lot exclusion (an explicit request for a specific code, including a superseded one, is honored as asked)." },
+        lot_name: { type: "string", description: "Partial lot name match, e.g. 'Zinfandel'. Known-superseded duplicate lot_codes are excluded automatically." },
         analysis_type: { type: "string", description: "Exact analysis type, e.g. 'brix', 'ph', 'ta'." },
         start_date: { type: "string", description: "ISO date lower bound on recorded_at." },
         end_date: { type: "string", description: "ISO date upper bound on recorded_at." },
@@ -410,30 +411,91 @@ async function getAnomalies(supabase: any, input: Record<string, unknown>, dataM
   return { content: JSON.stringify(rows) + filteredNote, isError: false };
 }
 
+// lot_canonical_map (2026-09-20): InnoVint carries genuine duplicate lot
+// objects for the same physical wine for a handful of 2023 lots --
+// confirmed live (docs/SECURITY.md), not an ingest bug. lot_name search
+// alone returned every duplicate as if it were an independent reading
+// (8 real brix readings came back as 24 rows). This function now excludes
+// known-superseded lot_codes on the lot_name/unfiltered path, and honors
+// an explicit lot_code request as-is (including a superseded one) with a
+// note identifying its canonical counterpart.
+//
+// The superseded-set read below is deliberately fail-CLOSED (an error
+// here returns an error to the model, never an empty exclusion list) --
+// the opposite of isDomainReal()'s deliberate fail-open elsewhere in this
+// file. The risk direction is reversed: isDomainReal() failing open
+// protects against hiding real data from an honest account; this read
+// failing open would silently let the exact duplication bug this table
+// exists to fix reappear, indistinguishable from "no duplicates exist."
+// deno-lint-ignore no-explicit-any
+async function fetchSupersededLotMap(supabase: any): Promise<{ map: Map<string, string> } | { error: { message: string } }> {
+  const { data, error } = await supabase.from("lot_canonical_map").select("duplicate_lot_code, canonical_lot_code");
+  if (error) return { error };
+  // deno-lint-ignore no-explicit-any
+  return { map: new Map((data as any[]).map((r) => [r.duplicate_lot_code, r.canonical_lot_code])) };
+}
+
 // deno-lint-ignore no-explicit-any
 async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
-  const { lot_name, analysis_type, start_date, end_date, limit } = input as {
-    lot_name?: string; analysis_type?: string; start_date?: string; end_date?: string; limit?: number;
+  const { lot_code, lot_name, analysis_type, start_date, end_date, limit } = input as {
+    lot_code?: string; lot_name?: string; analysis_type?: string; start_date?: string; end_date?: string; limit?: number;
   };
   const cappedLimit = Math.min(limit && limit > 0 ? limit : 50, 200);
+
+  const superseded = await fetchSupersededLotMap(supabase);
+  if ("error" in superseded) return formatErrorForModel(superseded.error);
 
   let query = supabase
     .from("lot_analyses")
     .select("lot_name, lot_code, block_id, analysis_type, value, unit, recorded_at")
     .order("recorded_at", { ascending: false })
     .limit(cappedLimit);
-  if (lot_name) query = query.ilike("lot_name", `%${lot_name}%`);
+  if (lot_code) {
+    // Explicit exact request -- honored as asked, superseded or not; the
+    // exclusion filter below is a default for fuzzy/unscoped search, not
+    // a block on a direct query.
+    query = query.eq("lot_code", lot_code);
+  } else {
+    if (lot_name) query = query.ilike("lot_name", `%${lot_name}%`);
+    if (superseded.map.size > 0) {
+      const list = [...superseded.map.keys()].map((c) => `"${c}"`).join(",");
+      query = query.not("lot_code", "in", `(${list})`);
+    }
+  }
   if (analysis_type) query = query.eq("analysis_type", analysis_type);
   if (start_date) query = query.gte("recorded_at", start_date);
   if (end_date) query = query.lte("recorded_at", end_date);
 
   const { data, error } = await query;
   if (error) return formatErrorForModel(error);
+
+  const notes: string[] = [];
+
+  if (lot_code && superseded.map.has(lot_code)) {
+    notes.push(`(Note: ${lot_code} is a superseded duplicate lot_code -- InnoVint has two lot objects for this same physical wine. The canonical/complete record is ${superseded.map.get(lot_code)}.)`);
+  }
+
+  // Bug (ii): a lot_name substring can still span more than one distinct
+  // lot_code (e.g. a 2023 lot's name is a literal substring of a 2024
+  // lot's InnoVint-assigned name) -- surfaced explicitly rather than
+  // silently blended, same as every other coverage-note convention in
+  // this file. Only checked on the fuzzy path -- an explicit lot_code
+  // request can only ever match one lot_code by construction.
+  if (!lot_code) {
+    // deno-lint-ignore no-explicit-any
+    const distinctLots = new Map((data as any[]).map((r) => [r.lot_code, r.lot_name]));
+    if (distinctLots.size > 1) {
+      const listing = [...distinctLots.entries()].map(([code, name]) => `${code} (${name})`).join(", ");
+      notes.push(`(Note: this lot_name search matched ${distinctLots.size} distinct lots, not one -- ${listing}. Treat these as separate lots/vintages unless you intend a cross-vintage comparison; narrow with lot_code for a single lot.)`);
+    }
+  }
+
   const truncated = data.length === cappedLimit;
-  const note = truncated
-    ? `\n\n(Returned the maximum ${cappedLimit} rows -- there may be more. Narrow with lot_name, analysis_type, or a date range if this doesn't cover what you need.)`
-    : "";
-  return { content: JSON.stringify(data) + note, isError: false };
+  if (truncated) {
+    notes.push(`(Returned the maximum ${cappedLimit} rows -- there may be more. Narrow with lot_code, lot_name, analysis_type, or a date range if this doesn't cover what you need.)`);
+  }
+
+  return { content: JSON.stringify(data) + (notes.length ? "\n\n" + notes.join(" ") : ""), isError: false };
 }
 
 // deno-lint-ignore no-explicit-any

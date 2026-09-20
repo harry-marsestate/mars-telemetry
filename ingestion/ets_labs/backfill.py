@@ -7,12 +7,14 @@ Refuses to insert anything if parse.evaluate() doesn't reconcile against
 parse.CHECKSUMS -- see parse.py's module docstring for how those were
 independently verified.
 
-lab_results itself is intentionally lossless (a reissued sample's
-superseded base rows are kept, not deleted). Consumers should read
-lab_results_current (20260920130000_lab_results_current.sql), not
-lab_results directly, unless they specifically need the raw reissue
-history -- see docs/SECURITY.md for the duplication bug that motivated
-the view.
+All three base tables are intentionally lossless (a reissued sample's
+superseded rows are kept, not deleted). Consumers should read the
+lab_samples_current / lab_results_current / berry_volume_histogram_current
+views (20260920130000_lab_results_current.sql,
+20260920140000_lab_samples_current.sql), not the base tables directly,
+unless they specifically need the raw reissue history -- see
+docs/SECURITY.md for the duplication bug that motivated lab_results_current
+and why the same pattern was then extended to the other two tables.
 
 Run: poetry run python -m ets_labs.backfill
 """

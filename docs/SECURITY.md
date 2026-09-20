@@ -4076,3 +4076,79 @@ observable output. RLS re-verified on the new view with the same
 round: 0 rows unauthenticated, 159 rows impersonating a real operator,
 `current_user` confirmed `postgres` again after each rollback -- no
 leaked role.
+
+## ETS Labs berry-sampling ingestion -- the same reissue gap, extended to lab_samples and berry_volume_histogram
+
+`lab_results_current`'s fix was correct but incomplete: it closed the
+duplication exposure for `lab_results`, but `lab_samples` and
+`berry_volume_histogram` have the exact same shape and were left
+covered by nothing. Decision: **extend the pattern, not document an
+exception.** The reasoning against leaving it stands on this file's own
+words from the previous entry -- the old `berry_maturity_by_block`
+filter was "harmless by coincidence, not because the logic was right."
+Declaring `berry_volume_histogram`/`lab_samples` out of scope on the
+theory that a Dyostem sample "probably won't" be reissued would be the
+identical bet that already lost once this round (nothing about
+`berry_maturity`'s samples suggested a reissue was likely either, and
+one still turned up, just on a different sample_type than the guard
+covered). Two more views is cheap; a second live duplication bug
+discovered after merge is not.
+
+**The exposure, concretely, before this fix:**
+- `lab_samples`: `SELECT COUNT(*)` returns 18 where 17 physical samples
+  exist -- `511110861` and its reissue `511110861A` both count.
+- `berry_volume_histogram`: not live-observable today (no Dyostem sample
+  has been reissued -- confirmed: all 8 have `reissue_of is null` and
+  none is named by another sample's `reissue_of`), but structurally
+  identical to the bug that WAS live for `lab_results`. If a Dyostem
+  sample is ever reissued, its 20 bins would exist twice (one set per
+  sample version) and a plain read would return 40 bins with every
+  `berry_count` sum doubled -- the same failure shape, one table over,
+  just not yet triggered by data that happens not to exist yet.
+
+**The fix (`20260920140000_lab_samples_current.sql`): `lab_samples_current`
+as the single source of truth for "current," everything else joins
+through it rather than repeating the condition.**
+
+```sql
+create view lab_samples_current as
+select s.*
+from lab_samples s
+where not exists (
+  select 1 from lab_samples newer where newer.reissue_of = s.lab_sample_no
+);
+```
+
+`lab_results_current` was refactored (`create or replace`, same output
+columns, same 159 rows) to join `lab_samples_current` instead of
+repeating the `NOT EXISTS` inline -- one definition of "current," not
+three copies that could drift. `berry_volume_histogram_current` is new,
+same join shape. `berry_maturity_by_block` now sources
+`block_id`/`collected_on`/`vintage` from `lab_samples_current` rather
+than `lab_samples` directly, on top of already reading
+`lab_results_current` -- belt and suspenders, not load-bearing on its
+own, since `lab_results_current` alone already excludes superseded rows.
+
+**The three `*_current` views (`lab_samples_current`, `lab_results_current`,
+`berry_volume_histogram_current`) are now, together, the documented read
+surface** for this ingestion -- a consumer should reach for the `_current`
+view unless it specifically needs the raw reissue history (an audit of
+what ETS actually reported, superseded versions included), in which case
+the base table is still there, lossless.
+
+**Verified live:**
+- `lab_samples`: 18 raw / **17** via `lab_samples_current` -- the excluded
+  row is `511110861` (the superseded base), confirmed by name.
+- `berry_volume_histogram`: 160 raw / **160** via
+  `berry_volume_histogram_current` -- correct no-op today, matching "not
+  live-observable yet" above; the view exists and is correct, it simply
+  has nothing to exclude until a Dyostem sample is reissued.
+- `lab_results_current` unchanged at 159 after the refactor (same rows,
+  now reached via the shared `lab_samples_current` join instead of a
+  duplicated condition).
+- `berry_maturity_by_block` unchanged at 12.
+- RLS re-verified with the same `SET LOCAL`-in-a-transaction adversarial
+  pattern as every other object this round: `lab_samples_current` and
+  `berry_volume_histogram_current` both return 0 rows unauthenticated,
+  17 and 160 respectively impersonating a real operator row, and
+  `current_user` confirmed `postgres` again after each rollback.

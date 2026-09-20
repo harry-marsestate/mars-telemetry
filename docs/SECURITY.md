@@ -5003,3 +5003,26 @@ to fail live. Fixing a confirmed bug is different from preemptively
 hardening against one that hasn't manifested; recommend waiting for an
 actual live failure in either berry tool before adding more
 precomputed fields there.
+
+### Deployed and verified live (2026-09-20, code commit `2f67cab`)
+
+`supabase functions deploy chat --use-api` run by the owner; downloaded
+into an isolated `--workdir` and diffed -- `tools.ts`/`index.ts` and the
+four untouched files all byte-for-byte identical to committed source.
+
+Live re-ask through the real app (authenticated Demo operator browser
+session, Kimi K3), asking exactly the question this fix targets: *"What
+date range does the InnoVint lab analysis history for lot MA23CSV3
+cover?"* Response opened with the precomputed range verbatim: *"MA23CSV3
+(Cabernet Sauvignon V3, block B3) is covered from October 27, 2023
+through July 11, 2024"* -- exactly the true database range, fixing the
+precise inaccuracy ("Mar 2023-Jul 2024") the previous round found.
+
+Every other figure the model built its narrative from checked exact
+against fresh SQL: the Oct 27-28, 2023 opening panel (brix 28, pH 4.17,
+TA 3.45), the malic-acid MLF trend (3.65 -> 2.61 -> ... -> 0.01 by
+Jan 17, 2024, all six points confirmed), and the July 11, 2024 closing
+panel (pH 4.22, TA 5.4, VA 0.73, free SO2 25, total SO2 67) -- all
+exact. The model also correctly noted coverage stops at July 2024 with
+nothing on file after -- true, and precisely the kind of claim this
+round's fix exists to make reliable rather than inferred.

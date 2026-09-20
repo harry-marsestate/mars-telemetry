@@ -5026,3 +5026,92 @@ panel (pH 4.22, TA 5.4, VA 0.73, free SO2 25, total SO2 67) -- all
 exact. The model also correctly noted coverage stops at July 2024 with
 nothing on file after -- true, and precisely the kind of claim this
 round's fix exists to make reliable rather than inferred.
+
+## Multi-reading lot_analyses rows: the vessel/action identity IS available upstream and is being discarded -- confirmed live, disclosure fix shipped, sync recommended for later
+
+Follow-up to the within-lot-"duplicates" finding (the entry above this
+one): those rows are genuinely distinct same-timestamp samples, not a
+duplication bug, but `get_lot_analyses` returned them with nothing
+explaining the multiplicity, and `lot_analyses` has no vessel/sample
+column to label them with. Investigated before building anything,
+per instruction.
+
+**1. Is the distinguishing identity available upstream?** Yes --
+confirmed two ways, not assumed from one:
+
+- **Cached raw API responses** (`ingestion/innovint/_raw/`, from an
+  earlier investigation) show every InnoVint analysis record carries
+  `vesselId`, `actionId`, and `component` fields, none of which
+  `ingest-innovint`'s `InnoVintAnalysis` TypeScript interface (`id`,
+  `analysisType`, `deleted`, `lotId`, `recordedAt`, `skipped`, `value`,
+  `unit` -- confirmed by reading the interface directly) declares, and
+  none of which the row-construction code passes through to
+  `lot_analyses`. One cached lot (`lot_2VQ0D3NK7LQJE5ZMZ6WROJ81`,
+  confirmed live to be `MA24CSV3`) has 40 records with a POPULATED
+  `vesselId` -- three distinct vessel ids
+  (`ves_5O43R8Q2KGE1L31MENXJWV6Z`, `ves_3R6Z5QYEJG6OZ84MNDPKV82X`,
+  `ves_LE1PQ5862MREJZ2GDKV4RNX0`) on 2024-10-01, whose brix values
+  (27.5, 28.6, 26.9) are EXACTLY the three-way duplicate this project's
+  own investigation already found independently -- the vessel identity
+  for that exact case is sitting right there, discarded.
+- **A live InnoVint API call** (not just the cache, which predates this
+  round) for `MA22CS`'s lot -- `curl` against
+  `/wineries/{id}/lots/lot_ZEQX2N9JG4WR83O718D54KRP/analyses`, fresh
+  today -- confirms its 2024-05-01 pairs (free-SO2 39/36, VA 0.62/0.59,
+  etc.) have `vesselId: null` on both but two DIFFERENT `actionId`
+  values (`act_XWZE5RQ1MO5RWXEP7NYJ0P8L` / `act_3Z1R4Q2KMV1D5PN0GNVD68P5`)
+  -- two genuinely separate lab submissions on the same day, exactly
+  matching the "two real events" hypothesis from the prior entry,
+  confirmed rather than left as inference.
+
+**`vesselId` is rare** (40 of ~7,198 cached analysis records, ~0.5%) --
+it's the more SPECIFIC identity when present (which physical vessel),
+but most lots never populate it. **`actionId` is on every record
+checked** (100% in both the cache and the live call) -- less specific
+(which submission event, not which vessel), but universally available,
+including for the `vesselId`-null same-day-different-submission case.
+
+**Recommendation, not built this round (scope only):** add nullable
+`vessel_id`/`action_id` columns to `lot_analyses` and sync both from
+`InnoVintAnalysis`'s already-available fields -- `action_id` gives every
+multi-reading case a real grouping key (which submission produced this
+row) even where `vessel_id` is null; `vessel_id` gives the more specific
+answer when InnoVint has it. This is the real, durable fix -- it turns
+"these are confirmed-separate, unlabeled readings" into "here is which
+vessel/submission each reading is from." Scope: one `ingest-innovint`
+migration (two new nullable columns, no backfill needed beyond the next
+sync since the upsert key is unchanged) plus updating the row-
+construction code to pass `a.vesselId`/`a.actionId` through -- small,
+but a real review surface of its own, deliberately not done in this
+pass per instruction.
+
+**2. Disclosure added to `get_lot_analyses` now, regardless of (1).**
+Computed from the rows actually returned (not a separate scope query --
+this is about explaining multiplicity the model can already see, not
+about rows hidden by the cap, which the existing scope query already
+handles for the lot-name/date-range questions). Groups the response by
+`(lot_code, analysis_type, date)`; any group with more than one reading
+gets an explicit note naming the lot, analyte, date, reading count, and
+every value, plus the confirmed-not-a-duplicate framing from (1) above.
+
+**Verified live** against both known cases before considering this
+done: a plain `lot_code='MA22CS'` query (default 50-row limit) DOES
+include the 2024-05-01 rows within that cap (checked directly, not
+assumed) -- the four real multi-reading groups there
+(`free-so2` 39/36, `titratable-acidity` 6.3/6.3, `total-so2` 133/127,
+`volatile-acidity` 0.62/0.59) match exactly what the disclosure logic
+would compute from that same row set. `MA24CSV3`'s Oct 2024 groups
+(brix ×6, `ph`/`potassium`/`ammonia-nh3`/`titratable-acidity` ×3 each on
+2024-10-01) also confirmed present and correctly groupable.
+
+**3. `get_wine_lab_results` checked for the same exposure -- none
+found.** Queried every `(sample_description_raw, analysis_code,
+analyzed_at::date)` combination in the winery ETS data for a count
+greater than one: zero rows. Each ETS winery sample submission produces
+exactly one reading per analyte per date -- no same-day-repeat pattern
+exists in this data at all, so no disclosure fix is needed there. Not
+assumed from the data's different source (ETS lab submissions vs.
+InnoVint's own internal tracking) -- checked directly.
+
+TypeScript verified via `tsc --noEmit` -- zero `TS1xxx` syntax errors,
+brace/paren counts balanced.

@@ -5547,3 +5547,56 @@ to `lot_analyses` today. Scope: two new nullable columns
 `a.vesselId`/`a.actionId` through in the row-construction code -- no
 backfill needed beyond the next scheduled sync, since the upsert key
 (`source_system`, `source_id`) is unchanged. Not started this round.
+
+## Deployed and verified live from `main` (2026-09-20, code commit `680e1a9`)
+
+**First deploy attempt after the merge did NOT pick up the new code --
+caught by verification, not assumed to have worked.** Downloaded and
+diffed: the live function was byte-identical to the OLD
+`fix/lot-analyses-multi-reading-disclosure` deploy from earlier the
+same session -- `get_wine_lab_results` entirely absent, `index.ts`'s
+`accessNote`/real-only note both missing the fourth tool. Root cause
+not chased further than confirming the symptom (the owner's shell
+state at that moment is outside this session's visibility) -- reported
+plainly and a second deploy was requested rather than guessed at.
+**Second attempt verified correct**: downloaded again into a fresh
+isolated `--workdir`, diffed against local `main` -- `tools.ts` and
+`index.ts` byte-for-byte identical (zero-line diffs), all four
+untouched files (`deno.json`/`kimi.ts`/`labour-totals.ts`/`profile.ts`)
+also identical. `get_wine_lab_results` confirmed present in the
+downloaded file before trusting the deploy.
+
+**Two live re-asks through Kimi K3 (real app, authenticated Demo
+operator session), one new, one a regression check:**
+
+1. *"What does the ETS lab data show for the 25CHMR-LF Chardonnay lees
+   aging?"* -- exercises `get_wine_lab_results` specifically (this lot
+   has zero InnoVint counterpart, so only the new tool could answer
+   it). Response correctly identified all three ETS pulls (Oct 14
+   2025, Jan 15 2026, Feb 26 2026) and explicitly stated *"All three
+   pulls are ETS-only; none of it is in InnoVint's lot_analyses"* --
+   the reconciliation status surfaced correctly. Every figure checked
+   exact against fresh SQL: L-malic acid 1.97/1.99/1.96 g/L, VA
+   0.40/0.44/0.46 g/L, glucose+fructose `<0.1` g/L, free SO2 9/16 mg/L.
+
+2. *"What was the lab chemistry for lot MA22CS around May 2024?"* --
+   the exact question from the previous deploy's re-ask, repeated
+   verbatim as a regression check that merging didn't silently lose
+   the multi-reading disclosure fix. Result exceeded the bar: the
+   model correctly checked ETS data FIRST (via `get_wine_lab_results`,
+   finding MA22CS's only ETS pull is collected_on 2024-03-20, correctly
+   distinct from `MA22CSV2`/`MA22CSV3`'s separate February pulls), then
+   correctly fell back to `get_lot_analyses` for the actual May 1 2024
+   InnoVint data -- both tools working together coherently post-merge,
+   not just independently. Reproduced the exact multi-reading
+   disclosure verbatim in spirit: *"two parallel readings per analyte
+   (confirmed separate InnoVint records, likely different
+   vessels/submissions -- reporting both)"* -- every value matches the
+   live database exactly (VA 0.62/0.59, free SO2 39/36, total SO2
+   133/127, TA 6.3/6.3, pH 3.76), same as the pre-merge verification.
+   Regression check passes: the fix survived the merge.
+
+All five branches from this round's work are now live, verified, and
+merged: `fix/lot-canonical-map` (Part A), `fix/block-lots-grants`,
+`fix/harvest-receipts-exclusion`, `feat/winery-ets-ingestion`, and
+`fix/lot-analyses-multi-reading-disclosure`.

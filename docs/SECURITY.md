@@ -5600,3 +5600,41 @@ All five branches from this round's work are now live, verified, and
 merged: `fix/lot-canonical-map` (Part A), `fix/block-lots-grants`,
 `fix/harvest-receipts-exclusion`, `feat/winery-ets-ingestion`, and
 `fix/lot-analyses-multi-reading-disclosure`.
+
+## ETS Labs incremental report: ETSLabsReport_17798_09_24_2026.csv (2026-09-24)
+
+First incremental ETS report after the 09_20 backfill. 58 CSV rows, two
+vineyard-side Dyostem berry-maturity samples: 609220727 ("Mars 2
+(berries)" -> B2) and 609220728 ("Mars 3 (berries)" -> B3), both
+received/collected 2026-09-22 (`inferred_from_receipt`; no embedded
+collection date in either description). New module pair
+`ingestion/ets_labs/parse_report_0924.py` / `backfill_report_0924.py`
+reuses parse.py's helpers and `DESCRIPTION_BLOCK` unchanged (both
+descriptions were already keys) and db.py's upserts unchanged.
+
+- **No new analytes, sample types, or description spellings.** All 18
+  non-histogram rows map to the nine codes `berry_maturity_by_block`
+  pivots on; analysis_name_raw and units byte-match the existing 2026
+  rows. The parser raises on any code outside that set.
+- **No reissues.** Neither number carries a trailing letter, and neither
+  existed in lab_samples before the ingest (the backfill refuses on any
+  collision rather than upserting over an existing row).
+- **Dyostem sums:** 609220728 = 98, 609220727 = 104 (outside the typical
+  97-100, like 608250191's 103; all 20 bins present in the raw CSV).
+- **Checksums** (count / md5 of full row content for the rows present
+  before ingest, ids <= 61 samples, <= 415 results):
+
+  | table | before | after | pre-existing content md5 (before = after) |
+  |---|---|---|---|
+  | lab_samples | 43 | 45 | a433c49936a822f9dfebfed57db723e8 |
+  | lab_results | 254 | 272 | 311cb18bf9f8cfb8d46429f7ea6a3f55 |
+  | berry_volume_histogram | 160 | 200 | c88aeedaf3393d0667016c8dc8742463 |
+
+  Views: lab_samples_current 42 -> 44, lab_results_current 252 -> 270,
+  berry_volume_histogram_current 160 -> 200. `berry_maturity_by_block`
+  now has five 2026 dates per block (8/25 through 9/22).
+- **Data observation, not changed:** B3's 9/22 brix (23.2) and
+  glucose+fructose (237 g/L) are lower than its 9/15 values (24.5 / 251)
+  while B2 kept rising. The values match the raw CSV exactly; whether the
+  drop is real (rain/dilution) or a sampling artefact is for the owner to
+  judge.

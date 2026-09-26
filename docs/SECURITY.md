@@ -5893,3 +5893,25 @@ tools plus everything in `mcp/`, and fails on any relation not in the list.
   matching `auth.users` row**, so an orphaned profile (the FK rejected a
   seed key for it). Not investigated or changed this round; the pending
   negative test uses `749d26a6-…` instead.
+
+### CORRECTION (2026-09-26): this project signs with ES256, not the legacy HS256 secret
+
+The Phase 1 design and the entry above state that the project uses the legacy
+HS256 JWT secret, based on an "empty" JWKS. That check was wrong: `.env`'s
+`SUPABASE_URL` is `https://<ref>.supabase.co/rest/v1/`, so
+`$SUPABASE_URL/auth/v1/.well-known/jwks.json` went to PostgREST, whose 404 JSON
+has no `keys` array. Re-checked against the origin: the JWKS serves one
+**ES256** key. The project has already migrated to asymmetric signing keys; the
+legacy HS256 secret is still accepted (the HS256 legacy anon key still works)
+but is a key being retired.
+
+Consequence for Option A as built on this branch: signing with
+`MCP_JWT_SECRET` works only while the legacy secret stays trusted, and would
+break the function the moment the migration is completed by revoking it. The
+auth mechanism is being re-proposed before any deploy step is run -- see the
+next MCP entry. `scripts/mcp-verify.mjs` had the same `/rest/v1/` URL bug
+(fixed in the preceding commit).
+
+RULE: never build a URL by appending to `.env`'s `SUPABASE_URL` -- take
+`new URL(SUPABASE_URL).origin` first. A wrong-service 404 can parse as a
+plausible "empty" answer, exactly as it did here.

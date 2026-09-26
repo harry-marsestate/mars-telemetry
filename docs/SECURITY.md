@@ -6137,3 +6137,67 @@ identical**. Demo vs Colin `87b9d9a0` and vs Colin `03b52829`, both as
 the pooler; both keys x 5 tools through the function with DB cross-checks;
 all negative cases through the function; revoke-then-reject timing; audit-log
 rows.
+
+### Gateway password fixed, rotated, and the full live verification (2026-09-26)
+
+**Round trip confirmed** after the owner's password/secret update (secret last
+set 16:07:17Z): `mtk_vIfyFJL1` -> `initialize` 200, `tools/list` = the 5 tools,
+`get_berry_maturity(2026, B2)` 200 with real rows; `last_used_at` stamped;
+audit row written; `pg_stat_activity` shows an `mcp_gateway` session via
+`Supavisor`. The owner's two "Trigger redeploy" commits (`7ccf1bf`,
+`79e72ad`) were checked: both empty, no credential committed.
+
+**Final rotation** (`scripts/rotate-gateway-password.mjs`, new): `openssl
+rand -hex 32` into memory only; `ALTER ROLE mcp_gateway PASSWORD` with a
+locally computed SCRAM-SHA-256 verifier (the plaintext never reached the
+server, so it cannot appear in a Postgres statement log -- a plain `ALTER ROLE
+... PASSWORD '<plaintext>'` from the SQL editor can); pooler login as
+`mcp_gateway` with the new password **failed on attempt 1 (immediately after
+the ALTER) and succeeded 5s later** -- the pooler caches role credentials
+briefly, the likely reason earlier manual rotations looked broken across
+redeploys; then `supabase secrets set`; redeployed; deployed files
+byte-compared to the branch (all match). The superseded password (typed into
+chat/terminal history) no longer authenticates new connections.
+
+**Two bugs found by the live run, fixed and redeployed:**
+1. `agent_api_key_calls.args` was double-encoded -- stored as a JSON *string*
+   (`jsonb_typeof = 'string'`) because `logCall` stringified a value
+   postgres.js already JSON-encodes for a `jsonb` parameter. Fixed; the next
+   row is `object`. Row 1 is left as-is (append-only audit history).
+2. An authenticated `GET` (the optional standalone SSE stream every MCP client
+   opens) was answered with a keepalive-only `text/event-stream` that stayed
+   open **>105s** (measured) -- one held Edge Function invocation per connected
+   client, for a stateless server that never sends server-initiated messages.
+   Now `405`, `Allow: POST, DELETE` (spec-permitted; clients skip the stream).
+   Auth still runs first. New unit test; 19/19 pass.
+
+**Harness bug fixed:** the pending-key DB check still called
+`mcp_authenticate` as `anon` (Option A's grant) and crashed with 42501 under
+B'. It now runs as `mcp_gateway`, and "not callable as anon or authenticated"
+is its own assertion.
+
+**Full live verification, `mcp-verify.mjs` (no `--revoke-prefix`): 51/51
+PASS.** Storage 5/5 (hash-only, plaintext in no column); role boundaries 4/4;
+both Colin keys x 5 tools all 200/`isError=false` with byte-identical outputs
+across the two accounts; DB cross-checks for both accounts (berry 10 vs 10
+rows; labour 2024 hours 5563.12 / labour $298,652.13 exact; lot analyses 8 vs
+8); RLS restriction (operators see rows, customer and pending 0 in all 5
+relations); 401 for no header / malformed x3 / the anon key / an unknown key;
+`get_series`, `get_vessels`, `get_derived_series`, `get_anomalies` rejected
+(-32602) and audited; bad argument type rejected before any query;
+`mcp_authenticate` denied to anon and authenticated (42501); pending key
+`mtk_NLNErWJD` -> 401, 0 rows from `mcp_authenticate` as `mcp_gateway` (Colin
+contrast 1), `last_used_at` null.
+
+**Real client check:** the official MCP TypeScript SDK client (1.30.1,
+negotiated protocol 2025-11-25) against the deployed endpoint: connect,
+`listTools` (5, valid schemas), `callTool` `get_labour_summary(2026,
+2026-08)` -> display totals 365.19 h / $25,812.34 with the month-scoped
+coverage note, `get_vessels` rejected, clean close; raw
+`notifications/initialized` 202, `GET` 405, `DELETE` 200.
+
+**Not verified this round:** the revocation case (skipped -- it revokes a
+real Colin key; owner's decision pending); Claude Code's `${VAR}` header
+expansion in `.mcp.json` (project-scoped servers need interactive approval,
+not given); throughput/latency under concurrent agents (single calls take
+~2.5-4.5s).

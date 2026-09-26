@@ -27,8 +27,8 @@ operator-only by RLS).
 The key is a credential: keep it in the macOS Keychain, not in config files or
 shell history.
 
-**Claude Code** -- a project `.mcp.json` that reads the key from the
-environment (the file itself contains no secret):
+**Claude Code** -- this repo ships `.mcp.json` at its root, which reads the
+key from the environment (the file itself contains no secret):
 
 ```json
 {
@@ -48,7 +48,9 @@ and in `~/.zshrc` (or wherever you launch agents from):
 export MARS_TELEMETRY_MCP_KEY="$(security find-generic-password -s mars-telemetry-mcp -a <your key prefix> -w 2>/dev/null)"
 ```
 
-Then run `claude` in that project once to approve the server. Avoid
+Then run `claude` in the repo once and approve the `mars-telemetry` server
+(project-scoped servers always need a one-time interactive approval). Without
+the variable set, the server just fails to authenticate. Avoid
 `claude mcp add ... --header "Authorization: Bearer mtk_..."`: it writes the key
 into `~/.claude.json` in plaintext.
 

@@ -6076,3 +6076,64 @@ positive calls with both Colin keys, negative cases (malformed / unknown /
 revoked / pending-account key / non-allowlisted tool), the audit log, and
 section 2d's catalog checks after the real `db push`. Harness:
 `scripts/mcp-verify.mjs`.
+
+### First live run after deploy (2026-09-26): function fails closed on a gateway password mismatch; parity re-recorded as mcp_reader
+
+**Deploy state confirmed first:** migrations through `20260926150002` applied
+(no local-only / remote-only); `mcp_gateway` can log in; keys listed by
+prefix only. The owner re-issued both Colin keys after the first pair's
+plaintext was pasted into a chat transcript: `mtk_xLx_66Pe` and
+`mtk_dTzu_nYj` were revoked ~2 minutes after issue and show `last used
+never` -- never presented to the function. Active: `mtk_vIfyFJL1` (Colin,
+`87b9d9a0`), `mtk_KqE9zEvd` (Colin, `03b52829`), `mtk_NLNErWJD` (pending
+`749d26a6`, negative test).
+
+**Every data call failed, HTTP 500 (one 503).** Diagnosis, in order:
+- A malformed key -> `401` in 0.34s: the function boots and runs this code.
+- A well-formed unknown key -> `500 {"code":-32603,"message":"Authentication
+  backend unavailable"}` in ~1.1s: the first DB call (`mcp_authenticate`)
+  throws.
+- Catalog: role, grants and `pgbouncer.get_auth` all correct;
+  `pg_stat_activity` shows **zero** `mcp_gateway` sessions.
+- Function log (dashboard, read-only): every request logged `mcp: key lookup
+  failed password authentication failed for user "mcp_gateway"`. The pooler
+  resolved the tenant/role (username format correct); the password in
+  `MCP_GATEWAY_DB_URL` does not match the role's. Owner's manual fix.
+
+**Fail-closed behaviour, confirmed live:** no key was stamped `last_used_at`,
+no `agent_api_key_calls` row was written, no data was returned, and the 500
+body names no cause.
+
+**Two harness bugs this run exposed, fixed (`mcp-verify.mjs`):**
+1. "both Colin keys return identical output" PASSED on two failed calls
+   (comparing two empty strings). It now requires real output on both sides.
+2. The harness only avoided revoking `mtk_KqE9zEvd` because it happened to
+   crash first (`JSON.parse` of an empty body in 2b). It now STOPs after the
+   positive section if any positive call failed -- before the cross-checks,
+   the negative cases and the revocation -- and runs the catalog checks (2d)
+   first so they report regardless. Re-run against the still-broken function:
+   `STOP: 14 positive call(s) failed ... (no key has been revoked)`;
+   `mtk_KqE9zEvd` confirmed still active.
+
+**Live catalog role boundaries (section 2d), verbatim, 4/4 PASS:**
+- `mcp_reader`: SELECT on exactly the 14 allowlisted relations, other table
+  grants: none.
+- `mcp_gateway`: `{"login":true,"bypassrls":false,"set_reader":true,
+  "inherits_reader":false,"other_set_targets":"none"}` -- the SET-ROLE
+  question the postgres-session dry-run could not answer.
+- `mcp_reader`: `{"login":false,"bypassrls":false,"other_set_targets":"none"}`.
+- `update_own_name {postgres=X/postgres,authenticated=X/postgres}`;
+  `mcp_authenticate {postgres=X/postgres,mcp_gateway=X/postgres}`.
+
+**Parity re-recorded as `mcp_reader`** (the real role now exists; rolled-back
+transactions with a transaction-local self-grant), same 46 queries, compared
+to the live browser session's REST results: **44 byte-identical, 2
+count-only (unordered + capped, 1000 vs 1000), 0 failed**, same identity
+(`e4586cd6`). runTool output `authenticated` vs `mcp_reader`: **15/15
+identical**. Demo vs Colin `87b9d9a0` and vs Colin `03b52829`, both as
+`mcp_reader`: **15/15 identical** each.
+
+**Still not verified (blocked on the password fix):** gateway login through
+the pooler; both keys x 5 tools through the function with DB cross-checks;
+all negative cases through the function; revoke-then-reject timing; audit-log
+rows.

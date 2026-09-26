@@ -34,7 +34,10 @@ const handler = createMcpHandler({
     return row ? { keyId: String(row.key_id), userId: String(row.user_id) } : null;
   },
   async logCall(keyHash, tool, args, isError) {
-    await unsafe("select public.mcp_log_call($1, $2, $3::jsonb, $4)", [keyHash, tool, JSON.stringify(args ?? null), isError]);
+    // Pass the object itself: postgres.js JSON-encodes values bound to a jsonb
+    // parameter. Pre-stringifying double-encoded it -- the first live audit row
+    // stored args as a JSON *string* ("{\"vintage\":2026,...}"), not an object.
+    await unsafe("select public.mcp_log_call($1, $2, $3::jsonb, $4)", [keyHash, tool, args ?? null, isError]);
   },
   runScoped: (userId, keyId, fn) =>
     runAsKeyOwner(pg as unknown as Sql, userId, keyId, (query) => fn(new PostgrestAdapter(query))),

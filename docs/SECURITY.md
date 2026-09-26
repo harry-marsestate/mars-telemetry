@@ -5638,3 +5638,83 @@ descriptions were already keys) and db.py's upserts unchanged.
   while B2 kept rising. The values match the raw CSV exactly; whether the
   drop is real (rain/dilution) or a sampling artefact is for the owner to
   judge.
+
+## daily_weather RLS drift: the dbt post-hook silently reverted the approval-status fix (2026-09-26)
+
+Branch `fix/daily-weather-rls-drift`. Found while designing the monitoring
+checks, confirmed live, fixed narrowly.
+
+**Root cause.** `ingestion/mars_dbt/macros/apply_security.sql`
+(`apply_security_invoker`, the project-wide dbt post-hook) did, for every
+*table* model: `drop policy if exists <table>_read; create policy <table>_read
+... using (true)` -- unconditionally, on every run. `daily_weather` is the only
+table model, and `20260810204144_approval_status_rls_gaps.sql` had restricted
+its policy to `current_role_name() in ('operator','customer')`. Any dbt run
+after 2026-08-10 put it back to `true`. With sign-up open (`disable_signup:
+false`, Google enabled), anyone could create an account and read the whole
+table while still pending.
+
+**Live exposure, measured (rolled-back transaction, real account ids, the
+SET LOCAL pattern):** pending `749d26a6` and rejected `e5e7d335` (both resolve
+to `current_role_name() = 'pending'`) each read **1040 of 1040**
+`daily_weather` rows.
+
+**Systematic check, not just daily_weather.** New
+`scripts/check_policy_drift.py` takes the last `create`/`drop policy` for every
+(table, policy) across all migrations, re-creates each inside one rolled-back
+transaction so Postgres normalizes the expression, and compares to live
+`pg_policies`. Result on live: **27 MATCH, 1 DRIFT (`daily_weather_read`:
+intended `(current_role_name() = ANY (ARRAY['operator'::text,
+'customer'::text]))`, live `true`), 0 missing, 0 should-be-gone, 0 live-only**;
+2 skipped (`harvest_lots`, `work_events` no longer exist). The macro only
+ever touches dbt models, and the only other model, `daily_derived`, is a view
+(macro sets `security_invoker`, confirmed `true` live) -- so nothing else was
+reverted.
+
+**Fix, two parts:**
+1. Macro: a table model must declare its read policy,
+   `config(meta={'read_policy': "..."})`, matching its latest migration; the
+   macro re-applies exactly that. A table model that declares none **fails the
+   run** rather than defaulting -- `using (true)` fails open, and no policy fails
+   silently (RLS on + zero policies = zero rows, the anomaly_thresholds mode).
+   `daily_weather.sql` declares `current_role_name() in ('operator','customer')`.
+2. Migration `20260926130000_daily_weather_read_restore.sql` restores the live
+   policy directly, so the fix doesn't depend on a dbt run.
+
+**Verified off-production (throwaway local Postgres 16 via `pgserver`, the
+project's own dbt 1.11.12, a stub `current_role_name()`):**
+- `main`'s macro, starting from the intended policy, one ordinary incremental
+  `dbt run` -> policy became `true` (regression reproduced).
+- Fixed macro, incremental run from the regressed state -> intended
+  condition; `--full-refresh` (table dropped and rebuilt) -> intended; repeat
+  run -> unchanged (idempotent). RLS stays enabled throughout.
+- As `authenticated`: operator 3 rows, customer 3, pending 0, no profile 0.
+- `meta={}` -> run fails with `apply_security_invoker: table model
+  'daily_weather' declares no read_policy ...`; the existing policy is left
+  intact. (The post-hook runs after the model builds, so that run's rows are
+  already written; only the policy step refuses.)
+- The condition the macro writes normalizes to exactly the string the live
+  drift check expects.
+
+**Verified on live, pre-push (migration applied inside a rolled-back
+transaction):** policy becomes the intended condition; pending and rejected
+read **0** rows; operator 1040 (1036 via `daily_derived`), customer 1040 (1036
+via `daily_derived`) -- unchanged. After rollback, live still `true`.
+**Not yet verified:** the live state after `supabase db push` (gated to the
+owner) -- re-run `check_policy_drift.py` afterwards and expect 28 MATCH, 0 DRIFT.
+
+**Do not run dbt against production as-is -- separate hazard, not fixed
+here.** The dbt `daily_derived` model predates the calibration and peak-VPD
+migrations: it has no `gdd_cumulative_calibrated`, `gdd_day_calibrated`,
+`dtr_f_calibrated`, `vpd_peak_kpa`, or `vintage_climate_calibration` join,
+all of which the live view has and chat/web read. A `dbt run` would swap the
+live view for the older definition. That's why this fix was verified against a
+local database and the live policy is restored by migration. Also still open:
+a `--full-refresh` drops `daily_weather`'s `grant select ... to authenticated`,
+which the macro doesn't re-grant (the two-gates principle -- it would fail as
+`permission denied`, loudly).
+
+RULE: a dbt post-hook (or any automated re-apply step) must never write a
+security policy it wasn't explicitly given. Re-apply declared intent; refuse
+when there is none. Run `scripts/check_policy_drift.py` after any dbt run or
+policy migration.

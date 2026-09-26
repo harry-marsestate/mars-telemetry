@@ -71,7 +71,15 @@ console.log(await client.callTool({ name: "get_berry_maturity", arguments: { vin
 **claude.ai custom connectors / ChatGPT connectors** need OAuth and will not
 work with a static bearer key -- see the O1/OAuth design in `docs/SECURITY.md`.
 
-## Keys (`scripts/agent-keys.mjs`, run by the owner against `DATABASE_URL`)
+## Keys
+
+**From the web app:** User Management -> **API keys** (admins only). Lists
+every key (prefix, linked account, the account's data mode, expiry, creator,
+status), filters by account/status, creates keys (re-enter your password; the
+key is shown once) and revokes them. It calls the same database functions as
+the CLI below.
+
+**From the CLI** (`scripts/agent-keys.mjs`, run by the owner against `DATABASE_URL`):
 
 ```zsh
 cd scripts && npm install && cd ..          # once
@@ -111,6 +119,8 @@ retries; a manual rotation can see `password authentication failed` briefly.
 ```zsh
 node scripts/check-mcp-boundaries.mjs        # static: allowlists, no RLS-bypassing credential
 node scripts/mcp-verify.mjs                  # live: storage, role boundaries, both keys x 5 tools, negatives, audit
+node scripts/agent-keys-admin-verify.mjs     # live: key-admin functions' access, fresh-auth, issue->auth->revoke (rolled back)
+node --test tests/agent-keys-sql.test.mjs    # offline (PGlite): the key functions, roles, fresh-auth, shared generator
 npx deno test --no-lock --config supabase/functions/mcp/deno.json tests/mcp-handler.test.ts tests/mcp-adapter.test.ts
 ```
 

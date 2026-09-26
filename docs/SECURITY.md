@@ -73,6 +73,13 @@ through the RLS model documented above, not just "another function."
   working also surfaced that `service_role` had no table-level GRANTs
   anywhere in this project at all, BYPASSRLS notwithstanding -- see the
   dedicated entry near the end of this file.
+- `admin_list_agent_keys()` / `admin_issue_agent_key()` /
+  `admin_revoke_agent_key()` - SECURITY DEFINER, **reachable through
+  PostgREST** (EXECUTE for `authenticated` only), each gated on
+  `is_admin_user()` inside the function. The only browser path onto
+  `agent_api_keys`; they wrap the owner-only `agent_key_*` functions that
+  `scripts/agent-keys.mjs` also calls. Issue additionally requires a password
+  sign-in in the last 10 minutes (`amr`). See the "Agent key admin" entry.
 
 ## Two parallel API key systems - legacy JWT vs new secret/publishable
 
@@ -6222,3 +6229,117 @@ not given); throughput/latency under concurrent agents (single calls take
 - **Client config:** project `.mcp.json` committed (no secret; header reads
   `${MARS_TELEMETRY_MCP_KEY}`). Claude Code's project-server approval is
   interactive, so that expansion is documented, not yet verified in Claude Code.
+
+## Agent key admin: MCP API keys managed from User Management (2026-09-26)
+
+Branch `feat/agent-keys-admin`. A third User Management tab, "API keys",
+lists every `agent_api_keys` row (prefix only, never a hash or plaintext),
+issues keys with a show-once panel, and revokes them. Same overlay, same
+cosmetic `is_admin` menu gate, same classes as the two existing tabs.
+
+### One implementation, in Postgres (migration `20260926160000`)
+
+- `agent_key_issue` / `agent_key_revoke` / `agent_key_list` are THE
+  implementation: key generation (`mtk_` + base64url of 32 bytes from
+  pgcrypto's `gen_random_bytes`), SHA-256 of the UTF-8 key, eligibility
+  (approved operator/customer, mirroring `mcp_authenticate()`), label suffix,
+  1-365 day expiry, computed status. **Owner-only**: EXECUTE revoked from
+  PUBLIC, anon, authenticated, service_role (so also from `mcp_gateway` /
+  `mcp_reader`). `scripts/agent-keys.mjs` now calls them instead of running its
+  own `randomBytes`/`createHash`/INSERT/UPDATE -- the CLI and the web app
+  cannot drift.
+- `admin_*` wrappers: EXECUTE for `authenticated` only. Each raises 42501
+  `forbidden` unless `is_admin_user()` -- the same predicate as
+  `admin_manages_profiles`, i.e. exactly the User Management gate, enforced
+  in the function rather than by the UI. `created_by` is built from the
+  caller's own signed JWT (email + uid), never a client string.
+- The tables are unchanged: RLS on, zero policies, no grants to any API
+  role. Even an admin gets `permission denied for table`.
+- Moving generation from Node to SQL means the plaintext never appears in
+  any statement text (statement/slow-query logs, `pg_stat_statements`) --
+  only in the issue function's single result row. It is not in any request
+  body either: the browser sends account/label/days, and gets the key back.
+- `data_mode` is not a key property: the gateway resolves the key owner's
+  `user_profiles.data_mode` per request. The tab shows it read-only.
+- The gateway (`supabase/functions/mcp/`), `mcp_authenticate()`, and
+  `mcp-verify.mjs` are untouched. `check-mcp-boundaries.mjs` still passes.
+
+### Why REST-reachable RPCs, not a dedicated role + Edge Function
+
+The existing User Management mechanism is browser -> PostgREST under the
+admin's own JWT, authorized by `is_admin_user()`; that is what this follows.
+The alternative -- a new Postgres role with EXECUTE on the implementation,
+logged into by an Edge Function holding its connection string (the
+`mcp_gateway` pattern) -- would keep these functions off PostgREST entirely,
+but adds another rotatable credential and a second deploy surface for no
+gain in who-can-do-what: that function would still have to trust the same
+`is_admin_user()` check on the same JWT. Re-granting `service_role` on the
+tables was rejected outright (it undoes 20260926150001's deliberate revoke).
+The trade-off accepted: the three `admin_*` functions are a new
+admin-only PostgREST surface, listed in "Service-role-equivalent access
+points" above.
+
+### Fresh authentication for issue (not list/revoke)
+
+A key turns a browser session into a 1-365 day bearer credential that
+survives sign-out and password change, and can act as another account. So
+`admin_issue_agent_key` requires the JWT's `amr` claim to hold a
+`method: "password"` entry stamped within the last 10 minutes. GoTrue stamps
+that entry at password sign-in (per session, in `auth.mfa_amr_claims`) and
+does not move it on token refresh, so an idle or hijacked session can't
+satisfy it; the create form re-runs `signInWithPassword` for the **session's
+own email** (only the password is typed, so it can't switch accounts) right
+before issuing. Anything else fails closed: no `amr`, non-array, stale,
+string timestamps, or a fresh non-password method (`recovery`, `oauth`) --
+tested. List and revoke need no re-auth (revocation must be frictionless in
+an incident).
+
+Known consequence: an admin who signs in **only with Google** has no
+password to re-enter and cannot issue keys until they set one ("Forgot
+password"); the form says so and disables submit. Accepting fresh `oauth`
+was not done: Google may complete silently from an existing Google session,
+which is not a re-authentication.
+
+**Not yet confirmed:** that this project's real access tokens carry `amr`
+in that shape. It is GoTrue's documented claim, but the probe (a throwaway
+sign-in, or a read of `auth.mfa_amr_claims`) was not run from this
+environment. If they don't, issue fails closed for everyone ("recent sign-in
+required") -- safe, but the fallback (`reauthenticate()`) would then be
+needed.
+
+### Verification
+
+- `tests/agent-keys-sql.test.mjs` (node:test on PGlite, real migrations
+  applied, no network): 13/13. SQL-generated keys pass `mcp/auth.ts`'s own
+  `parseBearerKey` and hash to its `sha256Hex`; an issued key authenticates
+  via `mcp_authenticate` as `mcp_gateway` and stops after revoke;
+  eligibility/expiry/label rules; every API role refused on every function
+  and table; the fresh-auth matrix; list shape/status/owner_eligible; static
+  checks that `agent-keys.mjs` has no key logic of its own and that
+  `web/index.html` never names `key_hash`, never calls `agent_key_*`, never
+  logs the key. **Mutation-tested**: dropping the admin check, dropping the
+  freshness check, and granting the implementation to `authenticated` each
+  failed both this suite and the harness.
+- `scripts/agent-keys-admin-verify.mjs` (live; every write rolled back; key
+  redacted from output; accounts shown by 8-char prefix): function
+  definitions, EXECUTE matrix, tables still deny-all, denial as anon /
+  service_role / mcp_gateway / mcp_reader-with-admin-claims / non-admin
+  operator / customer / pending, admin can't call the implementation or read
+  the table, fresh-auth matrix, admin list == CLI list, end-to-end issue ->
+  hash match -> `mcp_authenticate` -> revoke -> rejected -> still listed ->
+  rolled back, `pg_stat_statements` never saw the key, and the real REST API
+  refuses all six functions and both tables to the anon key. Dry run
+  against PGlite: 34/34 (sections 5-6 need production).
+- Browser (local page, Supabase client stubbed in-page -- no production
+  calls except one anonymous `admin-pending-emails` that production
+  correctly refused): list, search (label/name/email, case-insensitive),
+  account and status filters, create validation, wrong password stops before
+  the issue RPC, success shows the key once (only in the input's value, never
+  in markup), dismiss / tab switch / closing the overlay all clear it,
+  inline revoke confirm, revoked rows stay listed, Google-only admin message,
+  server refusal surfaced in the form, a hostile label rendered as text; no
+  page-level horizontal scroll at 390px (the tab bar now wraps).
+
+**Pending (owner):** `supabase db push` of `20260926160000`; the `amr`
+confirmation; `agent-keys-admin-verify.mjs` against production; a real
+issue/revoke through the Vercel preview.

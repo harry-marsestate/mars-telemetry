@@ -503,7 +503,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 /* ── Auth (Phase 6.1 — view only; session gating wired in 6.4) ──── */
 .auth-card{width:340px; max-width:90vw}
 .auth-tabs{display:inline-flex; margin-top:28px}
-.queue-tabs{display:inline-flex; margin:20px 0 6px}
+.queue-tabs{display:inline-flex; flex-wrap:wrap; justify-content:center; max-width:100%; margin:20px 0 6px}
 .auth-form{display:flex; flex-direction:column; gap:12px; margin-top:26px}
 .auth-form input{
   background:var(--ink-2); border:1px solid var(--line); border-radius:3px;
@@ -546,11 +546,15 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .queue-row-time{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); margin-top:5px}
 .queue-row-actions{display:flex; gap:8px; flex:none}
 .queue-approve-form{margin-top:14px; padding-top:14px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:14px}
-.queue-approve-form select, .queue-approve-form input[type=text]{
+.queue-approve-form select, .queue-approve-form input[type=text],
+.queue-approve-form input[type=password], .queue-approve-form input[type=number],
+.keys-toolbar select, .keys-toolbar input[type=text]{
   background:var(--ink-3); border:1px solid var(--line); border-radius:3px;
   color:var(--cream); font-family:var(--ui); font-size:13px; padding:9px 12px; width:100%;
 }
-.queue-approve-form select:focus, .queue-approve-form input[type=text]:focus{outline:none; border-color:var(--gold-dim)}
+.queue-approve-form select:focus, .queue-approve-form input[type=text]:focus,
+.queue-approve-form input[type=password]:focus, .queue-approve-form input[type=number]:focus,
+.keys-toolbar select:focus, .keys-toolbar input[type=text]:focus{outline:none; border-color:var(--gold-dim)}
 .queue-collision-warn{font-family:var(--mono); font-size:10.5px; color:var(--warn); margin-top:6px; display:none; line-height:1.6}
 .queue-form-actions{display:flex; gap:10px}
 .queue-form-actions .out-b{width:auto; margin-top:0; padding:10px 20px}
@@ -559,6 +563,29 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   font-size:11px; letter-spacing:.1em; text-transform:uppercase; transition:all .16s;
 }
 .queue-btn-secondary:hover{color:var(--alert); border-color:var(--alert)}
+
+/* ── User Management: API keys tab ───────────────── */
+.queue-card.wide{width:1120px}
+.keys-toolbar{display:flex; flex-wrap:wrap; align-items:flex-end; gap:16px}
+.keys-toolbar .fgroup{flex:1 1 200px; gap:6px}
+.keys-toolbar .keys-status-group{flex:0 1 auto}
+.keys-toolbar .out-b{flex:none; padding:10px 20px}
+.keys-tbl-wrap{overflow-x:auto}
+.keys-tbl{min-width:940px}
+.keys-tbl td:first-child{min-width:170px}
+.keys-tbl td .dim{display:block; color:var(--muted-2); margin-top:3px}
+.keys-tbl td.nw{white-space:nowrap}
+.keys-tbl .queue-btn-secondary{padding:6px 12px; font-size:9.5px; white-space:nowrap}
+.keys-tbl .queue-form-actions{gap:6px; margin-top:6px}
+.keys-st-active{color:var(--ok)}
+.keys-st-revoked{color:var(--alert)}
+.keys-st-expired{color:var(--muted)}
+.keys-st-warn{color:var(--warn)}
+.keys-note{font-family:var(--mono); font-size:10.5px; color:var(--muted); line-height:1.6}
+.keys-once{border-color:var(--gold-dim); background:var(--gold-glow)}
+.keys-once-row{display:flex; gap:10px; margin:14px 0}
+.keys-once-key{flex:1; min-width:0; font-family:var(--mono); font-size:12px; color:var(--gold); background:var(--ink); border:1px solid var(--gold-dim); border-radius:3px; padding:9px 12px}
+.keys-once-row .out-b{flex:none; padding:9px 18px}
 
 .foot{display:flex; flex-wrap:wrap; gap:8px 26px; justify-content:space-between; padding:26px 2px 0; margin-top:30px;
   border-top:1px solid var(--line); font-family:var(--mono); font-size:9.5px; color:var(--muted-2); letter-spacing:.04em}
@@ -745,9 +772,35 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
     <div class="tabs queue-tabs" role="tablist">
       <button class="tab on" id="queue-tab-pending" role="tab" type="button">Pending approvals</button>
       <button class="tab" id="queue-tab-accounts" role="tab" type="button">Accounts</button>
+      <button class="tab" id="queue-tab-keys" role="tab" type="button">API keys</button>
     </div>
     <div class="queue-list" id="queue-list"></div>
     <div class="queue-list" id="accounts-list" style="display:none"></div>
+    <div class="queue-list" id="keys-list" style="display:none">
+      <div class="keys-toolbar">
+        <div class="fgroup">
+          <div class="flabel">Search</div>
+          <input type="text" id="keys-search" placeholder="Label or linked account" autocomplete="off">
+        </div>
+        <div class="fgroup">
+          <div class="flabel">Linked account</div>
+          <select id="keys-account"><option value="">All accounts</option></select>
+        </div>
+        <div class="fgroup keys-status-group">
+          <div class="flabel">Status</div>
+          <div class="chips" id="keys-status">
+            <button type="button" class="chip on" data-status="all">All</button>
+            <button type="button" class="chip" data-status="active">Active</button>
+            <button type="button" class="chip" data-status="revoked">Revoked</button>
+            <button type="button" class="chip" data-status="expired">Expired</button>
+          </div>
+        </div>
+        <button class="out-b" id="keys-create-btn" type="button">Create key</button>
+      </div>
+      <div id="keys-once"></div>
+      <div class="queue-row" id="keys-create" style="display:none"></div>
+      <div id="keys-table"></div>
+    </div>
   </div>
 </div>
 
@@ -4555,17 +4608,24 @@ $('#menu-queue').onclick=()=>{
   loadApprovalQueue();
 };
 $('#queue-close').onclick=()=>{
+  discardOneTimeKey();
   $('#queue-view').classList.remove('on');
   showDashboard();
 };
 $('#queue-tab-pending').onclick=()=>switchQueueTab('pending');
 $('#queue-tab-accounts').onclick=()=>switchQueueTab('accounts');
+$('#queue-tab-keys').onclick=()=>switchQueueTab('keys');
 function switchQueueTab(tab){
   $('#queue-tab-pending').classList.toggle('on', tab==='pending');
   $('#queue-tab-accounts').classList.toggle('on', tab==='accounts');
+  $('#queue-tab-keys').classList.toggle('on', tab==='keys');
   $('#queue-list').style.display = tab==='pending' ? '' : 'none';
   $('#accounts-list').style.display = tab==='accounts' ? '' : 'none';
+  $('#keys-list').style.display = tab==='keys' ? '' : 'none';
+  $('#queue-view .queue-card').classList.toggle('wide', tab==='keys');
+  if(tab!=='keys') discardOneTimeKey();
   if(tab==='accounts') loadAccountsList();
+  if(tab==='keys') loadAgentKeys();
 }
 
 /* Resize */
@@ -5642,6 +5702,333 @@ function renderAccountRow(list, row, email, currentUserId){
     saveBtn.textContent='Saved';
     setTimeout(()=>{ saveBtn.textContent='Save'; saveBtn.disabled=false; }, 1400);
   };
+}
+
+/* User Management's "API keys" tab -- the MCP gateway's per-user keys
+   (agent_api_keys). Every read/write is an admin_* RPC (migration
+   20260926160000): each checks is_admin_user() itself, so this tab being
+   visible only to admins is the same cosmetic gate as the rest of this
+   overlay, not the enforcement. The key tables stay unreachable from the
+   browser; issue/revoke run the exact functions scripts/agent-keys.mjs
+   runs. admin_issue_agent_key also demands a password sign-in within the
+   last 10 minutes, so the create form re-signs-in the CURRENT account
+   (its own email, only the password is asked for) right before issuing.
+
+   The plaintext key exists in this page only from the issue response until
+   the one-time panel is dismissed: held in that panel's closure and its
+   readonly input (set as a property, never interpolated into HTML), never
+   in a global, never logged. Dismissing, switching tab or closing the
+   overlay all tear it down. Revoked keys stay listed for audit. */
+const KEY_STATUS_LABELS = { active:'Active', revoked:'Revoked', expired:'Expired' };
+const DATA_MODE_LABELS = { all:'All data', real_only:'Real-only' };
+const keysState = { rows:[], emails:{}, search:'', account:'', status:'all' };
+let clearOneTimeKey=null;
+
+function discardOneTimeKey(){ if(clearOneTimeKey) clearOneTimeKey(); }
+function keysDate(iso){
+  return iso ? new Date(iso).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'}) : '—';
+}
+function keysAccountName(r){
+  return r.account_first_name ? `${r.account_first_name} ${r.account_last_name||''}`.trim() : '(no profile)';
+}
+// Same admin-pending-emails call the other two tabs make; returns
+// {emails} or {message} with the function's own error text if it has one.
+async function keysLookupEmails(ids){
+  if(!ids.length) return { emails:{} };
+  const { data, error } = await sb.functions.invoke('admin-pending-emails', { body:{ids} });
+  if(!error) return { emails: data?.emails || {} };
+  let message=error.message;
+  if(error.context && typeof error.context.json==='function'){
+    try{ const body=await error.context.json(); if(body?.error) message=body.error; }catch{}
+  }
+  return { message };
+}
+
+async function loadAgentKeys(){
+  const host=$('#keys-table');
+  host.innerHTML=`<div class="empty">Loading&hellip;</div>`;
+  const { data: rows, error } = await sb.rpc('admin_list_agent_keys');
+  if(error){
+    console.error('loadAgentKeys: list failed', error);
+    host.innerHTML=`<div class="empty">Couldn&rsquo;t load API keys.<br><b>${escapeHtml(error.message||'Unknown error')}</b></div>`;
+    return;
+  }
+  const { emails, message } = await keysLookupEmails([...new Set(rows.map(r=>r.user_id))]);
+  if(message){
+    console.error('loadAgentKeys: email lookup failed', message);
+    host.innerHTML=`<div class="empty">Couldn&rsquo;t resolve linked accounts&rsquo; emails.<br><b>${escapeHtml(message)}</b></div>`;
+    return;
+  }
+  keysState.rows=rows;
+  keysState.emails=emails;
+  renderKeysAccountFilter();
+  renderKeysTable();
+}
+
+// Only accounts that actually have keys, per the spec.
+function renderKeysAccountFilter(){
+  const select=$('#keys-account');
+  const seen=new Map();
+  keysState.rows.forEach(r=>{ if(!seen.has(r.user_id)) seen.set(r.user_id, keysAccountName(r)); });
+  if(keysState.account && !seen.has(keysState.account)) keysState.account='';
+  select.innerHTML=`<option value="">All accounts</option>` +
+    [...seen].sort((a,b)=>a[1].localeCompare(b[1])).map(([id,name])=>{
+      const email=keysState.emails[id];
+      return `<option value="${escapeHtml(id)}">${escapeHtml(name)}${email ? ` — ${escapeHtml(email)}` : ''}</option>`;
+    }).join('');
+  select.value=keysState.account;
+}
+
+function keysFiltered(){
+  const q=keysState.search.trim().toLowerCase();
+  return keysState.rows.filter(r=>{
+    if(keysState.status!=='all' && r.status!==keysState.status) return false;
+    if(keysState.account && r.user_id!==keysState.account) return false;
+    if(!q) return true;
+    return [r.label, keysAccountName(r), keysState.emails[r.user_id]||''].some(s=>s.toLowerCase().includes(q));
+  });
+}
+
+function renderKeysTable(){
+  const host=$('#keys-table');
+  if(!keysState.rows.length){ host.innerHTML=`<div class="empty">No API keys yet.</div>`; return; }
+  const rows=keysFiltered();
+  if(!rows.length){ host.innerHTML=`<div class="empty">No keys match these filters.</div>`; return; }
+  host.innerHTML=`
+    <div class="keys-tbl-wrap"><table class="tbl keys-tbl">
+      <thead><tr>
+        <th>Label</th><th>Key</th><th>Linked account</th><th>Data mode</th><th>Expires</th>
+        <th>Created by</th><th>Created</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table></div>`;
+  const tbody=host.querySelector('tbody');
+  rows.forEach(r=>tbody.appendChild(renderKeyRow(r)));
+}
+
+function renderKeyRow(r){
+  const email=keysState.emails[r.user_id];
+  // created_by is "<who> via <where>"; a web-issued one embeds the admin's
+  // uuid after their email -- shown in the tooltip, not the cell.
+  const [creator, via] = (r.created_by||'—').split(' via ');
+  const creatorShort = creator.replace(/\s*\([0-9a-f-]{36}\)$/, '');
+  const inert = r.status==='active' && !r.owner_eligible;
+  const statusSub = r.status==='revoked'
+    ? `revoked ${keysDate(r.revoked_at)}`
+    : (r.last_used_at ? `used ${timeAgo(r.last_used_at)}` : 'never used');
+  const tr=el('tr');
+  tr.innerHTML=`
+    <td>${escapeHtml(r.label)}</td>
+    <td class="nw">${escapeHtml(r.key_prefix)}&hellip;</td>
+    <td>${escapeHtml(keysAccountName(r))}
+      <span class="dim">${email ? escapeHtml(email) : 'email unavailable'}</span>
+      <span class="dim">${escapeHtml(ROLE_LABELS[r.account_role]||r.account_role||'')}</span></td>
+    <td class="nw">${escapeHtml(DATA_MODE_LABELS[r.account_data_mode]||r.account_data_mode||'—')}</td>
+    <td class="nw">${keysDate(r.expires_at)}</td>
+    <td title="${escapeHtml(r.created_by||'')}">${escapeHtml(creatorShort)}${via ? `<span class="dim">via ${escapeHtml(via)}</span>` : ''}</td>
+    <td class="nw">${keysDate(r.created_at)}</td>
+    <td><span class="keys-st-${escapeHtml(r.status)}">${KEY_STATUS_LABELS[r.status]||escapeHtml(r.status)}</span>
+      ${inert ? `<span class="dim keys-st-warn" title="The linked account is ${escapeHtml(r.account_status||'missing')}; the gateway rejects this key until it is an approved Team/Obsidian Member again.">account not approved &mdash; key won&rsquo;t work</span>` : ''}
+      <span class="dim">${statusSub}</span></td>
+    <td class="keys-action"></td>`;
+  if(r.status!=='revoked') renderRevokeAction(tr.querySelector('.keys-action'), r);
+  return tr;
+}
+
+// Inline two-step confirm, the same expand-in-place shape as the Approve
+// form (and no native confirm() -- it blocks the page's other listeners).
+function renderRevokeAction(cell, r){
+  cell.innerHTML=`<button type="button" class="queue-btn-secondary">Revoke</button>`;
+  cell.querySelector('button').onclick=()=>{
+    cell.innerHTML=`
+      <div class="keys-note">Revoke ${escapeHtml(r.key_prefix)}&hellip;? Agents using it get 401 on their next request.</div>
+      <div class="queue-form-actions">
+        <button type="button" class="queue-btn-secondary keys-revoke-yes">Confirm revoke</button>
+        <button type="button" class="queue-btn-secondary keys-revoke-no">Cancel</button>
+      </div>
+      <div class="auth-err keys-revoke-err"></div>`;
+    const yes=cell.querySelector('.keys-revoke-yes'), no=cell.querySelector('.keys-revoke-no');
+    no.onclick=()=>renderRevokeAction(cell, r);
+    yes.onclick=async ()=>{
+      yes.disabled=true; no.disabled=true; yes.textContent='Revoking…';
+      const { data, error } = await sb.rpc('admin_revoke_agent_key', { p_id: r.id });
+      if(error){
+        console.error('revoke failed', error);
+        const err=cell.querySelector('.keys-revoke-err');
+        err.textContent=`Couldn't revoke: ${error.message}`; err.classList.add('on');
+        yes.disabled=false; no.disabled=false; yes.textContent='Confirm revoke';
+        return;
+      }
+      if(!data.length) console.warn('revoke: key was already revoked', r.id);
+      await loadAgentKeys();
+    };
+  };
+}
+
+$('#keys-search').addEventListener('input', e=>{ keysState.search=e.target.value; renderKeysTable(); });
+$('#keys-account').onchange=e=>{ keysState.account=e.target.value; renderKeysTable(); };
+$$('#keys-status .chip').forEach(chip=>{
+  chip.onclick=()=>{
+    keysState.status=chip.dataset.status;
+    $$('#keys-status .chip').forEach(c=>c.classList.toggle('on', c===chip));
+    renderKeysTable();
+  };
+});
+$('#keys-create-btn').onclick=()=>{
+  const host=$('#keys-create');
+  if(host.style.display!=='none'){ host.style.display='none'; host.innerHTML=''; return; }
+  host.style.display='';
+  renderCreateKeyForm(host);
+};
+
+async function renderCreateKeyForm(host){
+  host.innerHTML=`<div class="empty">Loading accounts&hellip;</div>`;
+  const { data: { session } } = await sb.auth.getSession();
+  // Any approved Team/Obsidian Member -- exactly what mcp_authenticate()
+  // accepts and agent_key_issue() re-checks; a key only ever inherits that
+  // account's own access.
+  const { data: accounts, error } = await sb.from('user_profiles')
+    .select('id, first_name, last_name, role, data_mode')
+    .eq('status','approved')
+    .in('role',['operator','customer'])
+    .order('first_name', {ascending:true, nullsFirst:false});
+  if(error){
+    console.error('renderCreateKeyForm: account query failed', error);
+    host.innerHTML=`<div class="empty">Couldn&rsquo;t load accounts.<br><b>${escapeHtml(error.message||'Unknown error')}</b></div>`;
+    return;
+  }
+  const { emails, message } = await keysLookupEmails(accounts.map(a=>a.id));
+  if(message){
+    host.innerHTML=`<div class="empty">Couldn&rsquo;t resolve accounts&rsquo; emails.<br><b>${escapeHtml(message)}</b></div>`;
+    return;
+  }
+  // Fresh-auth is password-only (the server accepts only an `amr` password
+  // entry). A Google-only admin has no password to re-enter.
+  const providers = session.user.app_metadata?.providers || [session.user.app_metadata?.provider];
+  const hasPassword = providers.includes('email');
+
+  host.innerHTML=`
+    <div class="queue-row-email">Create an API key</div>
+    <div class="queue-row-name">For an agent or script to call the MCP gateway as the linked account.</div>
+    <div class="queue-approve-form">
+      <div class="fgroup">
+        <div class="flabel">Label</div>
+        <input type="text" class="keys-label-input" maxlength="100" placeholder="e.g. Colin's laptop — Claude Code" autocomplete="off">
+        <div class="keys-note">&ldquo;[user &hellip;]&rdquo; with the account&rsquo;s first 8 id characters is appended automatically.</div>
+      </div>
+      <div class="fgroup">
+        <div class="flabel">Linked account</div>
+        <select class="keys-account-select">
+          <option value="">Select an account&hellip;</option>
+          ${accounts.map(a=>`<option value="${escapeHtml(a.id)}">${escapeHtml(`${a.first_name||''} ${a.last_name||''}`.trim()||a.id)} &middot; ${escapeHtml(ROLE_LABELS[a.role]||a.role)}${emails[a.id] ? ` &middot; ${escapeHtml(emails[a.id])}` : ''}</option>`).join('')}
+        </select>
+        <div class="keys-note keys-account-note"></div>
+      </div>
+      <div class="fgroup">
+        <div class="flabel">Expires in (days)</div>
+        <input type="number" class="keys-days-input" min="1" max="365" step="1" value="90">
+        <div class="keys-note keys-expiry-note"></div>
+      </div>
+      <div class="fgroup">
+        <div class="flabel">Confirm your password</div>
+        ${hasPassword
+          ? `<input type="password" class="keys-password-input" autocomplete="current-password" placeholder="Required to create a key">`
+          : `<div class="keys-note keys-st-warn">Your account signs in with Google only. Creating a key requires re-entering a password: set one with &ldquo;Forgot password&rdquo; on the sign-in screen, then come back.</div>`}
+      </div>
+      <div class="auth-err keys-create-err"></div>
+      <div class="queue-form-actions">
+        <button type="button" class="out-b keys-create-submit" ${hasPassword?'':'disabled'}>Create key</button>
+        <button type="button" class="queue-btn-secondary keys-create-cancel">Cancel</button>
+      </div>
+    </div>`;
+
+  const labelInput=host.querySelector('.keys-label-input');
+  const accountSelect=host.querySelector('.keys-account-select');
+  const accountNote=host.querySelector('.keys-account-note');
+  const daysInput=host.querySelector('.keys-days-input');
+  const expiryNote=host.querySelector('.keys-expiry-note');
+  const passwordInput=host.querySelector('.keys-password-input');
+  const formErr=host.querySelector('.keys-create-err');
+  const submitBtn=host.querySelector('.keys-create-submit');
+  const byId=Object.fromEntries(accounts.map(a=>[a.id, a]));
+
+  // data_mode is the ACCOUNT's (user_profiles.data_mode), resolved by the
+  // gateway per request -- shown here read-only, not a key setting.
+  accountSelect.onchange=()=>{
+    const a=byId[accountSelect.value];
+    accountNote.innerHTML = a
+      ? `Acts as ${escapeHtml(`${a.first_name||''} ${a.last_name||''}`.trim())} with their own access (${escapeHtml(ROLE_LABELS[a.role]||a.role)}) and data mode: <b>${escapeHtml(DATA_MODE_LABELS[a.data_mode]||a.data_mode)}</b>. Change data mode on the Accounts tab.`
+      : '';
+  };
+  const syncExpiry=()=>{
+    const d=Number(daysInput.value);
+    expiryNote.textContent = Number.isInteger(d) && d>=1 && d<=365
+      ? `Expires ${keysDate(new Date(Date.now()+d*86400000).toISOString())}. 1 to 365 days; keys always expire.`
+      : 'Enter a whole number of days from 1 to 365.';
+  };
+  daysInput.oninput=syncExpiry; syncExpiry();
+  host.querySelector('.keys-create-cancel').onclick=()=>{ host.style.display='none'; host.innerHTML=''; };
+
+  const fail=(msg)=>{ formErr.textContent=msg; formErr.classList.add('on'); };
+  submitBtn.onclick=async ()=>{
+    formErr.textContent=''; formErr.classList.remove('on');
+    const label=labelInput.value.trim(), userId=accountSelect.value, days=Number(daysInput.value);
+    if(!label) return fail('Enter a label.');
+    if(!userId) return fail('Select a linked account.');
+    if(!Number.isInteger(days) || days<1 || days>365) return fail('Expiry must be a whole number of days from 1 to 365.');
+    if(!passwordInput.value) return fail('Enter your password to confirm.');
+
+    submitBtn.disabled=true; submitBtn.textContent='Creating…';
+    const reset=()=>{ submitBtn.disabled=false; submitBtn.textContent='Create key'; };
+    // Re-sign-in as the SAME account (its email from the live session, never
+    // a typed one), which stamps a fresh `amr` password entry on the new token.
+    const { data: { session: current } } = await sb.auth.getSession();
+    const { error: reauthErr } = await sb.auth.signInWithPassword({ email: current.user.email, password: passwordInput.value });
+    passwordInput.value='';
+    if(reauthErr){ reset(); return fail(`Password not accepted: ${reauthErr.message}`); }
+
+    const { data: issued, error } = await sb.rpc('admin_issue_agent_key', { p_user_id:userId, p_label:label, p_days:days }).single();
+    if(error){
+      console.error('issue failed', error.message);
+      reset();
+      return fail(`Couldn't create the key: ${error.message}`);
+    }
+    host.style.display='none'; host.innerHTML='';
+    showOneTimeKey(issued);
+    loadAgentKeys();
+  };
+}
+
+function showOneTimeKey(issued){
+  discardOneTimeKey();
+  let secret=issued.key;
+  issued.key=null;
+  const host=$('#keys-once');
+  host.innerHTML=`
+    <div class="queue-row keys-once">
+      <div class="queue-row-email">Copy this key now &mdash; you won&rsquo;t see it again</div>
+      <div class="queue-row-name">${escapeHtml(issued.label)} &middot; ${escapeHtml(issued.key_prefix)}&hellip; &middot; expires ${keysDate(issued.expires_at)}</div>
+      <div class="keys-once-row">
+        <input type="text" class="keys-once-key" readonly spellcheck="false" autocomplete="off" aria-label="New API key">
+        <button type="button" class="out-b keys-copy-btn">Copy</button>
+      </div>
+      <div class="keys-note">Only its SHA-256 hash is stored. If it&rsquo;s lost, revoke it and create a new one. Store it in the macOS Keychain, not a config file (see docs/MCP.md).</div>
+      <div class="queue-form-actions" style="margin-top:12px">
+        <button type="button" class="queue-btn-secondary keys-done-btn">I&rsquo;ve saved it</button>
+      </div>
+    </div>`;
+  const input=host.querySelector('.keys-once-key');
+  const copyBtn=host.querySelector('.keys-copy-btn');
+  input.value=secret;
+  input.onfocus=()=>input.select();
+  copyBtn.onclick=()=>{
+    navigator.clipboard.writeText(secret).then(
+      ()=>{ copyBtn.textContent='Copied'; },
+      ()=>{ input.focus(); input.select(); copyBtn.textContent='Press ⌘C'; }
+    );
+  };
+  clearOneTimeKey=()=>{ secret=null; input.value=''; host.innerHTML=''; clearOneTimeKey=null; };
+  host.querySelector('.keys-done-btn').onclick=discardOneTimeKey;
 }
 
 /* Boot */

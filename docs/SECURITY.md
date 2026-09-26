@@ -6201,3 +6201,24 @@ real Colin key; owner's decision pending); Claude Code's `${VAR}` header
 expansion in `.mcp.json` (project-scoped servers need interactive approval,
 not given); throughput/latency under concurrent agents (single calls take
 ~2.5-4.5s).
+
+### Revocation verified, test keys retired, owner's key issued (2026-09-26)
+
+- **Revocation, live, through the function:** a 1-day throwaway key
+  (`mtk_O9WU1CIb`, owner's account `5bb6b29e`, issued `--keychain --no-print`
+  so its plaintext was never displayed) returned 200, was revoked at
+  `16:33:14.274Z` (DB clock), and the very next request -- sent `+7ms` by the
+  client clock -- returned **401**, as did a `tools/call`. Nothing is cached.
+  Used instead of revoking Colin's real `mtk_KqE9zEvd`. Full harness with the
+  revocation case: **54/54 PASS**.
+- **Retired:** `mtk_NLNErWJD` (the pending-account negative-test key) revoked
+  `16:33:28Z`. Active keys now: Colin `mtk_vIfyFJL1`, Colin `mtk_KqE9zEvd`, and
+  the owner's `mtk_jvOeHpCG`.
+- **Owner's key:** `mtk_jvOeHpCG` ("Harry agent key", acts as `5bb6b29e`,
+  data_mode all, expires 2026-12-25), issued `--keychain --no-print` -- it went
+  straight into the owner's macOS Keychain and was never displayed. Verified
+  with the official MCP SDK client: connect, 5 tools, `get_labour_summary(2026,
+  2026-08)` real totals, `get_vessels` rejected; audited under its prefix.
+- **Client config:** project `.mcp.json` committed (no secret; header reads
+  `${MARS_TELEMETRY_MCP_KEY}`). Claude Code's project-server approval is
+  interactive, so that expansion is documented, not yet verified in Claude Code.

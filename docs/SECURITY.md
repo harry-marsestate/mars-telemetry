@@ -6333,10 +6333,15 @@ non-array, string timestamps, entries older than 10 minutes, and other
 methods (`recovery`, `otp`, `magiclink`). List and revoke need no re-auth
 (revocation must be frictionless in an incident).
 
-**Not yet confirmed on a real token:** the source says the above; a real
-password token and a real Google token from this project have not been
-decoded yet (owner check, pending). A custom access-token hook (none in
-`supabase/config.toml`; dashboard not checked) could rewrite `amr`.
+**Confirmed on real tokens (owner, 2026-09-26)**, decoding `amr` in the live
+app's console: password sign-in -> `{method: "password", timestamp:
+1790449623}` (number, age 5s); Google sign-in, with a real click on Google's
+account chooser (not silent) -> `{method: "oauth", timestamp: 1790449547}`
+(number, age 23s); after `refreshSession()` the timestamp stayed at
+1790449623 and the age kept climbing (62s) -- a refresh does not make a
+session look fresh. Exactly the source-derived shape above. (A custom
+access-token hook could still rewrite `amr`; none is configured in
+`supabase/config.toml`, and the real tokens show none is rewriting it.)
 
 ### Verification
 
@@ -6373,6 +6378,31 @@ decoded yet (owner check, pending). A custom access-token hook (none in
   server refusal surfaced in the form, a hostile label rendered as text; no
   page-level horizontal scroll at 390px (the tab bar now wraps).
 
-**Pending (owner):** `supabase db push` of `20260926160000`; the `amr`
-confirmation; `agent-keys-admin-verify.mjs` against production; a real
-issue/revoke through the Vercel preview.
+### Deployed and verified live (2026-09-26)
+
+- `supabase db push --dry-run` listed exactly one migration,
+  `20260926160000_agent_keys_admin.sql` (no seeds, no roles); `supabase db
+  push` applied it.
+- `agent-keys-admin-verify.mjs` against production: **45/45 PASS**, no
+  redactions. All six functions SECURITY DEFINER with `search_path=""`;
+  EXECUTE matrix exactly as designed (wrappers: authenticated only;
+  implementation: no API role); key tables still no privilege for any API
+  role, RLS on, 0 policies. Refused as anon, service_role, mcp_gateway,
+  mcp_reader holding the admin's claims, and as a real non-admin operator
+  (`03b52829`), customer (`9782853b`) and pending account (`30346b0e`);
+  the admin (`5bb6b29e`) can't call the implementation or read the table.
+  Fresh-auth: refused with no amr, password or Google 11 min old, fresh
+  recovery/otp; allowed with password or Google 9 min old. Admin list ==
+  CLI list, 7/7 keys (3 active, 4 revoked). End to end (rolled back): key
+  `mtk_GfrodLUa` had the gateway's shape, its stored hash matched
+  `sha256Hex`, `mcp_authenticate` as `mcp_gateway` resolved it to
+  `03b52829`, revoke -> 0 rows, still listed as revoked, gone after
+  rollback. `pg_stat_statements`: 0 statements contain the key. Real REST
+  API with the anon key: all six functions and both tables -> 401/42501.
+- Rewired CLI, `agent-keys.mjs list` against production: the same 7 keys
+  through `agent_key_list()`; active = Colin `mtk_vIfyFJL1`, Colin
+  `mtk_KqE9zEvd`, owner `mtk_jvOeHpCG` -- unchanged from the entry above.
+
+**Pending (owner):** a real create-and-revoke click-through on the branch's
+Vercel preview (password and, once the preview domain is on Supabase Auth's
+redirect allowlist, Google). Not merged to `main` until then.

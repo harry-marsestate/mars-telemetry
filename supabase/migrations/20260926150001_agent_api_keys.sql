@@ -45,19 +45,24 @@ revoke all on public.agent_api_key_calls from anon, authenticated, service_role;
 
 -- Resolves a key hash (lowercase hex SHA-256, computed in the Edge Function
 -- from the caller's bearer key) to the key id and the user it acts as.
+-- Called by the function as mcp_gateway, BEFORE it switches to mcp_reader.
+-- auth.uid() is null here (no claims set yet), so the role/approval check below
+-- reads user_profiles directly, keyed off the key's own user_id.
 -- Returns ZERO rows -- never an error that distinguishes the cases -- when
 -- the key is unknown, revoked, expired, or bound to a user who is not an
 -- approved operator/customer. The role check is an explicit allowlist, per
 -- docs/SECURITY.md's "current_role_name() checks role, not approval" RULE,
 -- so a future fourth status/role fails closed. It reads user_profiles
 -- directly rather than calling current_role_name(), because auth.uid() is
--- null here (the caller is anon) -- same predicate, keyed off the key's
+-- null here (no claims are set yet) -- same predicate, keyed off the key's
 -- user_id instead.
 --
 -- SECURITY DEFINER is a deliberate new entry on docs/SECURITY.md's
--- service-role-equivalent access points list: it is the only way the anon
--- caller can see agent_api_keys at all. It exposes nothing but (key_id,
--- user_id) for a hash whose preimage the caller must already hold.
+-- service-role-equivalent access points list: it is the only way the
+-- mcp_gateway role (20260926150000) can see agent_api_keys at all. It exposes
+-- nothing but (key_id, user_id) for a hash whose preimage the caller must
+-- already hold. Not reachable through PostgREST: EXECUTE is granted to
+-- mcp_gateway only, never anon/authenticated.
 create function public.mcp_authenticate(p_key_hash text)
 returns table (key_id uuid, user_id uuid)
 language plpgsql
@@ -84,13 +89,11 @@ begin
 end;
 $$;
 
--- Appends one audit row per tools/call. Takes the key HASH, not the key id,
--- as proof of possession: anon can execute this function (the Edge Function
--- has no other identity to call it with before minting), so keying it off
--- an id alone would let anyone holding the public anon key forge log rows
--- for a known id. Re-checks the same active-key conditions as
--- mcp_authenticate(). args is capped so a caller can't use the log as
--- unbounded storage.
+-- Appends one audit row per tools/call, called as mcp_gateway. Takes the key
+-- HASH, not the key id, as proof of possession, so even the gateway role can
+-- only log against a key whose plaintext it was actually presented with.
+-- Re-checks the same active-key conditions as mcp_authenticate(). args is
+-- capped so a caller can't use the log as unbounded storage.
 create function public.mcp_log_call(p_key_hash text, p_tool text, p_args jsonb, p_is_error boolean)
 returns void
 language plpgsql
@@ -117,8 +120,8 @@ begin
 end;
 $$;
 
--- Functions default to EXECUTE for PUBLIC; narrow both to anon only.
+-- Functions default to EXECUTE for PUBLIC; narrow both to mcp_gateway only.
 revoke execute on function public.mcp_authenticate(text) from public, anon, authenticated, service_role;
 revoke execute on function public.mcp_log_call(text, text, jsonb, boolean) from public, anon, authenticated, service_role;
-grant execute on function public.mcp_authenticate(text) to anon;
-grant execute on function public.mcp_log_call(text, text, jsonb, boolean) to anon;
+grant execute on function public.mcp_authenticate(text) to mcp_gateway;
+grant execute on function public.mcp_log_call(text, text, jsonb, boolean) to mcp_gateway;

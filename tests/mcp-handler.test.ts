@@ -2,29 +2,26 @@
 // through its own import map, so these run under Deno, not node:test):
 //   npx deno test --config supabase/functions/mcp/deno.json tests/mcp-handler.test.ts
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert@1";
-import { createHmac } from "node:crypto";
 import { TOOLS } from "../supabase/functions/chat/tools.ts";
 import { MCP_TOOLS } from "../supabase/functions/mcp/allowlist.ts";
-import { parseBearerKey, sha256Hex, signAccessToken } from "../supabase/functions/mcp/auth.ts";
+import { parseBearerKey, sha256Hex } from "../supabase/functions/mcp/auth.ts";
 import { createMcpHandler, type McpDeps, validateArgs } from "../supabase/functions/mcp/handler.ts";
 
 const GOOD_KEY = "mtk_" + "A".repeat(43);
 const USER = "00000000-0000-4000-8000-000000000001";
 const KEY_ID = "00000000-0000-4000-8000-0000000000aa";
-const FAKE_TOKEN = "header.payload.SIGNATURE-THAT-MUST-NEVER-LEAK";
 
 function harness(overrides: Partial<McpDeps> = {}) {
-  const calls = { authenticate: [] as string[], sign: 0, runTool: [] as string[], log: [] as [string, boolean][], scopedTokens: [] as string[] };
+  const calls = { authenticate: [] as string[], scoped: [] as [string, string][], runTool: [] as string[], log: [] as [string, boolean][] };
   const deps: McpDeps = {
     async authenticate(hash) {
       calls.authenticate.push(hash);
       return hash === await sha256Hex(GOOD_KEY) ? { keyId: KEY_ID, userId: USER } : null;
     },
     async logCall(_hash, tool, _args, isError) { calls.log.push([tool, isError]); },
-    async signToken() { calls.sign++; return FAKE_TOKEN; },
-    scopedClient(token) {
-      calls.scopedTokens.push(token);
-      return { rpc: async () => ({ data: "all", error: null }) };
+    async runScoped(userId, keyId, fn) {
+      calls.scoped.push([userId, keyId]);
+      return await fn({ rpc: async () => ({ data: "all", error: null }) });
     },
     async runTool(_sb, name) { calls.runTool.push(name); return { content: `rows for ${name}`, isError: false }; },
     async fetchDomainReality() { return new Map(); },
@@ -49,22 +46,6 @@ Deno.test("parseBearerKey accepts only the issued key shape", () => {
   assertEquals(parseBearerKey("Bearer mtk_short"), null);
   assertEquals(parseBearerKey(`Bearer ${GOOD_KEY}x`), null);
   assertEquals(parseBearerKey("Bearer eyJhbGciOiJIUzI1NiJ9.e30.x"), null);
-});
-
-Deno.test("signAccessToken: HS256 over the exact claims, verified independently, 60s TTL", async () => {
-  const token = await signAccessToken("test-secret", "https://ref.supabase.co", USER, KEY_ID, 1_000_000);
-  const [h, p, s] = token.split(".");
-  const expected = createHmac("sha256", "test-secret").update(`${h}.${p}`).digest("base64url");
-  assertEquals(s, expected);
-  const header = JSON.parse(atob(h.replace(/-/g, "+").replace(/_/g, "/")));
-  const claims = JSON.parse(atob(p.replace(/-/g, "+").replace(/_/g, "/")));
-  assertEquals(header, { alg: "HS256", typ: "JWT" });
-  assertEquals(claims.sub, USER);
-  assertEquals(claims.role, "authenticated");
-  assertEquals(claims.aud, "authenticated");
-  assertEquals(claims.iss, "https://ref.supabase.co/auth/v1");
-  assertEquals(claims.exp - claims.iat, 60);
-  assertEquals(claims.mcp_key_id, KEY_ID);
 });
 
 Deno.test("missing or malformed key -> 401 without touching the database", async () => {
@@ -100,10 +81,10 @@ Deno.test("initialize, then tools/list returns exactly the round-one allowlist",
   const list = await handler(rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" }));
   const names = (await list.json()).result.tools.map((t: { name: string }) => t.name).sort();
   assertEquals(names, [...MCP_TOOLS].sort());
-  assertEquals(calls.sign, 0, "no token is signed for list/initialize");
+  assertEquals(calls.scoped.length, 0, "no scoped transaction is opened for list/initialize");
 });
 
-Deno.test("non-allowlisted tools are rejected before signing or runTool, and are audited", async () => {
+Deno.test("non-allowlisted tools are rejected before any scoped transaction or runTool, and are audited", async () => {
   const { handler, calls } = harness();
   for (const name of ["get_series", "get_derived_series", "get_anomalies", "get_vessels", "drop_everything"]) {
     const body = await (await handler(call(name))).json();
@@ -111,25 +92,29 @@ Deno.test("non-allowlisted tools are rejected before signing or runTool, and are
     assertMatch(body.error.message, /Unknown tool/);
   }
   assertEquals(calls.runTool, []);
-  assertEquals(calls.sign, 0);
+  assertEquals(calls.scoped.length, 0);
   assertEquals(calls.log.map(([t, e]) => `${t}:${e}`), [
     "get_series:true", "get_derived_series:true", "get_anomalies:true", "get_vessels:true", "drop_everything:true",
   ]);
 });
 
-Deno.test("allowlisted call: fresh token per call into the scoped client, never in the response", async () => {
+Deno.test("allowlisted call: one scoped transaction per call, as the key's owner", async () => {
   const { handler, calls } = harness();
   for (const name of MCP_TOOLS) {
-    const res = await handler(call(name));
-    const text = await res.text();
-    assert(!text.includes(FAKE_TOKEN), "token leaked into response body");
-    for (const [, v] of res.headers) assert(!v.includes(FAKE_TOKEN), "token leaked into a header");
-    assertEquals(JSON.parse(text).result.content[0].text, `rows for ${name}`);
+    const body = await (await handler(call(name))).json();
+    assertEquals(body.result.content[0].text, `rows for ${name}`);
   }
   assertEquals(calls.runTool, [...MCP_TOOLS]);
-  assertEquals(calls.sign, MCP_TOOLS.length);
-  assertEquals(calls.scopedTokens.length, MCP_TOOLS.length);
+  assertEquals(calls.scoped, MCP_TOOLS.map(() => [USER, KEY_ID]));
   assertEquals(calls.log.map(([, e]) => e), MCP_TOOLS.map(() => false));
+});
+
+Deno.test("a failed scoped transaction is a tool error, audited, never a leak of the cause", async () => {
+  const { handler, calls } = harness({ runScoped: () => Promise.reject(new Error("mcp gateway: transaction scope assertion failed")) });
+  const body = await (await handler(call("get_berry_maturity"))).json();
+  assertEquals(body.result.isError, true);
+  assertEquals(body.result.content[0].text, "Tool execution failed unexpectedly.");
+  assertEquals(calls.log, [["get_berry_maturity", true]]);
 });
 
 Deno.test("arguments are schema-checked before runTool", async () => {
@@ -148,5 +133,5 @@ Deno.test("arguments are schema-checked before runTool", async () => {
   const body = await (await handler(call("get_lot_analyses", { lot_code: 5 }))).json();
   assertEquals(body.result.isError, true);
   assertEquals(calls.runTool, []);
-  assertEquals(calls.sign, 0);
+  assertEquals(calls.scoped.length, 0);
 });

@@ -1,46 +1,43 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "@supabase/supabase-js";
+import postgres from "postgres";
 import { fetchDomainReality, runTool, TOOLS } from "../chat/tools.ts";
-import { signAccessToken } from "./auth.ts";
+import { PostgrestAdapter } from "./adapter.ts";
+import { runAsKeyOwner, type Sql } from "./gateway.ts";
 import { createMcpHandler } from "./handler.ts";
 
 // MCP-over-HTTP for external agents, authenticated by a per-user API key
 // (agent_api_keys, issued by scripts/agent-keys.mjs). See handler.ts for the
-// request flow and docs/SECURITY.md's MCP entry for the auth model.
+// request flow and docs/SECURITY.md's MCP entries for the auth model.
 //
-// Two credentials only, both deliberately narrow:
-//   - the ANON key: for mcp_authenticate()/mcp_log_call(), and as the apikey
-//     header PostgREST requires on the user-scoped client;
-//   - the signing secret (the project's legacy JWT secret, set by hand as
-//     this function's secret, read at exactly one site below): used ONLY to
-//     sign the 60s per-request user token.
-// No RLS-bypassing client or key exists here; scripts/check-mcp-boundaries.mjs
-// fails if one ever appears.
+// ONE credential: the connection string for the mcp_gateway Postgres role
+// (Supavisor transaction pooler), set by hand as this function's secret and
+// read at exactly one site below. That role can resolve/log API keys and
+// switch to mcp_reader -- SELECT-only on the round-one allowlist, under RLS.
+// It cannot write, cannot bypass RLS, and cannot become any other role.
+// No PostgREST client, no API key, and no token-signing secret exists here;
+// scripts/check-mcp-boundaries.mjs fails if one ever appears.
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
-const JWT_SECRET = Deno.env.get("MCP_JWT_SECRET") ?? "";
+const GATEWAY_DB_URL = Deno.env.get("MCP_GATEWAY_DB_URL") ?? "";
 
-const NO_SESSION = { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false };
-const anon = createClient(SUPABASE_URL, ANON_KEY, { auth: NO_SESSION });
+// prepare: false -- the transaction pooler does not support named prepared
+// statements. One small pool per isolate, reused across requests.
+const pg = GATEWAY_DB_URL
+  ? postgres(GATEWAY_DB_URL, { prepare: false, max: 3, idle_timeout: 20, connect_timeout: 10 })
+  : null;
+
+// deno-lint-ignore no-explicit-any
+const unsafe = (text: string, params: unknown[] = []) => pg!.unsafe(text, params as any[]) as unknown as Promise<Record<string, unknown>[]>;
 
 const handler = createMcpHandler({
   async authenticate(keyHash) {
-    const { data, error } = await anon.rpc("mcp_authenticate", { p_key_hash: keyHash });
-    if (error) throw new Error(error.message);
-    const row = (data as { key_id: string; user_id: string }[] | null)?.[0];
-    return row ? { keyId: row.key_id, userId: row.user_id } : null;
+    const [row] = await unsafe("select key_id, user_id from public.mcp_authenticate($1)", [keyHash]);
+    return row ? { keyId: String(row.key_id), userId: String(row.user_id) } : null;
   },
   async logCall(keyHash, tool, args, isError) {
-    const { error } = await anon.rpc("mcp_log_call", { p_key_hash: keyHash, p_tool: tool, p_args: args, p_is_error: isError });
-    if (error) throw new Error(error.message);
+    await unsafe("select public.mcp_log_call($1, $2, $3::jsonb, $4)", [keyHash, tool, JSON.stringify(args ?? null), isError]);
   },
-  signToken: (userId, keyId) => signAccessToken(JWT_SECRET, SUPABASE_URL, userId, keyId),
-  scopedClient: (token) =>
-    createClient(SUPABASE_URL, ANON_KEY, {
-      global: { headers: { Authorization: `Bearer ${token}` } },
-      auth: NO_SESSION,
-    }),
+  runScoped: (userId, keyId, fn) =>
+    runAsKeyOwner(pg as unknown as Sql, userId, keyId, (query) => fn(new PostgrestAdapter(query))),
   runTool,
   fetchDomainReality,
   tools: TOOLS as never,
@@ -48,8 +45,8 @@ const handler = createMcpHandler({
 
 export default {
   async fetch(req: Request): Promise<Response> {
-    if (!SUPABASE_URL || !ANON_KEY || !JWT_SECRET) {
-      console.error("mcp: missing SUPABASE_URL, SUPABASE_ANON_KEY or the signing secret");
+    if (!pg) {
+      console.error("mcp: missing the gateway connection secret");
       return Response.json({ error: "mcp function is misconfigured" }, { status: 500 });
     }
     try {

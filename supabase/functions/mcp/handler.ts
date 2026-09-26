@@ -5,13 +5,15 @@ import type { DomainReality, ToolResult } from "../chat/tools.ts";
 import { MCP_TOOLS } from "./allowlist.ts";
 import { parseBearerKey, sha256Hex } from "./auth.ts";
 
-// The request flow (docs/SECURITY.md, MCP entry):
-//   bearer key -> sha256 -> mcp_authenticate() via the ANON client
-//   -> sign a 60s token for that user -> RLS-scoped supabase-js client
-//   -> chat/tools.ts runTool(), unchanged.
-// Every data query therefore goes through PostgREST under the key owner's
-// own auth.uid(), exactly as their browser session would -- never an
-// RLS-bypassing client (none exists in this directory). Everything
+// The request flow (docs/SECURITY.md, MCP entries -- revised auth, Option B'):
+//   bearer key -> sha256 -> mcp_authenticate() as mcp_gateway
+//   -> one READ ONLY transaction: claims.sub = the key owner's real uid,
+//      set local role mcp_reader (gateway.ts)
+//   -> chat/tools.ts runTool(), unchanged, over the PostgREST-compatible
+//      adapter (adapter.ts).
+// Every data query runs under the key owner's own auth.uid() and RLS, as the
+// SELECT-only mcp_reader role. No token is signed or held anywhere, and no
+// RLS-bypassing credential exists in this directory. Everything
 // environment-specific is injected so this file can be tested without a
 // deployed function.
 
@@ -31,9 +33,10 @@ export interface McpDeps {
   // closed as a 500, never as an unauthenticated pass-through.
   authenticate(keyHash: string): Promise<{ keyId: string; userId: string } | null>;
   logCall(keyHash: string, tool: string, args: unknown, isError: boolean): Promise<void>;
-  signToken(userId: string, keyId: string): Promise<string>;
+  // Runs fn inside the key owner's read-only mcp_reader transaction, handing
+  // it a supabase-js-shaped client (the adapter).
   // deno-lint-ignore no-explicit-any
-  scopedClient(token: string): any;
+  runScoped<T>(userId: string, keyId: string, fn: (client: any) => Promise<T>): Promise<T>;
   // deno-lint-ignore no-explicit-any
   runTool(supabase: any, name: string, input: Record<string, unknown>, dataMode: string, domainReality: DomainReality): Promise<ToolResult>;
   // deno-lint-ignore no-explicit-any
@@ -147,18 +150,22 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
         return { content: [{ type: "text", text: `Invalid arguments: ${invalid}` }], isError: true };
       }
 
-      // Signed only now, only for a call that will actually query, and held
-      // in this closure alone: not logged, not returned, not cached.
-      const client = deps.scopedClient(await deps.signToken(userId, keyId));
-
-      // Same per-request resolution chat/index.ts does, through the same
-      // RLS-scoped client, with the same fail-open-to-'all' default.
-      const { data: dataModeResult, error: dataModeErr } = await client.rpc("current_data_mode");
-      if (dataModeErr) console.error("mcp: could not resolve caller data_mode", dataModeErr.message);
-      const dataMode = dataModeResult || "all";
-      const domainReality = await deps.fetchDomainReality(client);
-
-      const result = await deps.runTool(client, name, args as Record<string, unknown>, dataMode, domainReality);
+      let result: ToolResult;
+      try {
+        result = await deps.runScoped(userId, keyId, async (client) => {
+          // Same per-request resolution chat/index.ts does, through the same
+          // RLS-scoped identity, with the same fail-open-to-'all' default.
+          const { data: dataModeResult, error: dataModeErr } = await client.rpc("current_data_mode");
+          if (dataModeErr) console.error("mcp: could not resolve caller data_mode", dataModeErr.message);
+          const dataMode = dataModeResult || "all";
+          const domainReality = await deps.fetchDomainReality(client);
+          return await deps.runTool(client, name, args as Record<string, unknown>, dataMode, domainReality);
+        });
+      } catch (err) {
+        // Connection/transaction failure, or the scope assertion in gateway.ts.
+        console.error("mcp: scoped transaction failed", err instanceof Error ? err.message : String(err));
+        result = { content: "Tool execution failed unexpectedly.", isError: true };
+      }
       await log(result.isError);
       return { content: [{ type: "text", text: result.content }], isError: result.isError };
     });

@@ -10,7 +10,9 @@
 // prefixes only.
 //
 // DB cross-checks use the SET LOCAL pattern from docs/SECURITY.md (inside an
-// explicit transaction, always rolled back) -- never a bare SET ROLE.
+// explicit transaction, always rolled back) -- never a bare SET ROLE. They run
+// as `authenticated` (what Colin's browser runs as); section 2d separately
+// checks mcp_reader/mcp_gateway's actual privileges from the catalog.
 //
 // --revoke-prefix revokes that key for the revocation test (a real,
 // committed revoke). Omit it to skip that case.
@@ -215,6 +217,44 @@ await withDb(async (db) => {
   verdict("operator claims see rows in all 5 tool relations", !zero(counts["colin-a"]) && counts["colin-a"].berry > 0 && counts["colin-a"].lot_analyses > 0);
   verdict("customer claims see 0 rows in all 5 tool relations", zero(counts.customer), `role=${counts.customer.role}`);
   verdict("pending claims see 0 rows in all 5 tool relations", zero(counts.pending), `role=${counts.pending.role}`);
+
+  // ---- 2d. role boundaries (Option B'), from the live catalog -------------------
+  out("\n## 2d. Role boundaries: mcp_gateway / mcp_reader (live catalog)");
+  const EXPECTED_READER = [
+    "berry_maturity_by_block", "ets_analyte_bridge", "ets_lot_analyses_reconciliation", "ets_lot_bridge", "lab_results",
+    "lab_results_current", "lab_samples", "lab_samples_current", "labour_actuals", "labour_actuals_by_category",
+    "labour_actuals_by_month", "labour_vintage_coverage", "lot_analyses", "lot_canonical_map",
+  ];
+  const { rows: grants } = await db.query(
+    `select grantee, table_name, privilege_type from information_schema.role_table_grants
+      where grantee in ('mcp_reader','mcp_gateway') order by 1, 2, 3`,
+  );
+  const readerSelect = grants.filter((g) => g.grantee === "mcp_reader" && g.privilege_type === "SELECT").map((g) => g.table_name).sort();
+  const otherGrants = grants.filter((g) => !(g.grantee === "mcp_reader" && g.privilege_type === "SELECT"));
+  verdict("mcp_reader: SELECT on exactly the 14 allowlisted relations, nothing else", JSON.stringify(readerSelect) === JSON.stringify(EXPECTED_READER) && otherGrants.length === 0,
+    `SELECT on [${readerSelect.join(", ")}]; other table grants: ${otherGrants.length ? JSON.stringify(otherGrants) : "none"}`);
+  const { rows: [roles] } = await db.query(`
+    select
+      (select rolcanlogin from pg_roles where rolname='mcp_gateway') gw_login,
+      (select rolbypassrls from pg_roles where rolname='mcp_gateway') gw_bypass,
+      (select rolbypassrls from pg_roles where rolname='mcp_reader') rd_bypass,
+      (select rolcanlogin from pg_roles where rolname='mcp_reader') rd_login,
+      pg_has_role('mcp_gateway','mcp_reader','SET') gw_set_reader,
+      pg_has_role('mcp_gateway','mcp_reader','USAGE') gw_inherits_reader,
+      (select coalesce(string_agg(r.rolname, ','), '') from pg_roles r
+        where r.rolname not in ('mcp_gateway','mcp_reader') and pg_has_role('mcp_gateway', r.oid, 'SET')) gw_other_set_targets,
+      (select coalesce(string_agg(r.rolname, ','), '') from pg_roles r
+        where r.rolname <> 'mcp_reader' and pg_has_role('mcp_reader', r.oid, 'SET')) rd_other_set_targets,
+      (select array_to_string(proacl, ',') from pg_proc where proname='update_own_name') own_name_acl,
+      (select array_to_string(proacl, ',') from pg_proc where proname='mcp_authenticate') auth_acl`);
+  verdict("mcp_gateway: can log in, no BYPASSRLS; can SET only mcp_reader (not postgres/authenticated/service_role/anything else); does not inherit it",
+    roles.gw_login === true && !roles.gw_bypass && roles.gw_set_reader && !roles.gw_inherits_reader && roles.gw_other_set_targets === "",
+    JSON.stringify({ login: roles.gw_login, bypassrls: roles.gw_bypass, set_reader: roles.gw_set_reader, inherits_reader: roles.gw_inherits_reader, other_set_targets: roles.gw_other_set_targets || "none" }));
+  verdict("mcp_reader: no login, no BYPASSRLS, cannot SET any other role", !roles.rd_login && !roles.rd_bypass && roles.rd_other_set_targets === "",
+    JSON.stringify({ login: roles.rd_login, bypassrls: roles.rd_bypass, other_set_targets: roles.rd_other_set_targets || "none" }));
+  verdict("update_own_name: EXECUTE for authenticated only (no PUBLIC); mcp_authenticate: mcp_gateway only",
+    !/(^|,)=X/.test(roles.own_name_acl ?? "") && /authenticated=X/.test(roles.own_name_acl ?? "") && /mcp_gateway=X/.test(roles.auth_acl ?? "") && !/anon=X|(^|,)=X/.test(roles.auth_acl ?? ""),
+    `update_own_name {${roles.own_name_acl}}; mcp_authenticate {${roles.auth_acl}}`);
 
   // ---- 3. negative -----------------------------------------------------------
   out("\n## 3. Negative");

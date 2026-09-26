@@ -23,7 +23,10 @@ const env = Object.fromEntries(
   readFileSync(new URL("../.env", import.meta.url), "utf8").split("\n")
     .filter((l) => /^[A-Z_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1).trim().replace(/^["']|["']$/g, "")]),
 );
-const FN_URL = `${env.SUPABASE_URL}/functions/v1/mcp`;
+// .env's SUPABASE_URL is the REST endpoint ("https://<ref>.supabase.co/rest/v1/"),
+// not the bare project URL -- appending to it produced ".../rest/v1//functions/v1/mcp".
+// Always build from the origin.
+const FN_URL = `${new URL(env.SUPABASE_URL).origin}/functions/v1/mcp`;
 const COLIN_A = "87b9d9a0-9f1f-4609-8950-c92906c5029c";
 const COLIN_B = "03b52829-645c-4b40-9842-ecbf81e4338d";
 const CUSTOMER = "9782853b-f6be-40a9-83cd-47407b3de7f1";

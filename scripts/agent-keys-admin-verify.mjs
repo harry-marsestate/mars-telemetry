@@ -280,6 +280,27 @@ await withDb(async (db) => {
     r.plainHits = plainHits;
     await as("mcp_gateway");
     r.authBefore = await q("select key_id, user_id from public.mcp_authenticate($1)", [r.hash]);
+    // Banned owner (20260926165000): ban the linked account's auth row inside
+    // this rolled-back transaction, check the key dies, then lift it. Needs
+    // UPDATE on auth.users for the connecting role; SKIP if not granted.
+    await owner();
+    await q("savepoint ban");
+    try {
+      await q("update auth.users set banned_until = now() + interval '1 day' where id = $1", [target.id]);
+      await as("mcp_gateway");
+      r.authBanned = (await q("select key_id from public.mcp_authenticate($1)", [r.hash])).length;
+      await owner();
+      await q("update auth.users set banned_until = null where id = $1", [target.id]);
+      await as("mcp_gateway");
+      r.authUnbanned = (await q("select key_id from public.mcp_authenticate($1)", [r.hash])).length;
+      await owner();
+      await q("rollback to savepoint ban");
+    } catch (e) {
+      await owner().catch(() => {});
+      await q("rollback to savepoint ban");
+      r.banSkip = e.message;
+    }
+    await as("mcp_gateway");
     await as("authenticated", claimsFor(admin.id, admin.email, [{ method: "password", timestamp: nowS() - 86400 }]));
     r.revoked = await q("select * from public.admin_revoke_agent_key($1)", [issued.id]);
     r.revokedAgain = await q("select * from public.admin_revoke_agent_key($1)", [issued.id]);
@@ -296,6 +317,11 @@ await withDb(async (db) => {
   verdict("plaintext appears in no column of the stored row", e2e.plainHits === 0, `${e2e.plainHits} hits`);
   verdict("created_by comes from the admin's JWT", e2e.createdBy === `${admin.email} (${admin.id}) via web admin`,
     e2e.createdBy.replace(admin.email, "<admin email>").replace(admin.id, `${short(admin.id)}...`));
+  if (e2e.banSkip) out(`SKIP  banned-owner behaviour (cannot update auth.users here: ${e2e.banSkip}) -- definition check below still runs`);
+  else {
+    verdict("owner banned in Supabase Auth -> mcp_authenticate returns zero rows", e2e.authBanned === 0, `${e2e.authBanned} rows`);
+    verdict("ban lifted -> the same key authenticates again (nothing cached)", e2e.authUnbanned === 1, `${e2e.authUnbanned} rows`);
+  }
   verdict("mcp_authenticate (as mcp_gateway) accepts the new key and resolves the linked account",
     e2e.authBefore.length === 1 && e2e.authBefore[0].user_id === target.id && e2e.authBefore[0].key_id === e2e.issued.id);
   verdict("admin revoke returns the row once, then nothing", e2e.revoked.length === 1 && e2e.revokedAgain.length === 0);
@@ -305,6 +331,15 @@ await withDb(async (db) => {
   verdict("rolled back: the test key does not exist after the transaction", gone === 0);
 
   // ---- 5. plaintext never in statement history ------------------------------------------
+  out("\n## 4b. Banned/deleted-owner predicate in the live function definitions");
+  for (const fn of ["public.mcp_authenticate(text)", "public.mcp_log_call(text,text,jsonb,boolean)", "public.agent_key_issue(uuid,text,integer,text,boolean)", "public.agent_key_list()"]) {
+    const [{ def }] = (await db.query("select pg_get_functiondef($1::regprocedure) def", [fn])).rows;
+    verdict(`${fn.split("(")[0]} checks auth.users banned_until and deleted_at`, /banned_until/.test(def) && /deleted_at/.test(def));
+  }
+  const [gacl] = (await db.query(
+    `select array_to_string(p.proacl, ',') acl from pg_proc p where p.oid = 'public.mcp_authenticate(text)'::regprocedure`)).rows;
+  verdict("mcp_authenticate still EXECUTE for mcp_gateway only", /mcp_gateway=X/.test(gacl.acl) && !/(^|,)=X|anon=X|authenticated=X|service_role=X/.test(gacl.acl), gacl.acl);
+
   out("\n## 5. pg_stat_statements");
   if (secrets.length < 3) {
     verdict("pg_stat_statements check had a generated key to search for", false);

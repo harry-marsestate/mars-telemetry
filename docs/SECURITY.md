@@ -6406,3 +6406,47 @@ access-token hook could still rewrite `amr`; none is configured in
 **Pending (owner):** a real create-and-revoke click-through on the branch's
 Vercel preview (password and, once the preview domain is on Supabase Auth's
 redirect allowlist, Google). Not merged to `main` until then.
+
+## Security fix: a banned or deleted Supabase Auth user's MCP keys kept working (2026-09-26)
+
+Branch `fix/mcp-auth-banned-users`, migration `20260926165000` -- standalone,
+cut from the production state (`7d65cec`) so it can ship on its own.
+
+**The gap.** `mcp_authenticate()` checked the key (not revoked, not expired)
+and the owner's `user_profiles` row (approved operator/customer), never
+`auth.users`. Banning a user in Supabase Auth -- which GoTrue enforces at
+password sign-in, token refresh, OAuth sign-in, OTP/magic-link/recovery
+verification and every authenticated endpoint (read from supabase/auth's
+source) -- therefore left their `mtk_` keys working, because the gateway
+never talks to GoTrue. Same for a soft-deleted user (`deleted_at`).
+
+**The fix.** `mcp_authenticate()` now also requires the owner's `auth.users`
+row to have no future `banned_until` and no `deleted_at`: such a key gets
+zero rows -> the same indistinguishable 401 as a revoked key, on the very
+next request (nothing is cached; lifting the ban restores it). Put in the
+function, not the Edge Function handler: it is the one choke point every
+request already passes, next to the other "usable key" predicates, and it
+runs as the owner, which can read `auth.users` -- the handler route would
+have meant granting the table-less `mcp_gateway` role access to
+`auth.users`. No gateway code change, no function deploy. `mcp_log_call()`
+gets the same predicate (it re-checks the active-key conditions);
+`agent_key_issue()` refuses to issue a dead key for a banned/deleted owner
+(except under the CLI's negative-test flag); `agent_key_list()`'s
+`owner_eligible` reflects it, so the web tab shows such keys as "account not
+eligible -- key won't work". All four keep their signatures (`create or
+replace`), so every GRANT is unchanged -- tested.
+
+**Incident playbook, updated:** to cut off a person's agents immediately,
+any of these works on the next request: revoke the key(s), un-approve the
+profile, or ban/delete the user in Supabase Auth.
+
+**Verification (offline):** SQL tests (banned -> 0 rows; ban expired ->
+works again; soft-deleted -> 0 rows; `mcp_log_call` writes nothing; issue
+refused; list flags the key; grants intact); harness dry run 43/43 -- the
+harness now bans the test account's auth row inside its rolled-back
+transaction and checks the key dies and revives (reports SKIP, not PASS,
+if the connecting role can't update `auth.users` in production), and checks
+the live definitions of all four functions contain the predicate.
+Mutation-tested: dropping the ban predicate or the `deleted_at` predicate
+from `mcp_authenticate`, or the ban predicate from `mcp_log_call` -- each
+caught.

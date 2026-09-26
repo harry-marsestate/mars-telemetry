@@ -79,7 +79,8 @@ through the RLS model documented above, not just "another function."
   `is_admin_user()` inside the function. The only browser path onto
   `agent_api_keys`; they wrap the owner-only `agent_key_*` functions that
   `scripts/agent-keys.mjs` also calls. Issue additionally requires a password
-  sign-in in the last 10 minutes (`amr`). See the "Agent key admin" entry.
+  or Google sign-in in the last 10 minutes (`amr`). See the "Agent key admin"
+  entry.
 
 ## Two parallel API key systems - legacy JWT vs new secret/publishable
 
@@ -6284,28 +6285,58 @@ points" above.
 A key turns a browser session into a 1-365 day bearer credential that
 survives sign-out and password change, and can act as another account. So
 `admin_issue_agent_key` requires the JWT's `amr` claim to hold a
-`method: "password"` entry stamped within the last 10 minutes. GoTrue stamps
-that entry at password sign-in (per session, in `auth.mfa_amr_claims`) and
-does not move it on token refresh, so an idle or hijacked session can't
-satisfy it; the create form re-runs `signInWithPassword` for the **session's
-own email** (only the password is typed, so it can't switch accounts) right
-before issuing. Anything else fails closed: no `amr`, non-array, stale,
-string timestamps, or a fresh non-password method (`recovery`, `oauth`) --
-tested. List and revoke need no re-auth (revocation must be frictionless in
-an incident).
+`"password"` or `"oauth"` entry stamped within the last 10 minutes.
 
-Known consequence: an admin who signs in **only with Google** has no
-password to re-enter and cannot issue keys until they set one ("Forgot
-password"); the form says so and disables submit. Accepting fresh `oauth`
-was not done: Google may complete silently from an existing Google session,
-which is not a re-authentication.
+**What GoTrue actually writes** -- read from `supabase/auth`'s source
+(commit `ce9a8ee`, 2026-09-22), not assumed:
+- `amr` is an array of `{"method": <string>, "timestamp": <integer unix
+  seconds>}`, most recent first; a `"provider"` field is added **only** for
+  SAML SSO (`models.AMREntry`, `Session.CalculateAALAndAMR`).
+- Entries come from the session's `auth.mfa_amr_claims` rows; `timestamp` is
+  the row's `updated_at`. A row is written when a session is **issued**
+  (`IssueRefreshToken` -> `AddClaimToSession`) and on MFA verification --
+  never on refresh: the refresh path passes `TokenRefresh` only to the
+  custom-access-token hook's input and rebuilds `amr` from stored rows. So
+  an idle or hijacked long-lived session can't look fresh.
+- Password sign-in writes `"password"`. Google sign-in writes `"oauth"`
+  (`external.go` / `token_oidc.go` pass `models.OAuth`) -- the same string
+  for any OAuth provider; Google is the only one this project enables.
 
-**Not yet confirmed:** that this project's real access tokens carry `amr`
-in that shape. It is GoTrue's documented claim, but the probe (a throwaway
-sign-in, or a read of `auth.mfa_amr_claims`) was not run from this
-environment. If they don't, issue fails closed for everyone ("recent sign-in
-required") -- safe, but the fallback (`reauthenticate()`) would then be
-needed.
+**The two client paths** (create-key form, `web/index.html`), both for the
+signed-in account only:
+1. Password: `signInWithPassword` with the **session's own email** -- only
+   the password is typed, so it can't switch accounts. Offered only to
+   admins who have a password.
+2. Google: "Re-authenticate with Google", offered to every admin. The same
+   `signInWithOAuth` call the sign-in screen already makes, which already
+   passes `prompt: 'select_account'` (checked, not added), plus `login_hint`
+   = the session's email. Google shows its account chooser and waits for a
+   click instead of completing silently from an existing Google session.
+   It's a full-page redirect: the form's non-secret fields (label, account,
+   days) ride along in `sessionStorage` and the form reopens on return, **only
+   if the same account came back** -- picking a different Google account on
+   the chooser signs that account in instead (the app's normal Google
+   sign-in behaviour) and nothing is resumed. After a fresh Google sign-in
+   the form needs no password; the server still makes the decision.
+
+**Trust boundary.** The server sees only the resulting token, never how it
+was obtained. The Google path therefore relies on the **client** asking for
+interactive account selection; a compromised client could request a silent
+re-auth instead. That is the same boundary the password path already has --
+a compromised client could replay a stored password -- so accepting `oauth`
+doesn't weaken the model; both are defences against an idle or stolen
+*session*, not a compromised *page*. Note `select_account` forces a click
+on Google's chooser, not re-entry of the Google password.
+
+Fails closed, all tested: no `amr` (e.g. the MCP gateway's claims), a
+non-array, string timestamps, entries older than 10 minutes, and other
+methods (`recovery`, `otp`, `magiclink`). List and revoke need no re-auth
+(revocation must be frictionless in an incident).
+
+**Not yet confirmed on a real token:** the source says the above; a real
+password token and a real Google token from this project have not been
+decoded yet (owner check, pending). A custom access-token hook (none in
+`supabase/config.toml`; dashboard not checked) could rewrite `amr`.
 
 ### Verification
 
@@ -6315,11 +6346,13 @@ needed.
   via `mcp_authenticate` as `mcp_gateway` and stops after revoke;
   eligibility/expiry/label rules; every API role refused on every function
   and table; the fresh-auth matrix; list shape/status/owner_eligible; static
-  checks that `agent-keys.mjs` has no key logic of its own and that
+  checks that `agent-keys.mjs` has no key logic of its own, that
   `web/index.html` never names `key_hash`, never calls `agent_key_*`, never
-  logs the key. **Mutation-tested**: dropping the admin check, dropping the
-  freshness check, and granting the implementation to `authenticated` each
-  failed both this suite and the harness.
+  logs the key, and that its Google re-auth passes
+  `prompt:'select_account'` and `login_hint`. **Mutation-tested**: dropping
+  the admin check, dropping the freshness check, granting the
+  implementation to `authenticated`, no longer accepting `oauth`, and
+  accepting any `amr` method each failed both this suite and the harness.
 - `scripts/agent-keys-admin-verify.mjs` (live; every write rolled back; key
   redacted from output; accounts shown by 8-char prefix): function
   definitions, EXECUTE matrix, tables still deny-all, denial as anon /

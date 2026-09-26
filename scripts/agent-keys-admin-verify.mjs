@@ -226,14 +226,20 @@ await withDb(async (db) => {
   for (const [desc, amr] of [
     ["no amr claim", undefined],
     ["password 11 minutes ago", [{ method: "password", timestamp: nowS() - 660 }]],
-    ["fresh but non-password method (recovery)", [{ method: "recovery", timestamp: nowS() }]],
-    ["fresh oauth (Google)", [{ method: "oauth", timestamp: nowS() }]],
+    ["Google (oauth) 11 minutes ago", [{ method: "oauth", timestamp: nowS() - 660 }]],
+    ["fresh but other method (recovery)", [{ method: "recovery", timestamp: nowS() }]],
+    ["fresh but other method (otp)", [{ method: "otp", timestamp: nowS() }]],
   ]) {
     const r = await issueAs(amr);
     verdict(`admin issue refused: ${desc}`, reauth.test(r.error ?? ""), r.error ?? "SUCCEEDED");
   }
-  const okIssue = await issueAs([{ method: "password", timestamp: nowS() - 540 }]);
-  verdict("admin issue allowed: password 9 minutes ago", !okIssue.error, okIssue.error ?? `${okIssue.rows.length} row`);
+  for (const [desc, amr] of [
+    ["password 9 minutes ago", [{ method: "password", timestamp: nowS() - 540 }]],
+    ["Google (oauth) 9 minutes ago", [{ method: "oauth", timestamp: nowS() - 540 }]],
+  ]) {
+    const r = await issueAs(amr);
+    verdict(`admin issue allowed: ${desc}`, !r.error, r.error ?? `${r.rows.length} row`);
+  }
   const stale = [{ method: "password", timestamp: nowS() - 86400 }];
   const staleList = await attempt(db, "authenticated", claimsFor(admin.id, admin.email, stale), "select count(*)::int n from public.admin_list_agent_keys()");
   const staleRevoke = await attempt(db, "authenticated", claimsFor(admin.id, admin.email, stale), "select * from public.admin_revoke_agent_key($1)", [NO_SUCH_KEY]);

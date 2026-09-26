@@ -15,9 +15,9 @@
 --     `authenticated` only. Each checks is_admin_user() itself -- the same
 --     predicate behind admin_manages_profiles, i.e. the User Management gate --
 --     so a non-admin calling the RPC directly gets 42501, whatever the UI shows.
---     admin_issue_agent_key additionally requires a password sign-in within the
---     last 10 minutes (the JWT's `amr` claim), and records created_by from the
---     caller's own signed JWT, never from a client-supplied string.
+--     admin_issue_agent_key additionally requires a password or Google sign-in
+--     within the last 10 minutes (the JWT's `amr` claim), and records
+--     created_by from the caller's own signed JWT, never a client string.
 --
 -- agent_api_keys / agent_api_key_calls stay exactly as 20260926150001 left
 -- them: RLS on, zero policies, no grants to anon/authenticated/service_role.
@@ -172,14 +172,31 @@ begin
 end;
 $$;
 
--- Fresh-auth rule: the caller's JWT must carry an `amr` entry with
--- method 'password' stamped within the last 10 minutes. GoTrue writes that
--- entry when a session is created by a password sign-in and does NOT move it
--- on token refresh, so a long-lived browser session cannot satisfy this --
--- only re-entering the password (web/index.html's create-key flow does a
--- signInWithPassword for the signed-in email) can. A token with no amr at all
--- (e.g. the MCP gateway's claims, or a hand-built claims object) fails closed.
--- Only 'password' counts because it is the only sign-in method this app has.
+-- Fresh-auth rule: the caller's JWT must carry an `amr` entry with method
+-- 'password' or 'oauth' stamped within the last 10 minutes.
+--
+-- What GoTrue actually writes (read from supabase/auth's source, 2026-09-26,
+-- not assumed): each amr entry is {"method": <string>, "timestamp": <int unix
+-- seconds>} (plus "provider" only for SAML SSO), built from the session's
+-- auth.mfa_amr_claims rows, timestamp = the row's updated_at. A row is written
+-- when a session is ISSUED -- password sign-in -> "password", Google (any
+-- OAuth provider) sign-in -> "oauth" -- and on MFA verification. Token
+-- refresh writes none: "token_refresh" is only passed to the access-token
+-- hook, never stored, and amr is rebuilt from the stored rows. So an idle or
+-- hijacked long-lived session cannot satisfy this; only a new sign-in can.
+-- web/index.html's create-key form triggers one for the signed-in account:
+-- signInWithPassword for the session's own email, or signInWithOAuth(google)
+-- with prompt=select_account (the same call the sign-in screen makes) and a
+-- login_hint of that email.
+--
+-- The server sees only the resulting token, not how it was obtained. The
+-- Google path relies on the CLIENT requesting interactive account selection;
+-- a compromised client could skip that -- the same trust boundary as the
+-- password path, where a compromised client could replay a stored password.
+-- 'oauth' is the only OAuth provider this project enables (Google). Anything
+-- else fails closed: no amr (e.g. the MCP gateway's claims), a non-array, a
+-- non-numeric timestamp, stale entries, or other methods (recovery, otp,
+-- magiclink, ...).
 create function public.admin_issue_agent_key(p_user_id uuid, p_label text, p_days integer default 90)
 returns table (id uuid, key text, key_prefix text, label text, expires_at timestamptz)
 language plpgsql
@@ -189,18 +206,18 @@ set search_path = ''
 as $$
 declare
   v_amr jsonb := auth.jwt() -> 'amr';
-  v_password_at double precision;
+  v_signed_in_at double precision;
 begin
   if not public.is_admin_user() then
     raise exception 'forbidden' using errcode = '42501';
   end if;
 
-  select max((e ->> 'timestamp')::double precision) into v_password_at
+  select max((e ->> 'timestamp')::double precision) into v_signed_in_at
     from jsonb_array_elements(case when jsonb_typeof(v_amr) = 'array' then v_amr else '[]'::jsonb end) e
-   where e ->> 'method' = 'password'
+   where e ->> 'method' in ('password', 'oauth')
      and jsonb_typeof(e -> 'timestamp') = 'number';
-  if v_password_at is null or to_timestamp(v_password_at) < now() - interval '10 minutes' then
-    raise exception 'recent sign-in required: re-enter your password to create a key'
+  if v_signed_in_at is null or to_timestamp(v_signed_in_at) < now() - interval '10 minutes' then
+    raise exception 'recent sign-in required: re-enter your password or re-authenticate with Google to create a key'
       using errcode = '42501', hint = 'reauth_required';
   end if;
 

@@ -582,6 +582,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .keys-st-expired{color:var(--muted)}
 .keys-st-warn{color:var(--warn)}
 .keys-note{font-family:var(--mono); font-size:10.5px; color:var(--muted); line-height:1.6}
+.keys-google-btn:hover{color:var(--gold); border-color:var(--gold-dim)}
 .keys-once{border-color:var(--gold-dim); background:var(--gold-glow)}
 .keys-once-row{display:flex; gap:10px; margin:14px 0}
 .keys-once-key{flex:1; min-width:0; font-family:var(--mono); font-size:12px; color:var(--gold); background:var(--ink); border:1px solid var(--gold-dim); border-radius:3px; padding:9px 12px}
@@ -5314,6 +5315,7 @@ async function runSessionGate(){
   // rerenderHarvestVintage's scoped path).
   await Promise.all([refreshRealClimateVintages(), refreshDataMode(), refreshInnovintSyncStatus()]);
   showDashboard();
+  resumeAgentKeyReauth(session);
 }
 
 $('#pending-signout').onclick=()=>sb.auth.signOut();
@@ -5710,9 +5712,11 @@ function renderAccountRow(list, row, email, currentUserId){
    visible only to admins is the same cosmetic gate as the rest of this
    overlay, not the enforcement. The key tables stay unreachable from the
    browser; issue/revoke run the exact functions scripts/agent-keys.mjs
-   runs. admin_issue_agent_key also demands a password sign-in within the
-   last 10 minutes, so the create form re-signs-in the CURRENT account
-   (its own email, only the password is asked for) right before issuing.
+   runs. admin_issue_agent_key also demands a password or Google sign-in
+   within the last 10 minutes, so the create form re-authenticates the
+   CURRENT account right before issuing: signInWithPassword for its own
+   email (only the password is typed), or a Google redirect with the
+   account chooser forced (keysReauthWithGoogle / resumeAgentKeyReauth).
 
    The plaintext key exists in this page only from the issue response until
    the one-time panel is dismissed: held in that panel's closure and its
@@ -5881,7 +5885,68 @@ $('#keys-create-btn').onclick=()=>{
   renderCreateKeyForm(host);
 };
 
-async function renderCreateKeyForm(host){
+// The most recent password/Google sign-in on the CURRENT access token, if it
+// is inside admin_issue_agent_key's 10-minute window: reads `amr` from the
+// admin's own JWT payload -- the same claim the server checks. Display and
+// flow only; the server decides.
+const KEYS_FRESH_MS=10*60000;
+function keysFreshSignIn(session){
+  try{
+    const payload=JSON.parse(atob(session.access_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
+    return (Array.isArray(payload.amr) ? payload.amr : [])
+      .filter(e=>(e.method==='password' || e.method==='oauth') && typeof e.timestamp==='number')
+      .map(e=>({ method:e.method, at:e.timestamp*1000 }))
+      .filter(e=>Date.now()-e.at < KEYS_FRESH_MS)
+      .sort((a,b)=>b.at-a.at)[0] || null;
+  }catch{ return null; }
+}
+function keysClock(ms){ return new Date(ms).toLocaleTimeString(undefined, {hour:'numeric', minute:'2-digit'}); }
+
+// Google re-auth is a full-page redirect, so the form's non-secret fields
+// (label, account, days) ride along in sessionStorage and
+// resumeAgentKeyReauth() reopens the form on return.
+const KEYS_REAUTH_DRAFT='mars.agentKeyReauthDraft';
+async function keysReauthWithGoogle(session, draft){
+  try{ sessionStorage.setItem(KEYS_REAUTH_DRAFT, JSON.stringify({ ...draft, adminId:session.user.id, at:Date.now() })); }catch{}
+  // The sign-in screen's own Google call, plus login_hint so Google
+  // pre-selects this admin's account. prompt:'select_account' makes Google
+  // show its account chooser and wait for a click instead of completing
+  // silently from an existing Google session -- the server only sees the
+  // resulting token, so this interaction is the client's job (see
+  // admin_issue_agent_key's comment and docs/SECURITY.md).
+  const { error } = await sb.auth.signInWithOAuth({
+    provider:'google',
+    options:{ redirectTo: window.location.origin + window.location.pathname, queryParams:{ prompt:'select_account', login_hint: session.user.email } }
+  });
+  if(error){
+    try{ sessionStorage.removeItem(KEYS_REAUTH_DRAFT); }catch{}
+    throw error;
+  }
+}
+
+// Called at the end of runSessionGate(). Resumes only for the SAME account
+// that started the re-auth: choosing a different Google account on Google's
+// chooser signs THAT account in instead, and nothing is resumed for it.
+function resumeAgentKeyReauth(session){
+  let draft=null;
+  try{
+    draft=JSON.parse(sessionStorage.getItem(KEYS_REAUTH_DRAFT) || 'null');
+    sessionStorage.removeItem(KEYS_REAUTH_DRAFT);
+  }catch{}
+  if(!draft || Date.now()-draft.at > 15*60000) return;
+  if(draft.adminId!==session.user.id){
+    console.warn('agent key re-auth: returned signed in as a different account; not resuming the create form');
+    return;
+  }
+  if($('#menu-queue').style.display==='none') return;
+  showQueueOnly();
+  switchQueueTab('keys');
+  const host=$('#keys-create');
+  host.style.display='';
+  renderCreateKeyForm(host, draft);
+}
+
+async function renderCreateKeyForm(host, draft={}){
   host.innerHTML=`<div class="empty">Loading accounts&hellip;</div>`;
   const { data: { session } } = await sb.auth.getSession();
   // Any approved Team/Obsidian Member -- exactly what mcp_authenticate()
@@ -5902,10 +5967,12 @@ async function renderCreateKeyForm(host){
     host.innerHTML=`<div class="empty">Couldn&rsquo;t resolve accounts&rsquo; emails.<br><b>${escapeHtml(message)}</b></div>`;
     return;
   }
-  // Fresh-auth is password-only (the server accepts only an `amr` password
-  // entry). A Google-only admin has no password to re-enter.
+  // Fresh-auth: a password or Google sign-in within 10 minutes. Password
+  // re-entry is offered only to admins who have one; Google to everyone.
   const providers = session.user.app_metadata?.providers || [session.user.app_metadata?.provider];
   const hasPassword = providers.includes('email');
+  const fresh = keysFreshSignIn(session);
+  const googleFresh = fresh?.method==='oauth';
 
   host.innerHTML=`
     <div class="queue-row-email">Create an API key</div>
@@ -5930,14 +5997,18 @@ async function renderCreateKeyForm(host){
         <div class="keys-note keys-expiry-note"></div>
       </div>
       <div class="fgroup">
-        <div class="flabel">Confirm your password</div>
-        ${hasPassword
-          ? `<input type="password" class="keys-password-input" autocomplete="current-password" placeholder="Required to create a key">`
-          : `<div class="keys-note keys-st-warn">Your account signs in with Google only. Creating a key requires re-entering a password: set one with &ldquo;Forgot password&rdquo; on the sign-in screen, then come back.</div>`}
+        <div class="flabel">Confirm it&rsquo;s you</div>
+        ${googleFresh
+          ? `<div class="keys-note keys-st-active">&#10003; Re-authenticated with Google at ${keysClock(fresh.at)}. Create the key before ${keysClock(fresh.at+KEYS_FRESH_MS)} &mdash; no password needed.</div>`
+          : `${hasPassword ? `<input type="password" class="keys-password-input" autocomplete="current-password" placeholder="Your password">` : ''}
+             <div class="keys-note">${hasPassword
+               ? 'Enter your password, or re-authenticate with Google instead (you&rsquo;ll choose your account on Google, then come back here).'
+               : 'Your account signs in with Google: re-authenticate there (you&rsquo;ll choose your account, then come back here).'}</div>
+             <div class="queue-form-actions"><button type="button" class="queue-btn-secondary keys-google-btn">Re-authenticate with Google</button></div>`}
       </div>
       <div class="auth-err keys-create-err"></div>
       <div class="queue-form-actions">
-        <button type="button" class="out-b keys-create-submit" ${hasPassword?'':'disabled'}>Create key</button>
+        <button type="button" class="out-b keys-create-submit">Create key</button>
         <button type="button" class="queue-btn-secondary keys-create-cancel">Cancel</button>
       </div>
     </div>`;
@@ -5948,6 +6019,7 @@ async function renderCreateKeyForm(host){
   const daysInput=host.querySelector('.keys-days-input');
   const expiryNote=host.querySelector('.keys-expiry-note');
   const passwordInput=host.querySelector('.keys-password-input');
+  const googleBtn=host.querySelector('.keys-google-btn');
   const formErr=host.querySelector('.keys-create-err');
   const submitBtn=host.querySelector('.keys-create-submit');
   const byId=Object.fromEntries(accounts.map(a=>[a.id, a]));
@@ -5966,26 +6038,47 @@ async function renderCreateKeyForm(host){
       ? `Expires ${keysDate(new Date(Date.now()+d*86400000).toISOString())}. 1 to 365 days; keys always expire.`
       : 'Enter a whole number of days from 1 to 365.';
   };
-  daysInput.oninput=syncExpiry; syncExpiry();
+  daysInput.oninput=syncExpiry;
+  // Restoring a draft carried across the Google redirect.
+  labelInput.value=draft.label || '';
+  if(draft.userId && byId[draft.userId]) accountSelect.value=draft.userId;
+  if(draft.days) daysInput.value=draft.days;
+  accountSelect.onchange(); syncExpiry();
   host.querySelector('.keys-create-cancel').onclick=()=>{ host.style.display='none'; host.innerHTML=''; };
 
   const fail=(msg)=>{ formErr.textContent=msg; formErr.classList.add('on'); };
+  if(googleBtn) googleBtn.onclick=async ()=>{
+    formErr.textContent=''; formErr.classList.remove('on');
+    googleBtn.disabled=true; googleBtn.textContent='Opening Google…';
+    try{
+      const { data: { session: current } } = await sb.auth.getSession();
+      await keysReauthWithGoogle(current, { label:labelInput.value, userId:accountSelect.value, days:daysInput.value });
+    }catch(err){
+      googleBtn.disabled=false; googleBtn.textContent='Re-authenticate with Google';
+      fail(`Couldn't start Google sign-in: ${err.message}`);
+    }
+  };
   submitBtn.onclick=async ()=>{
     formErr.textContent=''; formErr.classList.remove('on');
     const label=labelInput.value.trim(), userId=accountSelect.value, days=Number(daysInput.value);
     if(!label) return fail('Enter a label.');
     if(!userId) return fail('Select a linked account.');
     if(!Number.isInteger(days) || days<1 || days>365) return fail('Expiry must be a whole number of days from 1 to 365.');
-    if(!passwordInput.value) return fail('Enter your password to confirm.');
+    const { data: { session: current } } = await sb.auth.getSession();
+    const viaGoogle = keysFreshSignIn(current)?.method==='oauth';
+    if(!viaGoogle && !passwordInput?.value){
+      return fail(hasPassword ? 'Enter your password, or re-authenticate with Google.' : 'Re-authenticate with Google first.');
+    }
 
     submitBtn.disabled=true; submitBtn.textContent='Creating…';
     const reset=()=>{ submitBtn.disabled=false; submitBtn.textContent='Create key'; };
-    // Re-sign-in as the SAME account (its email from the live session, never
-    // a typed one), which stamps a fresh `amr` password entry on the new token.
-    const { data: { session: current } } = await sb.auth.getSession();
-    const { error: reauthErr } = await sb.auth.signInWithPassword({ email: current.user.email, password: passwordInput.value });
-    passwordInput.value='';
-    if(reauthErr){ reset(); return fail(`Password not accepted: ${reauthErr.message}`); }
+    if(!viaGoogle){
+      // Re-sign-in as the SAME account (its email from the live session,
+      // never a typed one), which stamps a fresh `amr` password entry.
+      const { error: reauthErr } = await sb.auth.signInWithPassword({ email: current.user.email, password: passwordInput.value });
+      passwordInput.value='';
+      if(reauthErr){ reset(); return fail(`Password not accepted: ${reauthErr.message}`); }
+    }
 
     const { data: issued, error } = await sb.rpc('admin_issue_agent_key', { p_user_id:userId, p_label:label, p_days:days }).single();
     if(error){

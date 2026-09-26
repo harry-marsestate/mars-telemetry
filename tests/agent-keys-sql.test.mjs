@@ -221,7 +221,11 @@ test("nobody but the owner can reach the internal functions or the tables -- inc
 });
 
 // ---- fresh auth for issue only ----------------------------------------------------
-test("issue requires a password sign-in within 10 minutes; list and revoke do not", async () => {
+// amr shapes are GoTrue's (supabase/auth internal/models/sessions.go AMREntry:
+// {method, timestamp: int unix seconds}); "oauth" is what a Google sign-in writes.
+const oauthAmr = (secondsAgo) => [{ method: "oauth", timestamp: now() - secondsAgo }];
+
+test("issue requires a password or Google (oauth) sign-in within 10 minutes; list and revoke do not", async () => {
   const issue = (claims) => errorAs("authenticated", claims, "select * from public.admin_issue_agent_key($1, 'fresh', 90)", [OPERATOR]);
   const reauth = /recent sign-in required/;
   assert.match(await issue({ sub: ADMIN, role: "authenticated", email: ADMIN_EMAIL }) ?? "", reauth, "admin claims without amr");
@@ -229,7 +233,16 @@ test("issue requires a password sign-in within 10 minutes; list and revoke do no
   assert.match(await issue(adminClaims([])) ?? "", reauth, "empty amr");
   assert.match(await issue(adminClaims("password")) ?? "", reauth, "non-array amr");
   assert.match(await issue(adminClaims(pwAmr(11 * 60))) ?? "", reauth, "password 11 min ago");
-  assert.match(await issue(adminClaims([{ method: "recovery", timestamp: now() }])) ?? "", reauth, "fresh non-password method");
+  assert.match(await issue(adminClaims([{ method: "recovery", timestamp: now() }])) ?? "", reauth, "fresh recovery link");
+  assert.match(await issue(adminClaims([{ method: "otp", timestamp: now() }])) ?? "", reauth, "fresh otp");
+  assert.match(await issue(adminClaims([{ method: "magiclink", timestamp: now() }])) ?? "", reauth, "fresh magic link");
+  assert.match(await issue(adminClaims(oauthAmr(11 * 60))) ?? "", reauth, "Google 11 min ago");
+  assert.match(await issue(adminClaims([{ method: "oauth", timestamp: String(now()) }])) ?? "", reauth, "Google, string timestamp");
+  assert.equal(await issue(adminClaims(oauthAmr(9 * 60))), null, "Google 9 min ago");
+  assert.equal(await issue(adminClaims(oauthAmr(1))), null, "Google just now");
+  assert.equal(await issue(adminClaims([...oauthAmr(5), ...pwAmr(3 * 3600)])), null, "fresh Google + stale password");
+  assert.equal(await issue(adminClaims([...pwAmr(5), ...oauthAmr(3 * 3600)])), null, "fresh password + stale Google");
+  assert.match(await issue(adminClaims([...pwAmr(20 * 60), ...oauthAmr(20 * 60)])) ?? "", reauth, "both stale");
   assert.match(await issue(adminClaims([{ method: "password", timestamp: String(now()) }])) ?? "", reauth, "string timestamp");
   assert.equal(await issue(adminClaims(pwAmr(9 * 60))), null, "password 9 min ago");
   assert.equal(await issue(adminClaims([{ method: "password", timestamp: now() - 3600 }, { method: "password", timestamp: now() - 5 }])), null, "latest entry counts");
@@ -301,6 +314,16 @@ test("scripts/agent-keys.mjs generates/hashes/inserts nothing itself -- it calls
   for (const fn of ["agent_key_issue", "agent_key_revoke", "agent_key_list"]) {
     assert.ok(cli.includes(`public.${fn}(`), `agent-keys.mjs does not call public.${fn}()`);
   }
+});
+
+test("web/index.html's Google re-auth asks for interactive account selection for the signed-in email", () => {
+  const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+  const start = html.indexOf("function keysReauthWithGoogle");
+  assert.ok(start > 0, "keysReauthWithGoogle() exists");
+  const body = html.slice(start, html.indexOf("\n}\n", start));
+  assert.match(body, /signInWithOAuth\(\{\s*provider:'google'/);
+  assert.match(body, /prompt:'select_account'/, "forces the Google account chooser");
+  assert.match(body, /login_hint:\s*session\.user\.email/, "pre-selects the signed-in admin's own account");
 });
 
 test("web/index.html never names key_hash, never reads the key tables directly, never logs the one-time key", () => {

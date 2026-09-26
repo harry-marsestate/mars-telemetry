@@ -44,3 +44,10 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/ingest-innovint/deno.json"
 entrypoint = "./functions/ingest-innovint/index.ts"
+
+# SPIKE ONLY (spike/oauth21-o1) -- delete after the O1 spike; never merge.
+[functions.oauth-spike]
+enabled = true
+verify_jwt = false
+import_map = "./functions/oauth-spike/deno.json"
+entrypoint = "./functions/oauth-spike/index.ts"

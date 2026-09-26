@@ -11,3 +11,6 @@ supabase/.temp/
 
 # spike/kimi-integration scratch harness -- not shipped
 spike-harness/
+
+# oauth spike outputs (no tokens, but not for the repo)
+scripts/.oauth-spike-*.json

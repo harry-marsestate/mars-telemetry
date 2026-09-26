@@ -78,7 +78,9 @@ every key (prefix, linked account, the account's data mode, expiry, creator,
 status), filters by account/status, creates keys and revokes them. Creating
 a key needs a sign-in within the last 10 minutes: re-enter your password, or
 choose "Re-authenticate with Google" (Google shows its account chooser, then
-returns you to the form). The key is shown once. It calls the same database functions as
+returns you to the form). The key is shown once. Click a key's row for its detail: the
+gateway calls it made (latest 50), and its expiry, which can be changed to
+1-365 days from now but never past 365 days from issue -- no re-auth needed. It calls the same database functions as
 the CLI below.
 
 **From the CLI** (`scripts/agent-keys.mjs`, run by the owner against `DATABASE_URL`):

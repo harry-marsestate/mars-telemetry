@@ -582,7 +582,21 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .keys-st-expired{color:var(--muted)}
 .keys-st-warn{color:var(--warn)}
 .keys-note{font-family:var(--mono); font-size:10.5px; color:var(--muted); line-height:1.6}
-.keys-google-btn:hover{color:var(--gold); border-color:var(--gold-dim)}
+.keys-google-btn:hover, .keys-expiry-save:hover{color:var(--gold); border-color:var(--gold-dim)}
+.keys-tbl tr.keys-row{cursor:pointer}
+.keys-tbl tr.keys-row:hover > td, .keys-tbl tr.keys-row.open > td{background:var(--ink-2)}
+.keys-tbl tr.keys-row.open > td{border-bottom-color:transparent}
+.keys-tbl tr.keys-detail > td{background:var(--ink-2); padding:6px 16px 18px; cursor:default}
+.keys-detail-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(210px, 1fr)); gap:14px 22px; padding:8px 0 4px}
+.keys-detail-grid .flabel{margin-bottom:5px}
+.keys-detail-sect{margin-top:16px; padding-top:14px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:6px}
+.keys-id{font-size:9.5px; color:var(--muted); word-break:break-all}
+.keys-expiry-row{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.keys-expiry-row input{width:90px; background:var(--ink-3); border:1px solid var(--line); border-radius:3px; color:var(--cream); font-family:var(--ui); font-size:13px; padding:7px 10px}
+.keys-expiry-row input:focus{outline:none; border-color:var(--gold-dim)}
+.keys-calls-tbl{margin-top:4px}
+.keys-calls-tbl td:first-child{min-width:0}
+.keys-calls-tbl td:last-child{word-break:break-all}
 .keys-once{border-color:var(--gold-dim); background:var(--gold-glow)}
 .keys-once-row{display:flex; gap:10px; margin:14px 0}
 .keys-once-key{flex:1; min-width:0; font-family:var(--mono); font-size:12px; color:var(--gold); background:var(--ink); border:1px solid var(--gold-dim); border-radius:3px; padding:9px 12px}
@@ -5725,12 +5739,15 @@ function renderAccountRow(list, row, email, currentUserId){
    overlay all tear it down. Revoked keys stay listed for audit. */
 const KEY_STATUS_LABELS = { active:'Active', revoked:'Revoked', expired:'Expired' };
 const DATA_MODE_LABELS = { all:'All data', real_only:'Real-only' };
-const keysState = { rows:[], emails:{}, search:'', account:'', status:'all' };
+const keysState = { rows:[], emails:{}, search:'', account:'', status:'all', openId:null };
 let clearOneTimeKey=null;
 
 function discardOneTimeKey(){ if(clearOneTimeKey) clearOneTimeKey(); }
 function keysDate(iso){
   return iso ? new Date(iso).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'}) : '—';
+}
+function keysDateTime(iso){
+  return iso ? new Date(iso).toLocaleString(undefined, {year:'numeric', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : '—';
 }
 function keysAccountName(r){
   return r.account_first_name ? `${r.account_first_name} ${r.account_last_name||''}`.trim() : '(no profile)';
@@ -5807,7 +5824,11 @@ function renderKeysTable(){
       <tbody></tbody>
     </table></div>`;
   const tbody=host.querySelector('tbody');
-  rows.forEach(r=>tbody.appendChild(renderKeyRow(r)));
+  rows.forEach(r=>{
+    const tr=renderKeyRow(r);
+    tbody.appendChild(tr);
+    if(r.id===keysState.openId) openKeyDetail(r, tr);
+  });
 }
 
 function renderKeyRow(r){
@@ -5820,7 +5841,9 @@ function renderKeyRow(r){
   const statusSub = r.status==='revoked'
     ? `revoked ${keysDate(r.revoked_at)}`
     : (r.last_used_at ? `used ${timeAgo(r.last_used_at)}` : 'never used');
-  const tr=el('tr');
+  const tr=el('tr','keys-row');
+  tr.tabIndex=0;
+  tr.setAttribute('aria-expanded','false');
   tr.innerHTML=`
     <td>${escapeHtml(r.label)}</td>
     <td class="nw">${escapeHtml(r.key_prefix)}&hellip;</td>
@@ -5836,7 +5859,134 @@ function renderKeyRow(r){
       <span class="dim">${statusSub}</span></td>
     <td class="keys-action"></td>`;
   if(r.status!=='revoked') renderRevokeAction(tr.querySelector('.keys-action'), r);
+  // The whole row toggles its detail -- the table's version of the Approve
+  // form's expand-in-place. Clicks inside the action cell (revoke) don't.
+  tr.querySelector('.keys-action').onclick=e=>e.stopPropagation();
+  const toggle=()=>{
+    if(tr.classList.contains('open')){ closeKeyDetail(tr); keysState.openId=null; }
+    else{
+      const open=$('#keys-table tr.keys-row.open');
+      if(open) closeKeyDetail(open);
+      keysState.openId=r.id;
+      openKeyDetail(r, tr);
+    }
+  };
+  tr.onclick=toggle;
+  tr.onkeydown=e=>{ if(e.target===tr && (e.key==='Enter' || e.key===' ')){ e.preventDefault(); toggle(); } };
   return tr;
+}
+
+function closeKeyDetail(tr){
+  tr.classList.remove('open');
+  tr.setAttribute('aria-expanded','false');
+  if(tr.nextElementSibling?.classList.contains('keys-detail')) tr.nextElementSibling.remove();
+}
+
+/* Detail row: everything the list has, plus the key's gateway audit trail
+   (agent_api_key_calls, written only by mcp_log_call) and its expiry
+   history, via admin_list_agent_key_calls / _expiry_changes. Never any key
+   material beyond the prefix -- the plaintext isn't stored anywhere. The
+   expiry editor calls admin_update_agent_key_expiry: no re-auth (same trust
+   level as revoke), 1-365 days from now, capped at 365 days from issue. */
+function openKeyDetail(r, tr){
+  tr.classList.add('open');
+  tr.setAttribute('aria-expanded','true');
+  const email=keysState.emails[r.user_id];
+  const cap=new Date(r.created_at).getTime()+365*864e5;
+  const maxDays=Math.floor((cap-Date.now())/864e5);
+  const detail=el('tr','keys-detail');
+  detail.innerHTML=`<td colspan="9">
+    <div class="keys-detail-grid">
+      <div><div class="flabel">Label</div>${escapeHtml(r.label)}</div>
+      <div><div class="flabel">Key</div>${escapeHtml(r.key_prefix)}&hellip;<span class="dim">prefix only &mdash; the full key is never stored</span></div>
+      <div><div class="flabel">Key id</div><span class="keys-id">${escapeHtml(r.id)}</span></div>
+      <div><div class="flabel">Linked account</div>${escapeHtml(keysAccountName(r))}
+        <span class="dim">${email ? escapeHtml(email) : 'email unavailable'}</span>
+        <span class="dim">${escapeHtml(ROLE_LABELS[r.account_role]||r.account_role||'')} &middot; ${escapeHtml(r.account_status||'no profile')}</span></div>
+      <div><div class="flabel">Data mode</div>${escapeHtml(DATA_MODE_LABELS[r.account_data_mode]||r.account_data_mode||'—')}<span class="dim">the account&rsquo;s, not the key&rsquo;s</span></div>
+      <div><div class="flabel">Created</div>${keysDateTime(r.created_at)}<span class="dim">${escapeHtml(r.created_by||'—')}</span></div>
+      <div><div class="flabel">Expires</div>${keysDateTime(r.expires_at)}</div>
+      <div><div class="flabel">Last used</div>${r.last_used_at ? `${keysDateTime(r.last_used_at)}<span class="dim">${timeAgo(r.last_used_at)}</span>` : 'Never'}</div>
+      <div><div class="flabel">Status</div><span class="keys-st-${escapeHtml(r.status)}">${KEY_STATUS_LABELS[r.status]||escapeHtml(r.status)}</span>${r.revoked_at ? `<span class="dim">revoked ${keysDateTime(r.revoked_at)}</span>` : ''}</div>
+    </div>
+    <div class="keys-detail-sect keys-expiry-edit"></div>
+    <div class="keys-detail-sect"><div class="flabel">Expiry changes</div><div class="keys-expiry-log"><div class="keys-note">Loading&hellip;</div></div></div>
+    <div class="keys-detail-sect"><div class="flabel">Recent gateway calls</div><div class="keys-calls"><div class="keys-note">Loading&hellip;</div></div></div>
+  </td>`;
+  tr.after(detail);
+
+  const edit=detail.querySelector('.keys-expiry-edit');
+  if(r.status!=='active'){
+    edit.innerHTML=`<div class="flabel">Change expiry</div><div class="keys-note">Only an active key&rsquo;s expiry can change. ${r.status==='expired' ? 'Issue a new key instead.' : ''}</div>`;
+  } else if(maxDays<1){
+    edit.innerHTML=`<div class="flabel">Change expiry</div><div class="keys-note">This key is at its 365-day lifetime limit (${keysDate(new Date(cap).toISOString())}). Issue a new key to go further.</div>`;
+  } else {
+    edit.innerHTML=`
+      <div class="flabel">Change expiry</div>
+      <div class="keys-expiry-row">
+        <span class="keys-note">Expire in</span>
+        <input type="number" class="keys-expiry-days" min="1" max="${maxDays}" step="1" value="${Math.min(90, maxDays)}">
+        <span class="keys-note">days from now</span>
+        <button type="button" class="queue-btn-secondary keys-expiry-save">Save</button>
+      </div>
+      <div class="keys-note">1 to ${maxDays} days: a key lives at most 365 days from issue (${keysDate(new Date(cap).toISOString())}). To stop it now, revoke it.</div>
+      <div class="auth-err keys-expiry-err"></div>`;
+    const daysInput=edit.querySelector('.keys-expiry-days');
+    const saveBtn=edit.querySelector('.keys-expiry-save');
+    const err=edit.querySelector('.keys-expiry-err');
+    saveBtn.onclick=async ()=>{
+      err.textContent=''; err.classList.remove('on');
+      const days=Number(daysInput.value);
+      if(!Number.isInteger(days) || days<1 || days>maxDays){
+        err.textContent=`Enter a whole number of days from 1 to ${maxDays}.`; err.classList.add('on'); return;
+      }
+      saveBtn.disabled=true; saveBtn.textContent='Saving…';
+      const { error } = await sb.rpc('admin_update_agent_key_expiry', { p_id:r.id, p_days:days });
+      if(error){
+        console.error('expiry update failed', error.message);
+        saveBtn.disabled=false; saveBtn.textContent='Save';
+        err.textContent=`Couldn't change expiry: ${error.message}`; err.classList.add('on'); return;
+      }
+      await loadAgentKeys();   // keysState.openId keeps this row open
+    };
+  }
+  loadKeyAudit(r, detail);
+}
+
+async function loadKeyAudit(r, detail){
+  const [calls, changes] = await Promise.all([
+    sb.rpc('admin_list_agent_key_calls', { p_id:r.id, p_limit:50 }),
+    sb.rpc('admin_list_agent_key_expiry_changes', { p_id:r.id }),
+  ]);
+  if(!detail.isConnected) return;
+  const log=detail.querySelector('.keys-expiry-log');
+  if(changes.error){
+    console.error('expiry log failed', changes.error.message);
+    log.innerHTML=`<div class="keys-note keys-st-revoked">Couldn&rsquo;t load: ${escapeHtml(changes.error.message)}</div>`;
+  } else if(!changes.data.length){
+    log.innerHTML=`<div class="keys-note">None &mdash; expiry is as issued.</div>`;
+  } else {
+    log.innerHTML=changes.data.map(c=>`<div class="keys-note">${keysDateTime(c.changed_at)}: ${keysDate(c.old_expires_at)} &rarr; <b>${keysDate(c.new_expires_at)}</b> &middot; ${escapeHtml(c.changed_by)}</div>`).join('');
+  }
+  const box=detail.querySelector('.keys-calls');
+  if(calls.error){
+    console.error('audit trail failed', calls.error.message);
+    box.innerHTML=`<div class="keys-note keys-st-revoked">Couldn&rsquo;t load: ${escapeHtml(calls.error.message)}</div>`;
+    return;
+  }
+  if(!calls.data.length){ box.innerHTML=`<div class="keys-note">No calls yet.</div>`; return; }
+  const total=Number(calls.data[0].total_calls);
+  box.innerHTML=`
+    <div class="keys-note">${total>calls.data.length ? `Latest ${calls.data.length} of ${total}` : `${total} call${total===1?'':'s'}`}</div>
+    <table class="tbl keys-calls-tbl"><thead><tr><th>Time</th><th>Tool</th><th>Result</th><th>Arguments</th></tr></thead><tbody>
+      ${calls.data.map(c=>{
+        const args=c.args==null ? '' : JSON.stringify(c.args);
+        const shortArgs=args.length>140 ? args.slice(0,140)+'…' : args;
+        return `<tr><td class="nw">${keysDateTime(c.called_at)}</td><td>${escapeHtml(c.tool)}</td>
+          <td class="${c.is_error?'keys-st-revoked':'keys-st-active'}">${c.is_error?'error':'ok'}</td>
+          <td title="${escapeHtml(args)}">${escapeHtml(shortArgs)||'<span class="dim">&mdash;</span>'}</td></tr>`;
+      }).join('')}
+    </tbody></table>`;
 }
 
 // Inline two-step confirm, the same expand-in-place shape as the Approve

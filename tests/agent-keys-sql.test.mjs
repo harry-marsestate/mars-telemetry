@@ -55,7 +55,7 @@ before(async () => {
     create table public.user_profiles (
       id uuid primary key references auth.users(id) on delete cascade,
       role text not null default 'customer' check (role in ('operator','customer')),
-      status text not null default 'pending',
+      status text not null default 'pending' check (status in ('pending','approved','rejected')),
       first_name text, last_name text,
       data_mode text not null default 'all',
       customer_account_id text
@@ -69,6 +69,7 @@ before(async () => {
   await db.exec(migration("20260810164048_admin_manages_profiles.sql"));
   await db.exec(migration("20260926150001_agent_api_keys.sql"));
   await db.exec(migration("20260926160000_agent_keys_admin.sql"));
+  await db.exec(migration("20260926170000_agent_keys_admin_detail.sql"));
   await db.exec(`
     insert into auth.users values
       ('${ADMIN}', '${ADMIN_EMAIL}'), ('${OPERATOR}', 'op@example.test'), ('${CUSTOMER}', 'cust@example.test'),
@@ -182,11 +183,17 @@ test("expiry is required, 1 to 365 days; label required, max 100 chars", async (
 
 // ---- access control -----------------------------------------------------------
 const ADMIN_CALLS = [
+  ["admin_update_agent_key_expiry", "select * from public.admin_update_agent_key_expiry($1, 30)", ["ffffffff-0000-4000-8000-000000000009"]],
+  ["admin_list_agent_key_calls", "select * from public.admin_list_agent_key_calls($1)", ["ffffffff-0000-4000-8000-000000000009"]],
+  ["admin_list_agent_key_expiry_changes", "select * from public.admin_list_agent_key_expiry_changes($1)", ["ffffffff-0000-4000-8000-000000000009"]],
   ["admin_list_agent_keys", "select * from public.admin_list_agent_keys()", []],
   ["admin_issue_agent_key", "select * from public.admin_issue_agent_key($1, 'x', 90)", [OPERATOR]],
   ["admin_revoke_agent_key", "select * from public.admin_revoke_agent_key($1)", ["ffffffff-0000-4000-8000-000000000009"]],
 ];
 const INTERNAL_CALLS = [
+  "select * from public.agent_key_set_expiry('ffffffff-0000-4000-8000-000000000009', 30, 'x')",
+  "select * from public.agent_key_calls('ffffffff-0000-4000-8000-000000000009')",
+  "select * from public.agent_key_expiry_changes('ffffffff-0000-4000-8000-000000000009')",
   "select * from public.agent_key_list()",
   `select * from public.agent_key_issue('${OPERATOR}', 'x', 90, 'x', false)`,
   "select * from public.agent_key_revoke('ffffffff-0000-4000-8000-000000000009')",
@@ -214,7 +221,7 @@ test("non-admin API roles cannot call the admin RPCs", async () => {
 test("nobody but the owner can reach the internal functions or the tables -- including an admin", async () => {
   for (const [role, claims] of [["anon", null], ["authenticated", adminClaims()], ["service_role", null], ["mcp_gateway", null], ["mcp_reader", null]]) {
     for (const sql of INTERNAL_CALLS) assert.match(await errorAs(role, claims, sql) ?? "(succeeded)", /permission denied for function/, `${role}: ${sql}`);
-    for (const t of ["agent_api_keys", "agent_api_key_calls"]) {
+    for (const t of ["agent_api_keys", "agent_api_key_calls", "agent_api_key_expiry_changes"]) {
       assert.match(await errorAs(role, claims, `select * from public.${t}`) ?? "(succeeded)", /permission denied for table/, `${role}: ${t}`);
     }
   }
@@ -272,7 +279,7 @@ test("list: every key with computed status, owner eligibility and the account's 
     const demoted = await issueOwner(q, CUSTOMER, "owner demoted");
     await q("update public.agent_api_keys set created_at = now() - interval '2 days', expires_at = now() - interval '1 day' where id = $1", [expired.id]);
     await q("select public.agent_key_revoke($1)", [revoked.id]);
-    await q(`update public.user_profiles set status = 'suspended' where id = '${CUSTOMER}'`);
+    await q(`update public.user_profiles set status = 'rejected' where id = '${CUSTOMER}'`);
 
     const ownerRows = await q("select * from public.agent_key_list()");
     await q("select set_config('request.jwt.claims', $1, true)", [JSON.stringify(adminClaims(pwAmr(86400)))]);
@@ -290,7 +297,7 @@ test("list: every key with computed status, owner eligibility and the account's 
     assert.ok(by[revoked.id].revoked_at);
     assert.equal(by[demoted.id].status, "active");
     assert.equal(by[demoted.id].owner_eligible, false, "active but owner no longer approved");
-    assert.equal(by[demoted.id].account_status, "suspended");
+    assert.equal(by[demoted.id].account_status, "rejected");
   });
 });
 
@@ -303,6 +310,111 @@ test("admin revoke: first call returns the row, second returns nothing, and it's
     assert.equal((await q("select * from public.admin_revoke_agent_key($1)", [row.id])).length, 0);
     const listed = (await q("select * from public.admin_list_agent_keys()")).find((r) => r.id === row.id);
     assert.equal(listed.status, "revoked");
+  });
+});
+
+// ---- round 2: audit trail and editable expiry --------------------------------------
+const STALE_ADMIN = () => ({ sub: ADMIN, role: "authenticated", email: ADMIN_EMAIL, amr: pwAmr(24 * 3600) });
+
+test("audit trail: the gateway's own mcp_log_call rows for that key only, newest first, with total and a capped limit", async () => {
+  await asOwner(async (q) => {
+    const a = await issueOwner(q, OPERATOR, "calls a");
+    const b = await issueOwner(q, OPERATOR, "calls b");
+    const ha = await sha256Hex(a.key), hb = await sha256Hex(b.key);
+    await q("set local role mcp_gateway");
+    for (let i = 0; i < 5; i++) await q("select public.mcp_log_call($1, $2, $3::jsonb, $4)", [ha, `tool_${i}`, { n: i }, i === 4]);
+    await q("select public.mcp_log_call($1, 'other_key_tool', null, false)", [hb]);
+    await q("reset role");
+    // Spread the timestamps so ordering is by time, not insertion luck.
+    await q("update public.agent_api_key_calls c set called_at = now() - make_interval(mins => 10 - (c.args->>'n')::int) where c.key_id = $1", [a.id]);
+    await q("select set_config('request.jwt.claims', $1, true)", [JSON.stringify(STALE_ADMIN())]);
+    await q("set local role authenticated");
+    const rows = await q("select * from public.admin_list_agent_key_calls($1, 3)", [a.id]);
+    assert.deepEqual(rows.map((r) => r.tool), ["tool_4", "tool_3", "tool_2"], "newest first, limited");
+    assert.equal(Number(rows[0].total_calls), 5, "total counts every call for the key");
+    assert.equal(rows[0].is_error, true);
+    assert.deepEqual(rows[1].args, { n: 3 });
+    assert.deepEqual(Object.keys(rows[0]).sort(), ["args", "called_at", "is_error", "tool", "total_calls"], "no key material");
+    assert.equal((await q("select * from public.admin_list_agent_key_calls($1, 1000)", [a.id])).length, 5, "limit clamps to <= 200");
+    assert.equal((await q("select * from public.admin_list_agent_key_calls($1)", [b.id])).length, 1, "other key's calls stay separate");
+  });
+});
+
+test("expiry: admin sets 1-365 days from now with no re-auth, capped at 365 days from issue, and every change is logged", async () => {
+  await asOwner(async (q) => {
+    const k = await issueOwner(q, OPERATOR, "expiry", 90);
+    await q("select set_config('request.jwt.claims', $1, true)", [JSON.stringify(STALE_ADMIN())]);
+    await q("set local role authenticated");
+    const [short] = await q("select * from public.admin_update_agent_key_expiry($1, 7)", [k.id]);
+    assert.equal(short.key_prefix, k.key_prefix);
+    const [{ days: d7 }] = await q("select round(extract(epoch from ($1::timestamptz - now())) / 86400)::int days", [short.expires_at]);
+    assert.equal(d7, 7, "shortened to 7 days from now");
+    const [long] = await q("select * from public.admin_update_agent_key_expiry($1, 365)", [k.id]);
+    assert.equal(new Date(long.old_expires_at).getTime(), new Date(short.expires_at).getTime(), "old value recorded");
+    const log = await q("select * from public.admin_list_agent_key_expiry_changes($1)", [k.id]);
+    assert.equal(log.length, 2);
+    assert.equal(log[0].changed_by, `${ADMIN_EMAIL} (${ADMIN}) via web admin`, "who, from the JWT");
+    assert.equal(new Date(log[0].new_expires_at).getTime(), new Date(long.expires_at).getTime(), "newest first");
+    const listed = (await q("select * from public.admin_list_agent_keys()")).find((r) => r.id === k.id);
+    assert.equal(new Date(listed.expires_at).getTime(), new Date(long.expires_at).getTime(), "list reflects it");
+  });
+});
+
+test("expiry: range, lifetime cap, and only active keys", async () => {
+  const tryAs = (fn) => asOwner(async (q) => { try { return await fn(q); } catch (e) { return e.message; } });
+  // 300 days into a key's life, at most 65 more days are possible.
+  const capped = await tryAs(async (q) => {
+    const k = await issueOwner(q, OPERATOR);
+    await q("update public.agent_api_keys set created_at = now() - interval '300 days' where id = $1", [k.id]);
+    const results = [];
+    for (const d of [66, 65]) {
+      try { await q("savepoint s"); await q("select * from public.agent_key_set_expiry($1, $2, 'test')", [k.id, d]); results.push(`${d}:ok`); }
+      catch (e) { await q("rollback to savepoint s"); results.push(`${d}:${e.message}`); }
+    }
+    return results;
+  });
+  assert.match(capped[0], /^66:a key can live at most 365 days from issue: mtk_\S+ can be set at most 65 days from now$/);
+  assert.equal(capped[1], "65:ok");
+  for (const d of [0, 366, null]) {
+    assert.match(await tryAs(async (q) => { const k = await issueOwner(q); await q("select * from public.agent_key_set_expiry($1, $2, 'test')", [k.id, d]); }), /1 to 365 days/);
+  }
+  assert.match(await tryAs(async (q) => {
+    const k = await issueOwner(q); await q("select public.agent_key_revoke($1)", [k.id]);
+    await q("select * from public.agent_key_set_expiry($1, 30, 'test')", [k.id]);
+  }), /is revoked/);
+  assert.match(await tryAs(async (q) => {
+    const k = await issueOwner(q); await q("update public.agent_api_keys set expires_at = now() - interval '1 minute' where id = $1", [k.id]);
+    await q("select * from public.agent_key_set_expiry($1, 30, 'test')", [k.id]);
+  }), /has expired; issue a new key/);
+  assert.match(await tryAs((q) => q("select * from public.agent_key_set_expiry('ffffffff-0000-4000-8000-000000000009', 30, 'test')")), /no key with id/);
+  // A rejected change writes nothing.
+  const unchanged = await asOwner(async (q) => {
+    const k = await issueOwner(q);
+    await q("update public.agent_api_keys set created_at = now() - interval '360 days' where id = $1", [k.id]);
+    await q("savepoint s");
+    try { await q("select * from public.agent_key_set_expiry($1, 30, 'test')", [k.id]); } catch { await q("rollback to savepoint s"); }
+    const [{ n }] = await q("select count(*)::int n from public.agent_api_key_expiry_changes where key_id = $1", [k.id]);
+    const [{ same }] = await q("select expires_at = $2::timestamptz same from public.agent_api_keys where id = $1", [k.id, k.expires_at]);
+    return { n, same };
+  });
+  assert.deepEqual(unchanged, { n: 0, same: true });
+});
+
+test("an expiry change doesn't touch the credential: same hash, still authenticates, and stops at the new expiry", async () => {
+  await asOwner(async (q) => {
+    const k = await issueOwner(q);
+    const hash = await sha256Hex(k.key);
+    await q("select * from public.agent_key_set_expiry($1, 3, 'test')", [k.id]);
+    const [{ hex }] = await q("select encode(key_hash, 'hex') hex from public.agent_api_keys where id = $1", [k.id]);
+    assert.equal(hex, hash);
+    await q("set local role mcp_gateway");
+    assert.equal((await q("select * from public.mcp_authenticate($1)", [hash])).length, 1);
+    await q("reset role");
+    // Simulate time passing past the new expiry.
+    await q("update public.agent_api_keys set expires_at = now() - interval '1 second' where id = $1", [k.id]);
+    await q("set local role mcp_gateway");
+    assert.equal((await q("select * from public.mcp_authenticate($1)", [hash])).length, 0);
+    await q("reset role");
   });
 });
 

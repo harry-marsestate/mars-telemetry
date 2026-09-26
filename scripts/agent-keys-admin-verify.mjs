@@ -28,7 +28,9 @@
 //   3. Function-level auth as each real role (anon, service_role, the MCP
 //      roles, non-admin authenticated, admin), fresh-auth rule for issue
 //   4. End to end as an admin: issue -> hash matches -> mcp_authenticate
-//      (as mcp_gateway) accepts it -> revoke -> rejected -> still listed
+//      (as mcp_gateway) accepts it -> a gateway call shows in the key's audit
+//      trail -> expiry change (no re-auth, logged, lifetime cap) -> revoke ->
+//      rejected -> still listed
 //   5. The plaintext never reached pg_stat_statements
 //   6. The real REST API (anon key only): every new function and the tables
 //      are refused
@@ -44,8 +46,12 @@ const ORIGIN = new URL(env.SUPABASE_URL).origin;
 const DATABASE_URL = process.env.DATABASE_URL ?? env.DATABASE_URL;
 const NO_REST = process.argv.includes("--no-rest");
 
-const ADMIN_FNS = ["admin_list_agent_keys()", "admin_issue_agent_key(uuid,text,integer)", "admin_revoke_agent_key(uuid)"];
-const INTERNAL_FNS = ["agent_key_list()", "agent_key_issue(uuid,text,integer,text,boolean)", "agent_key_revoke(uuid)"];
+const ADMIN_FNS = ["admin_list_agent_keys()", "admin_issue_agent_key(uuid,text,integer)", "admin_revoke_agent_key(uuid)",
+  "admin_update_agent_key_expiry(uuid,integer)", "admin_list_agent_key_calls(uuid,integer)", "admin_list_agent_key_expiry_changes(uuid)"];
+const INTERNAL_FNS = ["agent_key_list()", "agent_key_issue(uuid,text,integer,text,boolean)", "agent_key_revoke(uuid)",
+  "agent_key_set_expiry(uuid,integer,text)", "agent_key_calls(uuid,integer)", "agent_key_expiry_changes(uuid)"];
+const FN_NAMES = [...ADMIN_FNS, ...INTERNAL_FNS].map((f) => f.slice(0, f.indexOf("(")));
+const KEY_TABLES = ["agent_api_keys", "agent_api_key_calls", "agent_api_key_expiry_changes"];
 const API_ROLES = ["anon", "authenticated", "service_role", "mcp_gateway", "mcp_reader"];
 const NO_SUCH_KEY = "00000000-0000-4000-8000-000000000000";
 
@@ -118,16 +124,15 @@ await withDb(async (db) => {
   out("\n## 1. Functions (pg_proc)");
   const { rows: procs } = await db.query(
     `select p.oid::regprocedure::text sig, p.prosecdef definer, p.proconfig config, pg_get_userbyid(p.proowner) owner
-       from pg_proc p where p.pronamespace = 'public'::regnamespace
-        and p.proname in ('admin_list_agent_keys','admin_issue_agent_key','admin_revoke_agent_key','agent_key_list','agent_key_issue','agent_key_revoke')
-      order by 1`,
+       from pg_proc p where p.pronamespace = 'public'::regnamespace and p.proname = any($1)
+      order by 1`, [FN_NAMES],
   );
   for (const p of procs) out(`  ${p.sig}  definer=${p.definer}  config=${JSON.stringify(p.config)}  owner=${p.owner}`);
-  verdict("all six functions exist, SECURITY DEFINER, search_path=''",
-    procs.length === 6 && procs.every((p) => p.definer && (p.config ?? []).some((c) => c === 'search_path=""' || c === "search_path=")),
-    `${procs.length}/6 found`);
-  if (procs.length !== 6) {
-    out("\nMigration 20260926160000 is not applied -- stopping.");
+  verdict(`all ${FN_NAMES.length} functions exist, SECURITY DEFINER, search_path=''`,
+    procs.length === FN_NAMES.length && procs.every((p) => p.definer && (p.config ?? []).some((c) => c === 'search_path=""' || c === "search_path=")),
+    `${procs.length}/${FN_NAMES.length} found`);
+  if (procs.length !== FN_NAMES.length) {
+    out("\nMigrations 20260926160000 + 20260926170000 are not both applied -- stopping.");
     process.exitCode = 1;
     return;
   }
@@ -139,7 +144,7 @@ await withDb(async (db) => {
   for (const fn of [...ADMIN_FNS, ...INTERNAL_FNS]) {
     execMatrix[fn] = {};
     for (const role of API_ROLES) execMatrix[fn][role] = await priv(role, fn);
-    out(`  ${fn.padEnd(52)} ${API_ROLES.map((r) => `${r}=${execMatrix[fn][r] ? "X" : "-"}`).join(" ")}`);
+    out(`  ${fn.padEnd(56)} ${API_ROLES.map((r) => `${r}=${execMatrix[fn][r] ? "X" : "-"}`).join(" ")}`);
   }
   verdict("admin_* wrappers: EXECUTE for authenticated only (not anon/service_role/mcp_gateway/mcp_reader)",
     ADMIN_FNS.every((fn) => API_ROLES.every((r) => execMatrix[fn][r] === (r === "authenticated"))));
@@ -147,14 +152,13 @@ await withDb(async (db) => {
     INTERNAL_FNS.every((fn) => API_ROLES.every((r) => !execMatrix[fn][r])));
   const { rows: acls } = await db.query(
     `select p.oid::regprocedure::text sig, coalesce(array_to_string(p.proacl, ','), '(default)') acl
-       from pg_proc p where p.pronamespace='public'::regnamespace
-        and p.proname in ('admin_list_agent_keys','admin_issue_agent_key','admin_revoke_agent_key','agent_key_list','agent_key_issue','agent_key_revoke')`,
+       from pg_proc p where p.pronamespace='public'::regnamespace and p.proname = any($1)`, [FN_NAMES],
   );
   verdict("no PUBLIC EXECUTE entry on any of them", acls.every((a) => a.acl !== "(default)" && !/(^|,)=X/.test(a.acl)),
     acls.filter((a) => a.acl === "(default)" || /(^|,)=X/.test(a.acl)).map((a) => a.sig).join(", "));
 
   const tablePrivs = [];
-  for (const t of ["agent_api_keys", "agent_api_key_calls"]) {
+  for (const t of KEY_TABLES) {
     for (const role of API_ROLES) {
       for (const p of ["SELECT", "INSERT", "UPDATE", "DELETE"]) {
         if ((await db.query("select has_table_privilege($1, $2, $3) ok", [role, `public.${t}`, p])).rows[0].ok) tablePrivs.push(`${role}:${p}:${t}`);
@@ -162,11 +166,12 @@ await withDb(async (db) => {
     }
   }
   const { rows: [rls] } = await db.query(
-    `select bool_and(c.relrowsecurity) rls_on, (select count(*)::int from pg_policies where schemaname='public' and tablename in ('agent_api_keys','agent_api_key_calls')) policies
-       from pg_class c where c.oid in ('public.agent_api_keys'::regclass, 'public.agent_api_key_calls'::regclass)`,
+    `select bool_and(c.relrowsecurity) rls_on, count(*)::int n,
+            (select count(*)::int from pg_policies where schemaname='public' and tablename = any($1)) policies
+       from pg_class c where c.relnamespace = 'public'::regnamespace and c.relname = any($1)`, [KEY_TABLES],
   );
-  verdict("agent_api_keys / agent_api_key_calls: still no table privilege for any API role, RLS on, zero policies",
-    tablePrivs.length === 0 && rls.rls_on && rls.policies === 0,
+  verdict(`${KEY_TABLES.join(" / ")}: no table privilege for any API role, RLS on, zero policies`,
+    tablePrivs.length === 0 && rls.rls_on && rls.policies === 0 && rls.n === KEY_TABLES.length,
     `privileges=${tablePrivs.join(" ") || "none"} rls_on=${rls.rls_on} policies=${rls.policies}`);
 
   // ---- 3. function-level auth as real roles ------------------------------------------
@@ -187,6 +192,9 @@ await withDb(async (db) => {
     ["list", "select * from public.admin_list_agent_keys()", []],
     ["issue", "select id, key_prefix from public.admin_issue_agent_key($1, 'agent-keys-admin-verify (rolled back)', 1)", [operator?.id ?? admin.id]],
     ["revoke", "select * from public.admin_revoke_agent_key($1)", [NO_SUCH_KEY]],
+    ["expiry", "select * from public.admin_update_agent_key_expiry($1, 30)", [NO_SUCH_KEY]],
+    ["calls", "select * from public.admin_list_agent_key_calls($1)", [NO_SUCH_KEY]],
+    ["expiry log", "select * from public.admin_list_agent_key_expiry_changes($1)", [NO_SUCH_KEY]],
   ];
   const denialCases = [
     ["anon", null, /permission denied for function/],
@@ -204,19 +212,24 @@ await withDb(async (db) => {
     const got = [];
     for (const [name, sql, params] of calls) got.push([name, await attempt(db, role, claims, sql, params)]);
     const ok = got.every(([, r]) => r.error && expected.test(r.error));
-    verdict(`${role}${claims ? ` as ${short(claims.sub)}` : " (no claims)"}: list/issue/revoke all refused`, ok,
+    verdict(`${role}${claims ? ` as ${short(claims.sub)}` : " (no claims)"}: all ${calls.length} admin RPCs refused`, ok,
       got.map(([n, r]) => `${n}: ${r.error ?? `SUCCEEDED (${r.rows.length} rows)`}`).join("; "));
   }
   for (const [name, sql] of [
     ["agent_key_list()", "select * from public.agent_key_list()"],
     ["agent_key_issue()", `select * from public.agent_key_issue('${target0(operator, admin)}', 'x', 1, 'x', true)`],
     ["agent_key_revoke()", `select * from public.agent_key_revoke('${NO_SUCH_KEY}')`],
+    ["agent_key_set_expiry()", `select * from public.agent_key_set_expiry('${NO_SUCH_KEY}', 30, 'x')`],
+    ["agent_key_calls()", `select * from public.agent_key_calls('${NO_SUCH_KEY}')`],
+    ["agent_key_expiry_changes()", `select * from public.agent_key_expiry_changes('${NO_SUCH_KEY}')`],
   ]) {
     const r = await attempt(db, "authenticated", claimsFor(admin.id, admin.email, fresh()), sql);
     verdict(`admin cannot call the implementation directly: ${name}`, /permission denied for function/.test(r.error ?? ""), r.error ?? "SUCCEEDED");
   }
-  const adminSel = await attempt(db, "authenticated", claimsFor(admin.id, admin.email, fresh()), "select count(*) from public.agent_api_keys");
-  verdict("admin cannot read agent_api_keys directly", /permission denied for table/.test(adminSel.error ?? ""), adminSel.error ?? "SUCCEEDED");
+  for (const t of KEY_TABLES) {
+    const r = await attempt(db, "authenticated", claimsFor(admin.id, admin.email, fresh()), `select count(*) from public.${t}`);
+    verdict(`admin cannot read ${t} directly`, /permission denied for table/.test(r.error ?? ""), r.error ?? "SUCCEEDED");
+  }
 
   // Fresh-auth rule on issue; list/revoke need none.
   const target = operator ?? admin;
@@ -243,7 +256,11 @@ await withDb(async (db) => {
   const stale = [{ method: "password", timestamp: nowS() - 86400 }];
   const staleList = await attempt(db, "authenticated", claimsFor(admin.id, admin.email, stale), "select count(*)::int n from public.admin_list_agent_keys()");
   const staleRevoke = await attempt(db, "authenticated", claimsFor(admin.id, admin.email, stale), "select * from public.admin_revoke_agent_key($1)", [NO_SUCH_KEY]);
-  verdict("list and revoke need no re-auth (day-old sign-in)", !staleList.error && !staleRevoke.error, staleList.error ?? staleRevoke.error ?? `list=${staleList.rows[0].n} rows`);
+  const staleCalls = await attempt(db, "authenticated", claimsFor(admin.id, admin.email, stale), "select * from public.admin_list_agent_key_calls($1)", [NO_SUCH_KEY]);
+  const staleLog = await attempt(db, "authenticated", claimsFor(admin.id, admin.email, stale), "select * from public.admin_list_agent_key_expiry_changes($1)", [NO_SUCH_KEY]);
+  verdict("list, revoke and the audit reads need no re-auth (day-old sign-in)",
+    !staleList.error && !staleRevoke.error && !staleCalls.error && !staleLog.error,
+    staleList.error ?? staleRevoke.error ?? staleCalls.error ?? staleLog.error ?? `list=${staleList.rows[0].n} rows`);
 
   // List shape and parity with the CLI's own function.
   const parity = await rolledBack(db, async ({ q, as, owner }) => {
@@ -280,8 +297,27 @@ await withDb(async (db) => {
     r.plainHits = plainHits;
     await as("mcp_gateway");
     r.authBefore = await q("select key_id, user_id from public.mcp_authenticate($1)", [r.hash]);
-    await as("authenticated", claimsFor(admin.id, admin.email, [{ method: "password", timestamp: nowS() - 86400 }]));
+    await q("select public.mcp_log_call($1, 'agent-keys-admin-verify', $2::jsonb, false)", [r.hash, { rolled_back: true }]);
+    const dayOld = claimsFor(admin.id, admin.email, [{ method: "password", timestamp: nowS() - 86400 }]);
+    await as("authenticated", dayOld);
+    r.calls = await q("select * from public.admin_list_agent_key_calls($1)", [issued.id]);
+    // Expiry, with a day-old sign-in: no re-auth required.
+    [r.expiry] = await q("select * from public.admin_update_agent_key_expiry($1, 30)", [issued.id]);
+    r.expiryLog = await q("select * from public.admin_list_agent_key_expiry_changes($1)", [issued.id]);
+    // Lifetime cap: pretend the key is 300 days old; 66 more days is over.
+    await owner();
+    await q("update public.agent_api_keys set created_at = now() - interval '300 days' where id = $1", [issued.id]);
+    await as("authenticated", dayOld);
+    await q("savepoint cap");
+    try { await q("select * from public.admin_update_agent_key_expiry($1, 66)", [issued.id]); r.capError = null; }
+    catch (e) { r.capError = e.message; await q("rollback to savepoint cap"); }
+    r.capOk = (await q("select * from public.admin_update_agent_key_expiry($1, 65)", [issued.id])).length;
+    await as("mcp_gateway");
+    r.authAfterExpiry = await q("select key_id from public.mcp_authenticate($1)", [r.hash]);
+    await as("authenticated", dayOld);
     r.revoked = await q("select * from public.admin_revoke_agent_key($1)", [issued.id]);
+    r.expiryAfterRevoke = await q("savepoint rv").then(() => q("select * from public.admin_update_agent_key_expiry($1, 5)", [issued.id]))
+      .then(() => null, async (e) => { await q("rollback to savepoint rv"); return e.message; });
     r.revokedAgain = await q("select * from public.admin_revoke_agent_key($1)", [issued.id]);
     await as("mcp_gateway");
     r.authAfter = await q("select key_id, user_id from public.mcp_authenticate($1)", [r.hash]);
@@ -298,7 +334,21 @@ await withDb(async (db) => {
     e2e.createdBy.replace(admin.email, "<admin email>").replace(admin.id, `${short(admin.id)}...`));
   verdict("mcp_authenticate (as mcp_gateway) accepts the new key and resolves the linked account",
     e2e.authBefore.length === 1 && e2e.authBefore[0].user_id === target.id && e2e.authBefore[0].key_id === e2e.issued.id);
+  verdict("audit trail shows the gateway call just logged (mcp_log_call as mcp_gateway), no key material",
+    e2e.calls.length === 1 && e2e.calls[0].tool === "agent-keys-admin-verify" && Number(e2e.calls[0].total_calls) === 1
+      && !Object.keys(e2e.calls[0]).some((c) => /hash|^key$/.test(c)),
+    `${e2e.calls.length} call(s): ${e2e.calls.map((c) => c.tool).join(",")}`);
+  verdict("expiry change with a day-old sign-in (no re-auth): 30 days from now, old value returned",
+    !!e2e.expiry && Math.round((new Date(e2e.expiry.expires_at) - Date.now()) / 864e5) === 30 && !!e2e.expiry.old_expires_at);
+  verdict("expiry change logged with who (from the JWT), old and new values",
+    e2e.expiryLog.length === 1 && e2e.expiryLog[0].changed_by === `${admin.email} (${admin.id}) via web admin`
+      && new Date(e2e.expiryLog[0].new_expires_at).getTime() === new Date(e2e.expiry.expires_at).getTime(),
+    `${e2e.expiryLog.length} row(s)`);
+  verdict("lifetime cap: 300 days into a key's life, +66 days refused, +65 allowed",
+    /at most 65 days from now/.test(e2e.capError ?? "") && e2e.capOk === 1, e2e.capError ?? "66 SUCCEEDED");
+  verdict("the key still authenticates after its expiry was changed", e2e.authAfterExpiry.length === 1);
   verdict("admin revoke returns the row once, then nothing", e2e.revoked.length === 1 && e2e.revokedAgain.length === 0);
+  verdict("a revoked key's expiry can't be changed", /is revoked/.test(e2e.expiryAfterRevoke ?? ""), e2e.expiryAfterRevoke ?? "SUCCEEDED");
   verdict("revoked key: mcp_authenticate returns zero rows", e2e.authAfter.length === 0);
   verdict("revoked key stays listed with status 'revoked'", e2e.listed?.status === "revoked" && !!e2e.listed?.revoked_at);
   const [{ gone }] = (await db.query("select count(*)::int gone from public.agent_api_keys where id = $1", [e2e.issued.id])).rows;
@@ -339,8 +389,15 @@ for (const [path, body] of NO_REST ? [] : [
   ["rpc/agent_key_list", {}],
   ["rpc/agent_key_issue", { p_user_id: NO_SUCH_KEY, p_label: "x", p_days: 1, p_created_by: "x", p_allow_unapproved: true }],
   ["rpc/agent_key_revoke", { p_id: NO_SUCH_KEY }],
+  ["rpc/admin_update_agent_key_expiry", { p_id: NO_SUCH_KEY, p_days: 30 }],
+  ["rpc/admin_list_agent_key_calls", { p_id: NO_SUCH_KEY }],
+  ["rpc/admin_list_agent_key_expiry_changes", { p_id: NO_SUCH_KEY }],
+  ["rpc/agent_key_set_expiry", { p_id: NO_SUCH_KEY, p_days: 30, p_changed_by: "x" }],
+  ["rpc/agent_key_calls", { p_id: NO_SUCH_KEY }],
+  ["rpc/agent_key_expiry_changes", { p_id: NO_SUCH_KEY }],
   ["agent_api_keys?select=*", undefined],
   ["agent_api_key_calls?select=*", undefined],
+  ["agent_api_key_expiry_changes?select=*", undefined],
 ]) {
   const r = await rest(path, body);
   verdict(`anon ${body === undefined ? "GET" : "POST"} /rest/v1/${path.split("?")[0]} refused`, r.status >= 400 && r.status < 500 && !/^\[/.test(r.text),

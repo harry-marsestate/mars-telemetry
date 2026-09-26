@@ -6406,3 +6406,64 @@ access-token hook could still rewrite `amr`; none is configured in
 **Pending (owner):** a real create-and-revoke click-through on the branch's
 Vercel preview (password and, once the preview domain is on Supabase Auth's
 redirect allowlist, Google). Not merged to `main` until then.
+
+### Round 2: key detail view, audit trail, editable expiry (migration `20260926170000`, not yet applied)
+
+Same shape as round 1 -- three owner-only implementation functions, three
+`admin_*` wrappers (EXECUTE for `authenticated` only, `is_admin_user()`
+inside), no table reachable from any API role:
+
+- `agent_key_calls` / `admin_list_agent_key_calls(id, limit)`: the key's
+  rows from `agent_api_key_calls` (written only by `mcp_log_call()`), newest
+  first, limit clamped to 1-200, plus the key's total count. Columns:
+  `called_at, tool, is_error, args, total_calls` -- no key material.
+- `agent_key_set_expiry` / `admin_update_agent_key_expiry(id, days)`:
+  `expires_at = now() + days`. **No fresh-auth step** -- it creates no new
+  credential; same trust level as revoke.
+- `agent_key_expiry_changes` / `admin_list_agent_key_expiry_changes(id)`.
+
+**Range: 1-365 days from now, and never past `created_at + 365 days`.** The
+cap is measured from issue rather than from now because a no-re-auth
+metadata edit must not be able to keep one credential alive indefinitely:
+"365 days from now" would let an admin session (or a hijacked one) roll a
+key forward forever, sidestepping both the fresh-auth step issuing requires
+and the rotation re-issuing forces. With the cap, extending can never grant
+more lifetime than issuing already did (with re-auth); past a year you
+issue a new key. For the same reason only **active** keys can change --
+extending an expired key would resurrect it, and a revoked key stays
+revoked. Under a day: revoke.
+
+**Audit:** a new append-only table, `agent_api_key_expiry_changes` (key,
+old value, new value, `changed_by`, `changed_at`), rather than "last changed
+by" columns, so every change and the value it replaced stays on record.
+`changed_by` uses `created_by`'s convention, built from the caller's signed
+JWT (`email (uid) via web admin`). Deny-all like the other key tables
+(RLS on, zero policies, no API-role grants); written in the same
+transaction as the update. **Gap noticed, not changed:** revocation still
+records only `revoked_at`, not who revoked -- the same table pattern could
+cover it if wanted.
+
+**UI:** clicking a row (or Enter/Space on it) expands a detail row beneath it
+-- the table's version of the Approve form's expand-in-place; one open at a
+time, and it stays open across the reload after a save. It shows every list
+field plus the key id, full `created_by`, exact timestamps, the expiry editor
+(active keys only; its max is the cap), the expiry history and the latest 50
+gateway calls. Prefix only, as in the list.
+
+**Verification (offline):** SQL tests 18/18 -- audit trail via real
+`mcp_log_call` rows (ordering, total, limit clamp, per-key isolation, no
+key columns); expiry change with a day-old sign-in, logged with old/new/who;
+range, cap (+66 refused / +65 allowed at day 300), revoked/expired/unknown
+refused, a refused change writes nothing; the credential is untouched (same
+hash, still authenticates, stops at the new expiry); the access matrix now
+covers all 12 functions and 3 tables. Harness dry run 47/47 (adds: gateway
+call visible in the audit trail, expiry without re-auth, logged, cap, key
+still authenticates, revoked key immutable; REST checks for the new
+functions/table). Mutation-tested: no admin check on the expiry update, no
+cap, no audit write, no admin check on the audit read -- each caught.
+Browser pass with fakes: fields, "Latest N of M", hostile tool names/args
+rendered as text, long args truncated, client range check, save keeps the
+row open and shows the new history line, revoke click doesn't toggle the
+row, capped/revoked/expired states, keyboard toggle. The PGlite stub now
+carries the real `status` check constraint (an earlier test had used a
+`'suspended'` status the real schema rejects; fixed to `'rejected'`).

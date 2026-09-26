@@ -5855,7 +5855,7 @@ function renderKeyRow(r){
     <td title="${escapeHtml(r.created_by||'')}">${escapeHtml(creatorShort)}${via ? `<span class="dim">via ${escapeHtml(via)}</span>` : ''}</td>
     <td class="nw">${keysDate(r.created_at)}</td>
     <td><span class="keys-st-${escapeHtml(r.status)}">${KEY_STATUS_LABELS[r.status]||escapeHtml(r.status)}</span>
-      ${inert ? `<span class="dim keys-st-warn" title="The linked account is ${escapeHtml(r.account_status||'missing')}; the gateway rejects this key until it is an approved Team/Obsidian Member again.">account not approved &mdash; key won&rsquo;t work</span>` : ''}
+      ${inert ? `<span class="dim keys-st-warn" title="The gateway rejects this key: the linked account (${escapeHtml(r.account_status||'missing')}) isn't an approved Team/Obsidian Member, or it is banned or deleted in Supabase Auth.">account not eligible &mdash; key won&rsquo;t work</span>` : ''}
       <span class="dim">${statusSub}</span></td>
     <td class="keys-action"></td>`;
   if(r.status!=='revoked') renderRevokeAction(tr.querySelector('.keys-action'), r);

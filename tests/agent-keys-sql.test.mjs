@@ -43,7 +43,7 @@ before(async () => {
     create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;
     create schema extensions;
     create schema auth;
-    create table auth.users (id uuid primary key, email text);
+    create table auth.users (id uuid primary key, email text, banned_until timestamptz, deleted_at timestamptz);
     create function auth.uid() returns uuid language sql stable as $$
       select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
                       (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $$;
@@ -69,6 +69,7 @@ before(async () => {
   await db.exec(migration("20260810164048_admin_manages_profiles.sql"));
   await db.exec(migration("20260926150001_agent_api_keys.sql"));
   await db.exec(migration("20260926160000_agent_keys_admin.sql"));
+  await db.exec(migration("20260926165000_mcp_auth_banned_users.sql"));
   await db.exec(migration("20260926170000_agent_keys_admin_detail.sql"));
   await db.exec(`
     insert into auth.users values
@@ -416,6 +417,79 @@ test("an expiry change doesn't touch the credential: same hash, still authentica
     assert.equal((await q("select * from public.mcp_authenticate($1)", [hash])).length, 0);
     await q("reset role");
   });
+});
+
+// ---- banned / deleted Supabase Auth users (20260926165000) -----------------------------
+const gatewayAuth = async (q, hash) => {
+  await q("set local role mcp_gateway");
+  const rows = await q("select key_id from public.mcp_authenticate($1)", [hash]);
+  await q("reset role");
+  return rows.length;
+};
+
+test("a banned or soft-deleted owner's key stops authenticating immediately, like a revoked key", async () => {
+  await asOwner(async (q) => {
+    const k = await issueOwner(q, OPERATOR, "ban");
+    const hash = await sha256Hex(k.key);
+    assert.equal(await gatewayAuth(q, hash), 1, "works before");
+    await q(`update auth.users set banned_until = now() + interval '100 years' where id = '${OPERATOR}'`);
+    assert.equal(await gatewayAuth(q, hash), 0, "banned -> rejected");
+    await q(`update auth.users set banned_until = now() - interval '1 minute' where id = '${OPERATOR}'`);
+    assert.equal(await gatewayAuth(q, hash), 1, "ban expired -> works again (nothing cached)");
+    await q(`update auth.users set banned_until = null, deleted_at = now() where id = '${OPERATOR}'`);
+    assert.equal(await gatewayAuth(q, hash), 0, "soft-deleted -> rejected");
+  });
+});
+
+test("mcp_log_call writes nothing for a banned owner's key", async () => {
+  await asOwner(async (q) => {
+    const k = await issueOwner(q, OPERATOR, "ban log");
+    const hash = await sha256Hex(k.key);
+    await q(`update auth.users set banned_until = now() + interval '1 day' where id = '${OPERATOR}'`);
+    await q("set local role mcp_gateway");
+    await q("select public.mcp_log_call($1, 'get_x', null, false)", [hash]);
+    await q("reset role");
+    const [{ n }] = await q("select count(*)::int n from public.agent_api_key_calls where key_id = $1", [k.id]);
+    assert.equal(n, 0);
+  });
+});
+
+test("issue refuses a banned or deleted owner (unless the CLI's negative-test flag); list marks existing keys as won't-work", async () => {
+  const err = await asOwner(async (q) => {
+    await q(`update auth.users set banned_until = now() + interval '1 day' where id = '${CUSTOMER}'`);
+    try { await issueOwner(q, CUSTOMER); return null; } catch (e) { return e.message; }
+  });
+  assert.match(err ?? "(issued)", /banned or deleted in Supabase Auth/);
+  const deleted = await asOwner(async (q) => {
+    await q(`update auth.users set deleted_at = now() where id = '${CUSTOMER}'`);
+    try { await issueOwner(q, CUSTOMER); return null; } catch (e) { return e.message; }
+  });
+  assert.match(deleted ?? "(issued)", /banned or deleted/);
+  await asOwner(async (q) => {
+    await q(`update auth.users set banned_until = now() + interval '1 day' where id = '${CUSTOMER}'`);
+    assert.ok((await issueOwner(q, CUSTOMER, "neg", 90, true)).key, "negative-test flag still issues");
+  });
+  await asOwner(async (q) => {
+    const k = await issueOwner(q, CUSTOMER, "listed");
+    await q(`update auth.users set banned_until = now() + interval '1 day' where id = '${CUSTOMER}'`);
+    const row = (await q("select * from public.agent_key_list()")).find((r) => r.id === k.id);
+    assert.equal(row.status, "active");
+    assert.equal(row.owner_eligible, false);
+    await q(`update auth.users set banned_until = null where id = '${CUSTOMER}'`);
+    assert.equal((await q("select * from public.agent_key_list()")).find((r) => r.id === k.id).owner_eligible, true);
+  });
+});
+
+test("the fix keeps every grant: still mcp_gateway-only for the gateway functions, owner-only for the implementation", async () => {
+  for (const [role, ok] of [["mcp_gateway", true], ["anon", false], ["authenticated", false], ["service_role", false], ["mcp_reader", false]]) {
+    const r = await errorAs(role, null, "select * from public.mcp_authenticate(repeat('0', 64))");
+    assert.equal(r === null, ok, `${role} mcp_authenticate: ${r}`);
+    const l = await errorAs(role, null, "select public.mcp_log_call(repeat('0', 64), 'x', null, false)");
+    assert.equal(l === null, ok, `${role} mcp_log_call: ${l}`);
+  }
+  for (const role of ["anon", "authenticated", "service_role", "mcp_gateway", "mcp_reader"]) {
+    assert.match(await errorAs(role, null, "select * from public.agent_key_list()") ?? "(ok)", /permission denied/);
+  }
 });
 
 // ---- static: one implementation, and the page never touches the secret material -------

@@ -23,6 +23,7 @@ MISSING or SHOULD-BE-GONE.
 import pathlib
 import re
 import sys
+import time
 
 import psycopg2
 
@@ -71,18 +72,33 @@ def main():
     tables = {r[0] for r in cur.fetchall()}
     conn.rollback()
 
+    # One SHORT transaction per policy, always rolled back. `drop policy` takes
+    # an AccessExclusiveLock on the table; a savepoint rollback does NOT release
+    # it, so a single long transaction held exclusive locks on every table until
+    # the end -- against production that deadlocked with live traffic on the
+    # second run. lock_timeout makes us yield to real queries instead of queueing
+    # ahead of them; a timed-out/deadlocked attempt is retried, then reported.
     normalized = {}
+    unresolved = []
     try:
         for (table, name), (action, stmt, _) in intended.items():
             if action != "create" or table not in tables:
                 continue
-            cur.execute("savepoint p")
-            cur.execute(f'drop policy if exists "{name}" on public."{table}"')
-            cur.execute(stmt)
-            cur.execute(SNAPSHOT + " and tablename = %s and policyname = %s", (table, name))
-            row = cur.fetchone()
-            normalized[(table, name)] = row[2:] if row else None
-            cur.execute("rollback to savepoint p")
+            for attempt in range(5):
+                try:
+                    cur.execute("set local lock_timeout = '1500ms'")
+                    cur.execute(f'drop policy if exists "{name}" on public."{table}"')
+                    cur.execute(stmt)
+                    cur.execute(SNAPSHOT + " and tablename = %s and policyname = %s", (table, name))
+                    row = cur.fetchone()
+                    normalized[(table, name)] = row[2:] if row else None
+                    conn.rollback()
+                    break
+                except (psycopg2.errors.LockNotAvailable, psycopg2.errors.DeadlockDetected):
+                    conn.rollback()
+                    time.sleep(1 + attempt)
+            else:
+                unresolved.append(f"{table}.{name}")
     finally:
         conn.rollback()
         conn.close()
@@ -106,6 +122,10 @@ def main():
         if key not in live:
             problems += 1
             lines.append(f"MISSING         {table}.{name}  defined in {migration}, absent live")
+            continue
+        if key not in normalized:
+            problems += 1
+            lines.append(f"UNCHECKED       {table}.{name}  could not take the table lock after 5 attempts (live traffic); re-run")
             continue
         want, got = normalized[key], live[key]
         if want == got:

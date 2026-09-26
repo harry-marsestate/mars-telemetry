@@ -5718,3 +5718,26 @@ RULE: a dbt post-hook (or any automated re-apply step) must never write a
 security policy it wasn't explicitly given. Re-apply declared intent; refuse
 when there is none. Run `scripts/check_policy_drift.py` after any dbt run or
 policy migration.
+
+### Deployed and verified live (2026-09-26, after the owner's `supabase db push` of `20260926130000`)
+
+- `scripts/check_policy_drift.py` against live: **28 live policies, 28 MATCH,
+  0 problems** (`daily_weather_read` now MATCH, sourced from
+  `20260926130000_daily_weather_read_restore.sql`; `harvest_lots`/`work_events`
+  skipped as before).
+- Behaviour, SET LOCAL pattern, real ids: pending `749d26a6` ->
+  `daily_weather` **0**, `daily_derived` 0; rejected `e5e7d335` -> 0 / 0;
+  operator `87b9d9a0` -> 1040 / 1036; customer `9782853b` -> 1040 / 1036.
+- **The checker itself had a production-safety bug, found on this re-run.** It
+  re-created every policy inside ONE rolled-back transaction using savepoints;
+  `drop policy` takes an AccessExclusiveLock and rolling back to a savepoint does
+  not release it, so the run held exclusive locks on every checked table until
+  the end. The re-run hit `deadlock detected` against live traffic (Postgres
+  aborted the checker's transaction -- nothing changed). Fixed: one short
+  transaction per policy, `lock_timeout = 1500ms`, up to 5 retries, and any
+  policy that still can't be checked is reported as UNCHECKED (a problem, exit
+  1), never silently passed. The 28/28 result above is from the fixed version.
+
+RULE: a verification script that takes DDL locks on production tables must
+hold them for one statement's worth of time -- per-object transactions and a
+lock_timeout -- never across the whole run.

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mars-telemetry": {
+      "type": "http",
+      "url": "https://wwdpunaefaiazsjamrkc.supabase.co/functions/v1/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MARS_TELEMETRY_MCP_KEY}"
+      }
+    }
+  }
+}

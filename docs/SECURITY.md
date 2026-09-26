@@ -5741,3 +5741,484 @@ policy migration.
 RULE: a verification script that takes DDL locks on production tables must
 hold them for one statement's worth of time -- per-object transactions and a
 lock_timeout -- never across the whole run.
+
+## MCP agentic access (Phase 2, 2026-09-26): per-user API keys that resolve to the key owner's own RLS context
+
+Branch `feat/mcp-agentic-access`. Lets external agents (starting with Colin,
+from Claude Code / scripts / SDKs) call five read-only chat tools over MCP,
+authenticated by an API key that acts as **one specific user under that
+user's own RLS** -- never a service-role or admin bypass.
+
+### Auth model (approved Phase 1 "Option A")
+
+1. `POST /functions/v1/mcp` with `Authorization: Bearer mtk_<43 base64url>`
+   (32 random bytes). `verify_jwt = false`, like every other function here.
+2. Malformed header/key -> 401 without touching the database.
+3. SHA-256 of the key -> `mcp_authenticate(p_key_hash)` via the **anon**
+   client. That SECURITY DEFINER function returns `(key_id, user_id)` only
+   if the key is not revoked, not expired, and its user is
+   `status='approved'` with `role in ('operator','customer')` (explicit
+   allowlist, per the `current_role_name()` 'pending' RULE above); it stamps
+   `last_used_at` only on success. Zero rows -> 401. Every failure mode
+   returns the identical 401 so a caller can't tell which one it hit.
+4. `initialize` / `tools/list` need a valid key but sign nothing.
+   `tools/call` for a tool outside the round-one allowlist is rejected
+   (JSON-RPC -32602) **before** any token is signed or `runTool()` is
+   called, even though `runTool()`'s switch would dispatch `get_series`,
+   `get_vessels`, etc. Arguments are checked against the tool's own JSON
+   schema (types, enums, unknown keys, 200-char string cap) first, since an
+   MCP caller is an arbitrary program, not a schema-constrained model.
+5. Only then: sign a **60-second HS256 token** (`sub`=user_id,
+   `role`/`aud`=`authenticated` hard-coded, `iss`, `mcp_key_id`,
+   `app_metadata.provider='mcp_api_key'`) with the legacy JWT secret, build
+   a supabase-js client with it, resolve `current_data_mode()`/
+   `domain_reality()` exactly as chat/index.ts does, and call
+   `chat/tools.ts`'s `runTool()` **unchanged**. Every data query therefore
+   goes through PostgREST under the key owner's `auth.uid()`, the same path
+   their browser takes. The token is signed per call, held only in that
+   call's closure, never logged, returned, cached or persisted.
+6. `mcp_log_call()` appends `(key_id, tool, args, is_error)` to
+   `agent_api_key_calls` for every tools/call, including rejected ones.
+
+Signing is WebCrypto HMAC-SHA256 in `supabase/functions/mcp/auth.ts`
+(dependency-free, ~25 lines) rather than `jose` as the Phase 1 writeup
+named -- smaller surface, and the unit test verifies the signature with an
+independent `node:crypto` HMAC.
+
+**Known property, recorded rather than engineered around:** the signed
+token carries the key owner's *full* authority for its 60 seconds, not a
+read-only subset -- read-only comes from the tool allowlist in code. The
+token never leaves the function, so this only matters if the function
+itself were compromised, and in that case the signing secret already
+matters more.
+
+**Why this is not a service-role path:** `supabase/functions/mcp/` holds
+two credentials: the anon key (public by design) and the signing secret
+(`MCP_JWT_SECRET`, the legacy JWT secret, set by hand as this function's
+secret, read at exactly one site). It never constructs an admin client and
+never reads `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_SECRET_KEYS`/
+`SUPABASE_DB_URL`; `scripts/check-mcp-boundaries.mjs` fails the build
+loudly if any of those, or a second read of the signing secret, ever
+appears (mutation-tested: planting a service-role env read, a second
+secret read, and `get_vessels` in the allowlist produced exactly 3
+failures and exit 1).
+
+**The signing secret is the real risk this design accepts.** It can forge
+a token for any identity, including `service_role`, and rotating it also
+rotates the anon/service_role keys and every session. The Phase 1 writeup
+weighed this against Option B (transaction-scoped claims over a direct
+Postgres connection, no bearer token at all) and it was accepted in
+exchange for reusing `runTool()` verbatim over the identical PostgREST path.
+If that trade is ever revisited, B is the documented alternative.
+
+### Schema (`20260926120000_agent_api_keys.sql`)
+
+- `agent_api_keys(id, user_id -> auth.users, label, key_prefix, key_hash
+  bytea unique (32 bytes), created_at, created_by, last_used_at,
+  expires_at not null default now()+90 days, revoked_at)`
+- `agent_api_key_calls(id, key_id, tool, args jsonb (capped at 4 KB ->
+  {"truncated":true}), called_at, is_error)`
+- Both: RLS on with **zero policies** (deny-all, permanently, like
+  `stg_sensor_readings`) AND `revoke all from anon, authenticated,
+  service_role` -- both gates, per the RLS auto-enable entry, since
+  Supabase's default privileges would otherwise grant them.
+- `mcp_authenticate(text)`, `mcp_log_call(text, text, jsonb, boolean)`:
+  SECURITY DEFINER, `search_path=''`, EXECUTE revoked from PUBLIC and
+  granted to **anon only**. These are two new entries for this file's
+  service-role-equivalent access points list: the only way anything but the
+  table owner can see these tables. `mcp_log_call` takes the key *hash*,
+  not the key id, as proof of possession -- anon (whose key is public) can
+  execute it, so an id alone would let anyone forge audit rows.
+
+### Keys: `scripts/agent-keys.mjs`
+
+`issue` / `revoke` / `list` / `calls`, run by the owner against
+`DATABASE_URL` directly, never through PostgREST. The key is generated
+locally (`crypto.randomBytes(32)`), only its SHA-256 goes to the database,
+and the plaintext is printed once. Labels automatically get
+`[user <first 8 of uuid>]` appended. `issue` refuses users
+`mcp_authenticate()` would reject unless `--allow-unapproved` is passed
+(negative tests only). `--keychain` also stores the plaintext in the macOS
+login Keychain so `scripts/mcp-verify.mjs` can use it without it ever being
+printed or written to a file.
+
+### Round-one tools and the relation allowlist
+
+Tools: `get_berry_maturity`, `get_smoke_markers`, `get_wine_lab_results`,
+`get_lot_analyses`, `get_labour_summary`. Deferred: `get_series`,
+`get_derived_series`, `get_anomalies` (simulated-history risk) and
+`get_vessels`.
+
+The "*_current views only" rule is enforced as an **explicit allowlist**
+(`supabase/functions/mcp/allowlist.ts`, each entry with its reason), not a
+bare "no base tables" pattern. The two named base-table exceptions are
+`lot_analyses` and `lot_canonical_map`: InnoVint data has no
+reissue/superseded concept, so no `*_current` view exists to prefer, and
+duplicate lot objects are handled via `lot_canonical_map` (see the
+"get_lot_analyses duplicate-lot bug" entry). `check-mcp-boundaries.mjs`
+walks the `chat/tools.ts` functions reachable from the five allowlisted
+tools plus everything in `mcp/`, and fails on any relation not in the list.
+
+### Pre-deploy verification (2026-09-26)
+
+- `deno check` (Deno 2.9.6 via npx) passes for `mcp/index.ts` and, as a
+  regression check, `chat/index.ts`. The existing node chat regression
+  suite still passes (0 failures).
+- `tests/mcp-handler.test.ts`: **8/8 pass**. Key-shape parsing; token
+  claims and an HS256 signature checked by an independent `node:crypto`
+  HMAC; malformed -> 401 with zero DB lookups; unknown -> 401 after one
+  lookup; lookup failure -> 500 (fails closed); initialize + tools/list
+  return exactly the five tools and sign nothing; `get_series`,
+  `get_derived_series`, `get_anomalies`, `get_vessels` and an invented name
+  all rejected with -32602, with zero signing, zero `runTool` calls, and
+  each audited as an error; allowlisted calls sign one fresh token per
+  call and the token appears in neither the response body nor headers; bad
+  argument types rejected before signing.
+- `check-mcp-boundaries.mjs`: PASS. Reachable relations: exactly the 13
+  allowlisted entries, nothing else.
+- **Migration dry-run on the live database inside a rolled-back
+  transaction** (seed rows for active / revoked / expired / pending /
+  rejected / customer keys, all rolled back; `to_regclass` confirmed
+  nothing survived). As anon: `mcp_authenticate` returned 1 row for active
+  and customer, **0** for revoked, expired, pending, rejected, unknown,
+  non-hex and null. `last_used_at` was stamped only for the two that
+  passed. `mcp_log_call` wrote rows for the active key (oversized args
+  stored as `{"truncated": true}`) and **nothing** for the revoked key.
+  Direct `select` on either table: `permission denied` as anon,
+  authenticated (with Colin's claims) and service_role. EXECUTE on either
+  function: `permission denied` as authenticated and service_role. Default
+  `expires_at` = +90 days. RLS on, 0 policies, on both tables.
+- Found during that dry run: `user_profiles` row
+  `30346b0e-0866-4fa5-a209-49c9979bcc65` (customer/pending) has **no
+  matching `auth.users` row**, so an orphaned profile (the FK rejected a
+  seed key for it). Not investigated or changed this round; the pending
+  negative test uses `749d26a6-…` instead.
+
+### CORRECTION (2026-09-26): this project signs with ES256, not the legacy HS256 secret
+
+The Phase 1 design and the entry above state that the project uses the legacy
+HS256 JWT secret, based on an "empty" JWKS. That check was wrong: `.env`'s
+`SUPABASE_URL` is `https://<ref>.supabase.co/rest/v1/`, so
+`$SUPABASE_URL/auth/v1/.well-known/jwks.json` went to PostgREST, whose 404 JSON
+has no `keys` array. Re-checked against the origin: the JWKS serves one
+**ES256** key. The project has already migrated to asymmetric signing keys; the
+legacy HS256 secret is still accepted (the HS256 legacy anon key still works)
+but is a key being retired.
+
+Consequence for Option A as built on this branch: signing with
+`MCP_JWT_SECRET` works only while the legacy secret stays trusted, and would
+break the function the moment the migration is completed by revoking it. The
+auth mechanism is being re-proposed before any deploy step is run -- see the
+next MCP entry. `scripts/mcp-verify.mjs` had the same `/rest/v1/` URL bug
+(fixed in the preceding commit).
+
+RULE: never build a URL by appending to `.env`'s `SUPABASE_URL` -- take
+`new URL(SUPABASE_URL).origin` first. A wrong-service 404 can parse as a
+plausible "empty" answer, exactly as it did here.
+
+## MCP revised auth (Option B'): a read-only gateway role replaces the signed JWT (2026-09-26)
+
+Supersedes the Option A auth model in the MCP entry above (append-only; that
+entry stays as the record of what was first built). Option A signed a 60s
+HS256 token with the legacy JWT secret -- a key this project has already
+rotated away from (see the CORRECTION above), which can also mint
+`service_role`. Nothing in `supabase/functions/mcp/` signs anything now.
+
+### The model
+
+1. Same front door: `Authorization: Bearer mtk_...` -> SHA-256 ->
+   `mcp_authenticate()`, same checks (not revoked, not expired, profile
+   approved, role in operator/customer), same identical-401 for every failure.
+2. The function connects **directly to Postgres** (Supavisor transaction
+   pooler) as **`mcp_gateway`** -- its only credential (`MCP_GATEWAY_DB_URL`,
+   set by hand, read at one site). `mcp_gateway` can EXECUTE
+   `mcp_authenticate`/`mcp_log_call` and `SET ROLE mcp_reader`. Nothing else:
+   no table grants, NOINHERIT, no BYPASSRLS, connection limit 20,
+   `statement_timeout 15s`, `idle_in_transaction_session_timeout 10s`.
+3. Each `tools/call` runs in ONE transaction (`gateway.ts`):
+   `set transaction read only` -> `set local statement_timeout` ->
+   `set_config('request.jwt.claims', {sub: <key owner's real uid>}, true)` ->
+   `set local role mcp_reader` -> assert `current_user = mcp_reader`,
+   `claims.sub = owner`, `transaction_read_only = on` (else no query runs) ->
+   the tool. All transaction-local, per the transaction-pooler RULE above.
+4. **`mcp_reader`**: SELECT on exactly 14 relations, nothing else -- the 9 the
+   tools name (`allowlist.ts` TABLES_AND_VIEWS: the 7 views + `lot_analyses`,
+   `lot_canonical_map`) plus the 5 base tables beneath the security_invoker
+   views (`VIEW_DEPENDENCIES`: `lab_samples`, `lab_results`,
+   `labour_actuals`, `ets_lot_bridge`, `ets_analyte_bridge` -- the complete
+   pg_depend closure; Postgres checks the caller's privileges through an
+   invoker view, so without them every view read is `permission denied`).
+   Every public policy is `to public`, so RLS applies to `mcp_reader`
+   unchanged: queries run under the key owner's own `auth.uid()`,
+   `current_role_name()`, `current_data_mode()`.
+5. `chat/tools.ts` `runTool()` runs **unchanged** over `adapter.ts`, a
+   PostgREST-compatible builder covering exactly the supabase-js calls the five
+   tools make (`from/select(+::casts)/eq/gte/lte/ilike/in/not-in/order/limit/
+   maybeSingle`, `rpc` for `current_data_mode`/`domain_reality`). Anything else
+   throws rather than being mis-translated. Postgres builds the JSON
+   (`json_agg` over the select subquery, as PostgREST does), filter values are
+   cast to the column's catalog type (PostgREST's untyped-literal coercion),
+   `ilike` maps `*`->`%`, reads cap at `MAX_ROWS = 1000`.
+
+Enforced three ways: at runtime (handler tool allowlist; adapter refuses any
+relation/rpc outside the allowlist), in Postgres (the grants), and statically
+(`check-mcp-boundaries.mjs`: no service-role/JWT-secret/supabase-js/anon-key
+pattern in `mcp/`, one env read, every relation reachable from the five tools
+and every `public.<x>` in this directory's SQL is allowlisted, no
+VIEW_DEPENDENCIES table named directly, and `mcp_reader`'s migration grants
+**equal** the allowlist exactly. Mutation-tested: planting a JWT-secret read,
+a supabase-js import, a raw `public.lab_samples` query and a `vessels` grant
+produced exactly those 6 failures and exit 1).
+
+### Also fixed on the way: `update_own_name()` was callable by every role
+
+SECURITY DEFINER, writes `user_profiles` for `auth.uid()`, default ACL =
+EXECUTE for PUBLIC -- so any role, including a "read-only" one holding someone
+else's claims, could rename that user. Only caller: the web app, as
+`authenticated`. Migration `20260926150002` narrows EXECUTE to
+`authenticated`.
+
+### Parity test: the adapter vs the real REST API in a live browser session
+
+`scripts/mcp-parity.mjs`. `runTool()` for the five tools over 15 inputs
+chosen to walk every query path (every filter kind, the lot_name `not-in`
+exclusion, the unfiltered capped scope query, `maybeSingle` coverage lookups,
+empty results), plus three max-rows probes and both RPCs -- 46 queries,
+recorded through the adapter as the Demo operator (`e4586cd6`, `set local
+role authenticated`), then every recorded builder chain replayed verbatim
+through the live app's own supabase-js client (`sb`) at
+telemetry.marsestates.com, logged in as that same account (confirmed:
+`sb.auth.getUser()` -> `e4586cd6...`, `current_role_name` -> operator).
+SHA-256 of canonical JSON per query (browser hash prefixes of 80 bits):
+
+- **46 queries: 44 byte-identical, 2 count-only, 0 failed.** The two
+  count-only are the unordered queries that hit the cap (the unfiltered
+  get_lot_analyses scope query and the unordered probe), where the two sides
+  may legitimately return different 1000-row subsets -- both returned 1000,
+  and in this run the hashes also matched.
+- **1,000-row cap: identical.** `lot_analyses` (1405 rows) unordered -> 1000
+  vs 1000; ordered, no limit -> 1000 vs 1000 (same rows); ordered
+  `.limit(5000)` -> 1000 vs 1000 (the cap lowers, never raises).
+- `current_data_mode` (scalar) and `domain_reality` (125 rows) identical.
+- Identity: runTool output for Colin's two accounts (`87b9d9a0`, `03b52829`)
+  is **15/15 identical** to the Demo operator's; a customer (`9782853b`) is
+  **0/15 identical** (0 rows everywhere except `lot_canonical_map`, `using
+  (true)` by design) -- RLS carries through the adapter.
+
+**Limits, stated plainly:** the browser side was the Demo operator's session,
+not Colin's (none available); Colin-equivalence rests on the adapter-side
+15/15 comparison above, both being approved operators with `data_mode = all`.
+The parity recording ran as `authenticated`; `mcp_reader`'s privileges were
+checked separately (next section) and will be re-checked live post-deploy.
+
+### Live dry-run of the migrations (rolled-back transaction, 2026-09-26)
+
+Applied `20260926150000..02` inside one transaction on live, then walked the
+real privilege path `postgres -> mcp_gateway -> mcp_reader`, then rolled back
+(`pg_roles` afterwards: no `mcp_%` roles):
+- `mcp_reader` table grants: exactly the 14. `mcp_gateway`: none.
+  `update_own_name` ACL `authenticated` only; `mcp_authenticate`/
+  `mcp_log_call` `mcp_gateway` only. Membership gateway->reader:
+  `set_option t, inherit_option f, admin_option f`.
+- As `mcp_gateway`: `mcp_authenticate` works (1 row for a seeded key),
+  `mcp_log_call` works; `select` on `lot_analyses` and `agent_api_keys` ->
+  **permission denied**.
+- Switched to `mcp_reader` with Colin's claims: `current_role_name()` =
+  operator, `data_mode` = all; allowlisted counts berry 14, samples 44,
+  results 270, reconciliation 93, labour by category 50 / by month 177 /
+  coverage 3, lot_analyses 1405, canonical map 3.
+- As `mcp_reader`, **all denied**: `vessels`, `user_profiles`,
+  `daily_weather`, `sensor_readings`, `agent_api_keys`,
+  `mcp_authenticate()`, `update_own_name()`, INSERT into `lot_canonical_map`,
+  UPDATE `lot_analyses`, DELETE `lab_samples`.
+- Read-only transaction: `update_own_name()` (definer) inside `set
+  transaction read only` as `authenticated` -> `cannot execute UPDATE in a
+  read-only transaction`; the profile was unchanged.
+
+**Two test artifacts worth recording, so nobody trusts them later:**
+1. `set local role postgres` / `authenticated` *succeeded* while `current_user`
+   was `mcp_reader` -- because SET ROLE is checked against the SESSION user,
+   which in that test was `postgres`. It says nothing about production, where
+   the session user is `mcp_gateway`; that is verified from the catalog instead
+   (`pg_has_role('mcp_gateway', <role>, 'SET')` for every role), in
+   `mcp-verify.mjs` section 2d.
+2. The first read-only check ran under psql's `ON_ERROR_ROLLBACK`, which wraps
+   each statement in a savepoint -- `SET TRANSACTION READ ONLY` inside that
+   subtransaction did not stick, and the definer write went through (rolled
+   back). Re-run without savepoints: blocked. `gateway.ts` issues it as the
+   first statement after BEGIN and asserts `transaction_read_only = on` before
+   any tool query; a unit test covers the assertion.
+
+RULE: never test `SET TRANSACTION`/`SET ROLE` semantics from a session whose
+session user is `postgres` or under psql `ON_ERROR_ROLLBACK` and treat the
+result as describing the gateway -- both silently change the answer.
+
+### Residual risks, accepted and documented (not fixed on this branch)
+
+- **The gateway credential can read as ANY user.** It chooses the claims, so a
+  leaked `MCP_GATEWAY_DB_URL` can read the 14 relations under any account's
+  RLS (including an admin's). It cannot write, bypass RLS, or become any
+  other role. Strictly narrower than the legacy JWT secret (mints anything,
+  including `service_role`) and than the auto-injected `SUPABASE_DB_URL`.
+- **PUBLIC grants a direct connection inherits.** `net.http_*` (pg_net:
+  outbound HTTP from the database) and `extensions.pg_stat_statements`
+  (query statistics) are granted to PUBLIC -- unreachable through PostgREST,
+  but reachable by any role that connects directly, `mcp_gateway` included.
+  Supabase-managed extension grants; changing them is a separate decision.
+- The five VIEW_DEPENDENCIES base tables are SELECT-able by `mcp_reader`
+  directly (RLS still applies). Tool code can't name them (adapter refuses,
+  boundary check fails); a compromised gateway could.
+
+### Not yet verified (needs the owner's manual steps first)
+
+The live function path end to end: gateway login through the pooler,
+positive calls with both Colin keys, negative cases (malformed / unknown /
+revoked / pending-account key / non-allowlisted tool), the audit log, and
+section 2d's catalog checks after the real `db push`. Harness:
+`scripts/mcp-verify.mjs`.
+
+### First live run after deploy (2026-09-26): function fails closed on a gateway password mismatch; parity re-recorded as mcp_reader
+
+**Deploy state confirmed first:** migrations through `20260926150002` applied
+(no local-only / remote-only); `mcp_gateway` can log in; keys listed by
+prefix only. The owner re-issued both Colin keys after the first pair's
+plaintext was pasted into a chat transcript: `mtk_xLx_66Pe` and
+`mtk_dTzu_nYj` were revoked ~2 minutes after issue and show `last used
+never` -- never presented to the function. Active: `mtk_vIfyFJL1` (Colin,
+`87b9d9a0`), `mtk_KqE9zEvd` (Colin, `03b52829`), `mtk_NLNErWJD` (pending
+`749d26a6`, negative test).
+
+**Every data call failed, HTTP 500 (one 503).** Diagnosis, in order:
+- A malformed key -> `401` in 0.34s: the function boots and runs this code.
+- A well-formed unknown key -> `500 {"code":-32603,"message":"Authentication
+  backend unavailable"}` in ~1.1s: the first DB call (`mcp_authenticate`)
+  throws.
+- Catalog: role, grants and `pgbouncer.get_auth` all correct;
+  `pg_stat_activity` shows **zero** `mcp_gateway` sessions.
+- Function log (dashboard, read-only): every request logged `mcp: key lookup
+  failed password authentication failed for user "mcp_gateway"`. The pooler
+  resolved the tenant/role (username format correct); the password in
+  `MCP_GATEWAY_DB_URL` does not match the role's. Owner's manual fix.
+
+**Fail-closed behaviour, confirmed live:** no key was stamped `last_used_at`,
+no `agent_api_key_calls` row was written, no data was returned, and the 500
+body names no cause.
+
+**Two harness bugs this run exposed, fixed (`mcp-verify.mjs`):**
+1. "both Colin keys return identical output" PASSED on two failed calls
+   (comparing two empty strings). It now requires real output on both sides.
+2. The harness only avoided revoking `mtk_KqE9zEvd` because it happened to
+   crash first (`JSON.parse` of an empty body in 2b). It now STOPs after the
+   positive section if any positive call failed -- before the cross-checks,
+   the negative cases and the revocation -- and runs the catalog checks (2d)
+   first so they report regardless. Re-run against the still-broken function:
+   `STOP: 14 positive call(s) failed ... (no key has been revoked)`;
+   `mtk_KqE9zEvd` confirmed still active.
+
+**Live catalog role boundaries (section 2d), verbatim, 4/4 PASS:**
+- `mcp_reader`: SELECT on exactly the 14 allowlisted relations, other table
+  grants: none.
+- `mcp_gateway`: `{"login":true,"bypassrls":false,"set_reader":true,
+  "inherits_reader":false,"other_set_targets":"none"}` -- the SET-ROLE
+  question the postgres-session dry-run could not answer.
+- `mcp_reader`: `{"login":false,"bypassrls":false,"other_set_targets":"none"}`.
+- `update_own_name {postgres=X/postgres,authenticated=X/postgres}`;
+  `mcp_authenticate {postgres=X/postgres,mcp_gateway=X/postgres}`.
+
+**Parity re-recorded as `mcp_reader`** (the real role now exists; rolled-back
+transactions with a transaction-local self-grant), same 46 queries, compared
+to the live browser session's REST results: **44 byte-identical, 2
+count-only (unordered + capped, 1000 vs 1000), 0 failed**, same identity
+(`e4586cd6`). runTool output `authenticated` vs `mcp_reader`: **15/15
+identical**. Demo vs Colin `87b9d9a0` and vs Colin `03b52829`, both as
+`mcp_reader`: **15/15 identical** each.
+
+**Still not verified (blocked on the password fix):** gateway login through
+the pooler; both keys x 5 tools through the function with DB cross-checks;
+all negative cases through the function; revoke-then-reject timing; audit-log
+rows.
+
+### Gateway password fixed, rotated, and the full live verification (2026-09-26)
+
+**Round trip confirmed** after the owner's password/secret update (secret last
+set 16:07:17Z): `mtk_vIfyFJL1` -> `initialize` 200, `tools/list` = the 5 tools,
+`get_berry_maturity(2026, B2)` 200 with real rows; `last_used_at` stamped;
+audit row written; `pg_stat_activity` shows an `mcp_gateway` session via
+`Supavisor`. The owner's two "Trigger redeploy" commits (`7ccf1bf`,
+`79e72ad`) were checked: both empty, no credential committed.
+
+**Final rotation** (`scripts/rotate-gateway-password.mjs`, new): `openssl
+rand -hex 32` into memory only; `ALTER ROLE mcp_gateway PASSWORD` with a
+locally computed SCRAM-SHA-256 verifier (the plaintext never reached the
+server, so it cannot appear in a Postgres statement log -- a plain `ALTER ROLE
+... PASSWORD '<plaintext>'` from the SQL editor can); pooler login as
+`mcp_gateway` with the new password **failed on attempt 1 (immediately after
+the ALTER) and succeeded 5s later** -- the pooler caches role credentials
+briefly, the likely reason earlier manual rotations looked broken across
+redeploys; then `supabase secrets set`; redeployed; deployed files
+byte-compared to the branch (all match). The superseded password (typed into
+chat/terminal history) no longer authenticates new connections.
+
+**Two bugs found by the live run, fixed and redeployed:**
+1. `agent_api_key_calls.args` was double-encoded -- stored as a JSON *string*
+   (`jsonb_typeof = 'string'`) because `logCall` stringified a value
+   postgres.js already JSON-encodes for a `jsonb` parameter. Fixed; the next
+   row is `object`. Row 1 is left as-is (append-only audit history).
+2. An authenticated `GET` (the optional standalone SSE stream every MCP client
+   opens) was answered with a keepalive-only `text/event-stream` that stayed
+   open **>105s** (measured) -- one held Edge Function invocation per connected
+   client, for a stateless server that never sends server-initiated messages.
+   Now `405`, `Allow: POST, DELETE` (spec-permitted; clients skip the stream).
+   Auth still runs first. New unit test; 19/19 pass.
+
+**Harness bug fixed:** the pending-key DB check still called
+`mcp_authenticate` as `anon` (Option A's grant) and crashed with 42501 under
+B'. It now runs as `mcp_gateway`, and "not callable as anon or authenticated"
+is its own assertion.
+
+**Full live verification, `mcp-verify.mjs` (no `--revoke-prefix`): 51/51
+PASS.** Storage 5/5 (hash-only, plaintext in no column); role boundaries 4/4;
+both Colin keys x 5 tools all 200/`isError=false` with byte-identical outputs
+across the two accounts; DB cross-checks for both accounts (berry 10 vs 10
+rows; labour 2024 hours 5563.12 / labour $298,652.13 exact; lot analyses 8 vs
+8); RLS restriction (operators see rows, customer and pending 0 in all 5
+relations); 401 for no header / malformed x3 / the anon key / an unknown key;
+`get_series`, `get_vessels`, `get_derived_series`, `get_anomalies` rejected
+(-32602) and audited; bad argument type rejected before any query;
+`mcp_authenticate` denied to anon and authenticated (42501); pending key
+`mtk_NLNErWJD` -> 401, 0 rows from `mcp_authenticate` as `mcp_gateway` (Colin
+contrast 1), `last_used_at` null.
+
+**Real client check:** the official MCP TypeScript SDK client (1.30.1,
+negotiated protocol 2025-11-25) against the deployed endpoint: connect,
+`listTools` (5, valid schemas), `callTool` `get_labour_summary(2026,
+2026-08)` -> display totals 365.19 h / $25,812.34 with the month-scoped
+coverage note, `get_vessels` rejected, clean close; raw
+`notifications/initialized` 202, `GET` 405, `DELETE` 200.
+
+**Not verified this round:** the revocation case (skipped -- it revokes a
+real Colin key; owner's decision pending); Claude Code's `${VAR}` header
+expansion in `.mcp.json` (project-scoped servers need interactive approval,
+not given); throughput/latency under concurrent agents (single calls take
+~2.5-4.5s).
+
+### Revocation verified, test keys retired, owner's key issued (2026-09-26)
+
+- **Revocation, live, through the function:** a 1-day throwaway key
+  (`mtk_O9WU1CIb`, owner's account `5bb6b29e`, issued `--keychain --no-print`
+  so its plaintext was never displayed) returned 200, was revoked at
+  `16:33:14.274Z` (DB clock), and the very next request -- sent `+7ms` by the
+  client clock -- returned **401**, as did a `tools/call`. Nothing is cached.
+  Used instead of revoking Colin's real `mtk_KqE9zEvd`. Full harness with the
+  revocation case: **54/54 PASS**.
+- **Retired:** `mtk_NLNErWJD` (the pending-account negative-test key) revoked
+  `16:33:28Z`. Active keys now: Colin `mtk_vIfyFJL1`, Colin `mtk_KqE9zEvd`, and
+  the owner's `mtk_jvOeHpCG`.
+- **Owner's key:** `mtk_jvOeHpCG` ("Harry agent key", acts as `5bb6b29e`,
+  data_mode all, expires 2026-12-25), issued `--keychain --no-print` -- it went
+  straight into the owner's macOS Keychain and was never displayed. Verified
+  with the official MCP SDK client: connect, 5 tools, `get_labour_summary(2026,
+  2026-08)` real totals, `get_vessels` rejected; audited under its prefix.
+- **Client config:** project `.mcp.json` committed (no secret; header reads
+  `${MARS_TELEMETRY_MCP_KEY}`). Claude Code's project-server approval is
+  interactive, so that expansion is documented, not yet verified in Claude Code.

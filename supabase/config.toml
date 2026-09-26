@@ -44,3 +44,9 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/ingest-innovint/deno.json"
 entrypoint = "./functions/ingest-innovint/index.ts"
+
+[functions.mcp]
+enabled = true
+verify_jwt = false
+import_map = "./functions/mcp/deno.json"
+entrypoint = "./functions/mcp/index.ts"

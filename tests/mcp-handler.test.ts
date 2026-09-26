@@ -135,3 +135,13 @@ Deno.test("arguments are schema-checked before runTool", async () => {
   assertEquals(calls.runTool, []);
   assertEquals(calls.scoped.length, 0);
 });
+
+Deno.test("authenticated GET (standalone SSE stream) -> 405 Allow: POST, DELETE; unauthenticated GET -> 401", async () => {
+  const { handler, calls } = harness();
+  const get = (auth: string | null) => new Request("http://local/mcp", { method: "GET", headers: auth ? { Authorization: auth, Accept: "text/event-stream" } : { Accept: "text/event-stream" } });
+  const ok = await handler(get(`Bearer ${GOOD_KEY}`));
+  assertEquals(ok.status, 405);
+  assertEquals(ok.headers.get("Allow"), "POST, DELETE");
+  assertEquals((await handler(get(null))).status, 401);
+  assertEquals(calls.scoped.length, 0);
+});

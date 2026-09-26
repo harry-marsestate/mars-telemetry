@@ -120,6 +120,15 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
     if (!identity) return unauthorized();
     const { keyId, userId } = identity;
 
+    // Stateless server: it never sends server-initiated messages, so the
+    // optional GET SSE stream has nothing to carry. Left to the transport, a GET
+    // opened a keepalive-only stream that stayed open (>100s measured live) and
+    // held an Edge Function invocation per connected client for no benefit. The
+    // MCP spec lets the server answer 405 here; clients then skip the stream.
+    if (req.method === "GET") {
+      return new Response(null, { status: 405, headers: { Allow: "POST, DELETE" } });
+    }
+
     // Stateless: a fresh server + transport per HTTP request, no session ids,
     // plain JSON responses (every tool here is a single request/response).
     const server = new Server({ name: "mars-telemetry", version: "1.0.0" }, { capabilities: { tools: {} } });

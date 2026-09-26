@@ -390,6 +390,65 @@ await withDb(async (db) => {
     `select array_to_string(p.proacl, ',') acl from pg_proc p where p.oid = 'public.mcp_authenticate(text)'::regprocedure`)).rows;
   verdict("mcp_authenticate still EXECUTE for mcp_gateway only", /mcp_gateway=X/.test(gacl.acl) && !/(^|,)=X|anon=X|authenticated=X|service_role=X/.test(gacl.acl), gacl.acl);
 
+  out("\n## 4c. Service accounts (20260926180000)");
+  const [col] = (await db.query(
+    `select c.column_default, pg_get_constraintdef(k.oid) chk
+       from information_schema.columns c
+       left join pg_constraint k on k.conrelid = 'public.user_profiles'::regclass and k.conname = 'user_profiles_account_type_check'
+      where c.table_schema = 'public' and c.table_name = 'user_profiles' and c.column_name = 'account_type'`)).rows;
+  verdict("user_profiles.account_type exists, default 'human', only human/service",
+    !!col && /'human'/.test(col.column_default ?? "") && /human/.test(col.chk ?? "") && /service/.test(col.chk ?? ""), JSON.stringify(col ?? null));
+  const [never] = (await db.query(
+    "select pg_get_constraintdef(oid) def, convalidated from pg_constraint where conrelid = 'public.user_profiles'::regclass and conname = 'user_profiles_service_never_admin'")).rows;
+  verdict("constraint: a service account can never be admin (validated)", !!never && never.convalidated && /service/.test(never.def) && /is_admin/.test(never.def), never?.def ?? "missing");
+  const [trig] = (await db.query(
+    "select tgenabled from pg_trigger where tgrelid = 'public.user_profiles'::regclass and tgname = 'guard_account_type' and not tgisinternal")).rows;
+  verdict("trigger guard_account_type exists and is enabled", trig?.tgenabled === "O", JSON.stringify(trig ?? null));
+  const [{ def: hnu }] = (await db.query("select pg_get_functiondef('public.handle_new_user()'::regprocedure) def")).rows;
+  verdict("handle_new_user takes account_type from raw_app_meta_data only (users control raw_user_meta_data)",
+    /raw_app_meta_data->>'account_type'/.test(hnu) && !/raw_user_meta_data->>'account_type'/.test(hnu));
+  const types = (await db.query("select account_type, count(*)::int n from public.user_profiles group by 1 order by 1")).rows;
+  out(`  profiles by account_type: ${types.map((t) => `${t.account_type}=${t.n}`).join(" ")}`);
+
+  // Flip a HUMAN profile to 'service' (and, below, a service one to 'human'):
+  // a same-value update is allowed, so the ids must be chosen by type.
+  const [human] = (await db.query("select id from public.user_profiles where account_type = 'human' and id <> $1 order by id limit 1", [admin.id])).rows;
+  const flipAs = (id, to) => rolledBack(db, async ({ q, as }) => {
+    const r = {};
+    await q("savepoint a");
+    try { await q("update public.user_profiles set account_type = $2 where id = $1", [id, to]); r.owner = "SUCCEEDED"; }
+    catch (e) { r.owner = e.message; await q("rollback to savepoint a"); }
+    await as("authenticated", claimsFor(admin.id, admin.email, fresh()));
+    await q("savepoint b");
+    try { await q("update public.user_profiles set account_type = $2 where id = $1", [id, to]); r.admin = "SUCCEEDED"; }
+    catch (e) { r.admin = e.message; await q("rollback to savepoint b"); }
+    return r;
+  });
+  const flip = await flipAs(human.id, "service");
+  verdict(`human ${short(human.id)} can't be turned into a service account -- as the owner`, /cannot change/.test(flip.owner), flip.owner);
+  verdict(`human ${short(human.id)} can't be turned into a service account -- as an admin via the REST path`, /cannot change/.test(flip.admin), flip.admin);
+
+  const [svc] = (await db.query("select id from public.user_profiles where account_type = 'service' order by id limit 1")).rows;
+  if (!svc) out("SKIP  never-admin behaviour: no service account exists yet (re-run after the first `service-accounts.mjs create`)");
+  else {
+    const promote = await rolledBack(db, async ({ q, as }) => {
+      const r = {};
+      await q("savepoint a");
+      try { await q("update public.user_profiles set is_admin = true where id = $1", [svc.id]); r.owner = "SUCCEEDED"; }
+      catch (e) { r.owner = e.message; await q("rollback to savepoint a"); }
+      await as("authenticated", claimsFor(admin.id, admin.email, fresh()));
+      await q("savepoint b");
+      try { await q("update public.user_profiles set is_admin = true where id = $1", [svc.id]); r.admin = "SUCCEEDED"; }
+      catch (e) { r.admin = e.message; await q("rollback to savepoint b"); }
+      return r;
+    });
+    verdict(`service account ${short(svc.id)} can't be made admin -- owner and admin`,
+      /service_never_admin/.test(promote.owner) && /service_never_admin/.test(promote.admin), `${promote.owner} | ${promote.admin}`);
+    const back = await flipAs(svc.id, "human");
+    verdict(`service account ${short(svc.id)} can't be turned human (then promoted) -- owner and admin`,
+      /cannot change/.test(back.owner) && /cannot change/.test(back.admin), `${back.owner} | ${back.admin}`);
+  }
+
   out("\n## 5. pg_stat_statements");
   if (secrets.length < 3) {
     verdict("pg_stat_statements check had a generated key to search for", false);

@@ -23,6 +23,15 @@ export default {
       if (!(old_record?.confirmed_at == null && record?.confirmed_at != null)) {
         return Response.json({ ok: true, skipped: "not a confirmation transition" }, { status: 200 });
       }
+      // Service accounts (scripts/service-accounts.mjs) are created confirmed
+      // through the Admin API, so they hit this same transition -- but nobody
+      // signed up and there's nothing to approve (the script approves them
+      // itself). account_type is set at INSERT from app_metadata and can't
+      // change afterwards (migration 20260926180000), so the payload's value
+      // is authoritative.
+      if (record?.account_type === "service") {
+        return Response.json({ ok: true, skipped: "service account" }, { status: 200 });
+      }
 
       // user_profiles has no email column -- it lives on auth.users, so it
       // has to be looked up via the admin API, not the webhook payload.

@@ -6511,3 +6511,102 @@ the live definitions of all four functions contain the predicate.
 Mutation-tested: dropping the ban predicate or the `deleted_at` predicate
 from `mcp_authenticate`, or the ban predicate from `mcp_log_call` -- each
 caught.
+
+## Service accounts: non-human identities for AI agents' keys (migration `20260926180000`, not yet applied)
+
+**Why an auth user at all.** `user_profiles.id` and `agent_api_keys.user_id`
+are both foreign keys to `auth.users`, and the gateway resolves RLS and
+`data_mode` from the key owner's profile on every request -- a key has no
+permissions of its own. So a service account is an ordinary `auth.users` +
+`user_profiles` pair; nothing in the gateway, `mcp_authenticate()` or the
+handler's `data_mode` lookup changes (tested: a service account's key
+authenticates as that account, with its own role/scope/`data_mode`).
+
+**Shape** (`scripts/service-accounts.mjs create`, owner-only: Admin API with
+the service-role key + `DATABASE_URL`; no browser-reachable path):
+`svc-<name>@service.invalid`, email confirmed (like any working account),
+**no password, no ban**, `app_metadata.account_type = 'service'`, then
+approved with the requested role / customer scope / `data_mode` (default
+`real_only`). Nobody can sign in as one: no password to enter (and the
+password grant also needs one to exist), the reserved `.invalid` domain can't
+receive a magic link / OTP / recovery email, and no Google account can have
+that address. **No ban, deliberately**: a ban now kills the owner's keys
+(banned-user fix above), which keeps "ban" a uniform incident kill switch --
+including for service accounts.
+
+**Guardrails, all in the database:**
+- `user_profiles.account_type` (`human` default / `service`), set only by
+  `handle_new_user()` from `raw_app_meta_data` -- which only the service role
+  and GoTrue can write. **Never** from `raw_user_meta_data`: a signing-up
+  user controls that, so reading it would let anyone self-declare as a
+  service account (tested; mutation-tested). Anything but exactly `service`
+  is `human`, so the signup trigger can't throw on odd input.
+- `user_profiles_service_never_admin`: a service account can never have
+  `is_admin` -- enforced by the table, not just the UI, since
+  `admin_manages_profiles` lets an admin update any column over REST.
+- `guard_account_type` trigger: `account_type` can't change after creation,
+  either direction, for anyone (else: flip service -> human -> admin).
+- The web app never offers "Grant admin privileges" for a service account --
+  not in Accounts, not in the Approve form (checked with fakes, including
+  that saving/approving one sends no `is_admin: true`).
+
+**Admin notification.** A confirmed service account fires the same
+`confirmed_at` transition as a signup. `notify-admin-approval` now skips
+`record.account_type === 'service'` (set at INSERT, immutable, so the
+webhook payload's value is authoritative). **That Edge Function change needs
+its own deploy -- before the first service account is created**, or you'll
+get one "new user" email per creation (harmless, just noise). The CLI
+approves the account itself, so it never waits in the pending queue.
+
+**Scope model.** An account defines scope (role + customer scope +
+`data_mode`); a key defines the agent (label, prefix, its own audit trail,
+revoke, expiry). One service account per distinct scope, one key per agent.
+Kill switches: revoke a key (one agent), `service-accounts.mjs disable`
+(un-approve: every key it holds), or ban it in Supabase Auth (same).
+Deleting a service account cascades away its keys and their audit history
+-- prefer disable.
+
+**Trade-offs.** Service accounts are `auth.users` rows that aren't people
+(visible in the dashboard's Users list, recognisable by `svc-...@service.invalid`
+and `app_metadata.account_type`). Someone with dashboard or service-role
+access could set a password on one -- but that access is already
+superior to anything the account can do. Considered and rejected: keys with
+no linked user and their own role/`data_mode` columns (would change
+`mcp_authenticate`, the gateway's claims and every RLS helper).
+
+**Verification (offline):** SQL tests 26/26 (adds: `account_type` from
+`app_metadata` only, `user_metadata` and odd values -> human; never-admin as
+owner and as admin over REST, human operator still promotable; immutability
+both directions, owner and admin, same-value update allowed; a service
+account's key works through the gateway and dies when un-approved or
+banned). Harness dry run 62/62 with a service account present (60/60 +
+SKIP without one). CLI end-to-end against a fake Admin API that behaves as
+GoTrue's source does (INSERT unconfirmed, then a separate confirming
+UPDATE): create operator/customer-scoped, request carries no password and
+no ban, profile is service/approved/real_only/not admin; every validation
+error stops before any Admin API call; a profile that didn't come out as a
+service account gets its auth user deleted; list/disable/enable; disable
+refuses a human id. Mutation-tested: dropping the never-admin constraint,
+the immutability trigger, or reading `user_metadata` in `handle_new_user` --
+each caught.
+
+## Pending-approval queue: does any real signup skip it? No (2026-09-26 investigation)
+
+Prompted by my own earlier (wrong) claim that an account created already
+confirmed would skip `confirmed_at`. `handle_new_user()` inserts the profile
+without `confirmed_at`, and `on_auth_user_confirmed` fires only on an
+`email_confirmed_at` null -> not-null **UPDATE** -- so the question was
+whether GoTrue ever confirms inside the INSERT. From supabase/auth's
+source: it never does. Google sign-up (`external.go`), email sign-up with
+or without auto-confirm (`signup.go`) and Admin API create with
+`email_confirm` (`admin.go`) all INSERT unconfirmed and then call
+`user.Confirm()`, a separate `UpdateOnly(email_confirmed_at)`, so the
+trigger fires, `confirmed_at` is set, and the account reaches both the
+queue and the webhook. Production, read-only aggregate: all 3 Google users
+and every account since the trigger's migration (first on 2026-08-10) have
+`confirmed_at`. The only 2 accounts confirmed in auth but not on the
+profile (`f6df362d`, admin; `9782853b`) were created 2026-08-06, four days
+before the trigger existed, confirmed within milliseconds of creation
+(the seed/Admin-API pattern) and are both approved. **Current exposure:
+none.** Not changed. (The webhook itself is dashboard-configured and was
+not inspected.)

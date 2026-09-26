@@ -5377,7 +5377,7 @@ async function loadApprovalQueue(){
   list.innerHTML=`<div class="empty">Loading&hellip;</div>`;
 
   const { data: rows, error: profileErr } = await sb.from('user_profiles')
-    .select('id, first_name, last_name, role, customer_account_id, confirmed_at')
+    .select('id, first_name, last_name, role, customer_account_id, confirmed_at, account_type')
     .eq('status','pending')
     .not('confirmed_at','is',null)
     .order('confirmed_at',{ascending:true});
@@ -5470,11 +5470,13 @@ async function renderApproveForm(formHost, row, wrap){
         <option value="customer">${ROLE_LABELS.customer}</option>
       </select>
     </div>
+    ${row.account_type==='service' ? `
+    <div class="fgroup"><div class="keys-note">Service account &mdash; for agents&rsquo; API keys; it can&rsquo;t sign in or be an admin.</div></div>` : `
     <div class="fgroup">
       <label class="flabel queue-admin-label" style="display:flex; align-items:center; gap:8px; cursor:pointer">
         <input type="checkbox" class="queue-admin-check"> Grant admin privileges
       </label>
-    </div>
+    </div>`}
     <div class="queue-customer-fields" style="display:none">
       <div class="fgroup">
         <div class="flabel">Customer account ID</div>
@@ -5513,6 +5515,7 @@ async function renderApproveForm(formHost, row, wrap){
   // submit is_admin:true if a user checked it, switched to customer, and
   // confirmed without noticing the checkbox greyed out.
   function syncAdminAvailability(){
+    if(!adminCheck) return;   // service account: no admin option at all
     const isOperator = roleSelect.value==='operator';
     adminCheck.disabled = !isOperator;
     if(!isOperator) adminCheck.checked=false;
@@ -5564,7 +5567,7 @@ async function renderApproveForm(formHost, row, wrap){
 
     confirmBtn.disabled=true; cancelBtn.disabled=true;
 
-    const isAdmin = role==='operator' && adminCheck.checked;
+    const isAdmin = role==='operator' && !!adminCheck?.checked;
     const { error: updateErr } = await sb.from('user_profiles').update({
       status:'approved', role, is_admin: isAdmin,
       customer_account_id: role==='customer' ? accountId : null
@@ -5612,7 +5615,7 @@ async function loadAccountsList(){
 
   const { data: { session } } = await sb.auth.getSession();
   const { data: rows, error } = await sb.from('user_profiles')
-    .select('id, first_name, last_name, role, is_admin, data_mode')
+    .select('id, first_name, last_name, role, is_admin, data_mode, account_type')
     .eq('status','approved')
     .order('first_name', {ascending:true, nullsFirst:false});
 
@@ -5647,7 +5650,7 @@ function renderAccountRow(list, row, email, currentUserId){
     <div class="queue-row-hd">
       <div class="queue-row-id">
         <div class="queue-row-email">${safeEmail}</div>
-        <div class="queue-row-name">${ROLE_LABELS[row.role]||row.role}</div>
+        <div class="queue-row-name">${ROLE_LABELS[row.role]||row.role}${row.account_type==='service' ? ' &middot; Service account' : ''}</div>
       </div>
     </div>
     <div class="queue-approve-form" style="display:flex">
@@ -5659,11 +5662,13 @@ function renderAccountRow(list, row, email, currentUserId){
         <div class="flabel">Last name</div>
         <input type="text" class="acct-last-input" value="${escapeHtml(row.last_name||'')}">
       </div>
+      ${row.account_type==='service' ? `
+      <div class="fgroup"><div class="keys-note">Service account &mdash; for agents&rsquo; API keys (API keys tab). It can&rsquo;t sign in or be an admin.</div></div>` : `
       <div class="fgroup">
         <label class="flabel queue-admin-label" style="display:flex; align-items:center; gap:8px; cursor:pointer">
           <input type="checkbox" class="acct-admin-check" ${row.is_admin?'checked':''}> Grant admin privileges
         </label>
-      </div>
+      </div>`}
       <div class="fgroup">
         <label class="flabel queue-admin-label" style="display:flex; align-items:center; gap:8px; cursor:pointer" title="Hides simulated data entirely -- panels/tools show a clear 'not available' state instead of mock data for any vintage/metric that isn't real.">
           <input type="checkbox" class="acct-realonly-check" ${row.data_mode==='real_only'?'checked':''}> Real-only data mode
@@ -5689,7 +5694,7 @@ function renderAccountRow(list, row, email, currentUserId){
   // guard_self_admin_removal (BEFORE UPDATE trigger, verified live it
   // can't be bypassed by bundling is_admin with another field). This
   // just avoids making an admin discover the block via a server error.
-  if(row.id===currentUserId && row.is_admin){
+  if(adminCheck && row.id===currentUserId && row.is_admin){
     adminCheck.disabled=true;
     adminLabel.style.opacity='.4';
     adminLabel.title="You can't remove your own admin status.";
@@ -5704,10 +5709,11 @@ function renderAccountRow(list, row, email, currentUserId){
       return;
     }
     saveBtn.disabled=true; saveBtn.textContent='Saving…';
-    const { error } = await sb.from('user_profiles').update({
-      first_name:first, last_name:last, is_admin:adminCheck.checked,
-      data_mode: realOnlyCheck.checked ? 'real_only' : 'all'
-    }).eq('id', row.id);
+    // A service account's row never carries is_admin (the database refuses
+    // it too: user_profiles_service_never_admin).
+    const update = { first_name:first, last_name:last, data_mode: realOnlyCheck.checked ? 'real_only' : 'all' };
+    if(adminCheck) update.is_admin = adminCheck.checked;
+    const { error } = await sb.from('user_profiles').update(update).eq('id', row.id);
     if(error){
       console.error('account save failed', error);
       saveBtn.textContent='Save'; saveBtn.disabled=false;
@@ -5849,7 +5855,7 @@ function renderKeyRow(r){
     <td class="nw">${escapeHtml(r.key_prefix)}&hellip;</td>
     <td>${escapeHtml(keysAccountName(r))}
       <span class="dim">${email ? escapeHtml(email) : 'email unavailable'}</span>
-      <span class="dim">${escapeHtml(ROLE_LABELS[r.account_role]||r.account_role||'')}</span></td>
+      <span class="dim">${escapeHtml(ROLE_LABELS[r.account_role]||r.account_role||'')}${r.account_type==='service' ? ' &middot; Service account' : ''}</span></td>
     <td class="nw">${escapeHtml(DATA_MODE_LABELS[r.account_data_mode]||r.account_data_mode||'—')}</td>
     <td class="nw">${keysDate(r.expires_at)}</td>
     <td title="${escapeHtml(r.created_by||'')}">${escapeHtml(creatorShort)}${via ? `<span class="dim">via ${escapeHtml(via)}</span>` : ''}</td>
@@ -5902,7 +5908,7 @@ function openKeyDetail(r, tr){
       <div><div class="flabel">Key id</div><span class="keys-id">${escapeHtml(r.id)}</span></div>
       <div><div class="flabel">Linked account</div>${escapeHtml(keysAccountName(r))}
         <span class="dim">${email ? escapeHtml(email) : 'email unavailable'}</span>
-        <span class="dim">${escapeHtml(ROLE_LABELS[r.account_role]||r.account_role||'')} &middot; ${escapeHtml(r.account_status||'no profile')}</span></div>
+        <span class="dim">${escapeHtml(ROLE_LABELS[r.account_role]||r.account_role||'')}${r.account_type==='service' ? ' &middot; Service account' : ''} &middot; ${escapeHtml(r.account_status||'no profile')}</span></div>
       <div><div class="flabel">Data mode</div>${escapeHtml(DATA_MODE_LABELS[r.account_data_mode]||r.account_data_mode||'—')}<span class="dim">the account&rsquo;s, not the key&rsquo;s</span></div>
       <div><div class="flabel">Created</div>${keysDateTime(r.created_at)}<span class="dim">${escapeHtml(r.created_by||'—')}</span></div>
       <div><div class="flabel">Expires</div>${keysDateTime(r.expires_at)}</div>
@@ -6103,7 +6109,7 @@ async function renderCreateKeyForm(host, draft={}){
   // accepts and agent_key_issue() re-checks; a key only ever inherits that
   // account's own access.
   const { data: accounts, error } = await sb.from('user_profiles')
-    .select('id, first_name, last_name, role, data_mode')
+    .select('id, first_name, last_name, role, data_mode, account_type')
     .eq('status','approved')
     .in('role',['operator','customer'])
     .order('first_name', {ascending:true, nullsFirst:false});
@@ -6137,7 +6143,7 @@ async function renderCreateKeyForm(host, draft={}){
         <div class="flabel">Linked account</div>
         <select class="keys-account-select">
           <option value="">Select an account&hellip;</option>
-          ${accounts.map(a=>`<option value="${escapeHtml(a.id)}">${escapeHtml(`${a.first_name||''} ${a.last_name||''}`.trim()||a.id)} &middot; ${escapeHtml(ROLE_LABELS[a.role]||a.role)}${emails[a.id] ? ` &middot; ${escapeHtml(emails[a.id])}` : ''}</option>`).join('')}
+          ${accounts.map(a=>`<option value="${escapeHtml(a.id)}">${escapeHtml(`${a.first_name||''} ${a.last_name||''}`.trim()||a.id)} &middot; ${escapeHtml(ROLE_LABELS[a.role]||a.role)}${a.account_type==='service' ? ' &middot; Service account' : ''}${emails[a.id] ? ` &middot; ${escapeHtml(emails[a.id])}` : ''}</option>`).join('')}
         </select>
         <div class="keys-note keys-account-note"></div>
       </div>

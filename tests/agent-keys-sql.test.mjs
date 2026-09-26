@@ -43,7 +43,8 @@ before(async () => {
     create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;
     create schema extensions;
     create schema auth;
-    create table auth.users (id uuid primary key, email text, banned_until timestamptz, deleted_at timestamptz);
+    create table auth.users (id uuid primary key, email text, banned_until timestamptz, deleted_at timestamptz,
+      email_confirmed_at timestamptz, raw_app_meta_data jsonb default '{}'::jsonb, raw_user_meta_data jsonb default '{}'::jsonb);
     create function auth.uid() returns uuid language sql stable as $$
       select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
                       (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $$;
@@ -54,6 +55,7 @@ before(async () => {
     grant usage on schema public to anon, authenticated, service_role;
     create table public.user_profiles (
       id uuid primary key references auth.users(id) on delete cascade,
+      full_name text,
       role text not null default 'customer' check (role in ('operator','customer')),
       status text not null default 'pending' check (status in ('pending','approved','rejected')),
       first_name text, last_name text,
@@ -61,26 +63,37 @@ before(async () => {
       customer_account_id text
     );
     alter table public.user_profiles enable row level security;
+    -- Production's table-wide grant (docs/SECURITY.md: admin_manages_profiles
+    -- relies on it), so admin-via-REST updates are tested for real.
+    grant select, update on public.user_profiles to authenticated;
+    -- The on_auth_user_created binding (20260806033809); handle_new_user()'s
+    -- real body arrives with 20260926180000.
+    create function public.handle_new_user() returns trigger language plpgsql as $$ begin return new; end $$;
+    create trigger on_auth_user_created after insert on auth.users for each row execute function public.handle_new_user();
     -- 20260926150000 minus its view grants (the views don't exist here).
     create role mcp_reader nologin noinherit nobypassrls;
     create role mcp_gateway nologin noinherit nobypassrls;
     grant mcp_reader to mcp_gateway;
   `);
   await db.exec(migration("20260810164048_admin_manages_profiles.sql"));
+  await db.exec(migration("20260810165833_user_confirmed_notify_profile.sql"));
   await db.exec(migration("20260926150001_agent_api_keys.sql"));
   await db.exec(migration("20260926160000_agent_keys_admin.sql"));
   await db.exec(migration("20260926165000_mcp_auth_banned_users.sql"));
   await db.exec(migration("20260926170000_agent_keys_admin_detail.sql"));
+  await db.exec(migration("20260926180000_service_accounts.sql"));
   await db.exec(`
     insert into auth.users values
       ('${ADMIN}', '${ADMIN_EMAIL}'), ('${OPERATOR}', 'op@example.test'), ('${CUSTOMER}', 'cust@example.test'),
       ('${PENDING}', 'pending@example.test'), ('${REJECTED}', 'rejected@example.test');
-    insert into public.user_profiles (id, role, status, is_admin, first_name, last_name, data_mode) values
+    insert into public.user_profiles as up (id, role, status, is_admin, first_name, last_name, data_mode) values
       ('${ADMIN}', 'operator', 'approved', true, 'Ada', 'Admin', 'all'),
       ('${OPERATOR}', 'operator', 'approved', false, 'Otto', 'Operator', 'real_only'),
       ('${CUSTOMER}', 'customer', 'approved', false, 'Cora', 'Customer', 'all'),
       ('${PENDING}', 'customer', 'pending', false, 'Pat', 'Pending', 'all'),
-      ('${REJECTED}', 'operator', 'rejected', false, 'Rex', 'Rejected', 'all');
+      ('${REJECTED}', 'operator', 'rejected', false, 'Rex', 'Rejected', 'all')
+      on conflict (id) do update set role = excluded.role, status = excluded.status, is_admin = excluded.is_admin,
+        first_name = excluded.first_name, last_name = excluded.last_name, data_mode = excluded.data_mode;
   `);
 });
 
@@ -490,6 +503,89 @@ test("the fix keeps every grant: still mcp_gateway-only for the gateway function
   for (const role of ["anon", "authenticated", "service_role", "mcp_gateway", "mcp_reader"]) {
     assert.match(await errorAs(role, null, "select * from public.agent_key_list()") ?? "(ok)", /permission denied/);
   }
+});
+
+// ---- service accounts (20260926180000) ------------------------------------------------
+// GoTrue's Admin API create, as read from supabase/auth: INSERT the user
+// unconfirmed (handle_new_user fires), then Confirm() as a separate UPDATE
+// (handle_user_confirmed fires).
+async function gotrueCreate(q, { id, email, appMeta = {}, userMeta = {}, confirm = true }) {
+  await q("insert into auth.users (id, email, raw_app_meta_data, raw_user_meta_data) values ($1, $2, $3::jsonb, $4::jsonb)", [id, email, appMeta, userMeta]);
+  if (confirm) await q("update auth.users set email_confirmed_at = now() where id = $1", [id]);
+  return (await q("select * from public.user_profiles where id = $1", [id]))[0];
+}
+const SVC = "5e5e5e5e-0000-4000-8000-00000000000a";
+const HUMAN_NEW = "4e4e4e4e-0000-4000-8000-00000000000b";
+const svcCreate = (q) => gotrueCreate(q, { id: SVC, email: "svc-nightly@service.invalid", appMeta: { account_type: "service" }, userMeta: { first_name: "Service", last_name: "Nightly" } });
+const errOf = async (q, sql, params = []) => { await q("savepoint e"); try { await q(sql, params); await q("release savepoint e"); return null; } catch (e) { await q("rollback to savepoint e"); return e.message; } };
+
+test("account_type comes only from app_metadata (Admin API); a signup's own user_metadata can't claim 'service'", async () => {
+  await asOwner(async (q) => {
+    const svc = await svcCreate(q);
+    assert.equal(svc.account_type, "service");
+    assert.equal(svc.status, "pending"); assert.equal(svc.role, "customer"); assert.equal(svc.is_admin, false);
+    assert.ok(svc.confirmed_at, "confirmed like a normal account (so the CLI must approve it and notify must skip it)");
+    assert.deepEqual([svc.first_name, svc.last_name], ["Service", "Nightly"]);
+    const sneaky = await gotrueCreate(q, { id: HUMAN_NEW, email: "sneaky@example.test", userMeta: { account_type: "service", first_name: "S", last_name: "N" } });
+    assert.equal(sneaky.account_type, "human", "user_metadata is user-controlled and ignored");
+    for (const [i, v] of ["Service", "admin", "", null, 7].entries()) {
+      const id = `6e6e6e6e-0000-4000-8000-00000000000${i}`;
+      assert.equal((await gotrueCreate(q, { id, email: `x${i}@example.test`, appMeta: { account_type: v } })).account_type, "human", `app_metadata ${JSON.stringify(v)}`);
+    }
+  });
+});
+
+test("a service account can never be an admin -- as the owner, or as an admin through the REST path", async () => {
+  await asOwner(async (q) => {
+    await svcCreate(q);
+    await q("update public.user_profiles set status = 'approved', role = 'operator' where id = $1", [SVC]);
+    assert.match(await errOf(q, "update public.user_profiles set is_admin = true where id = $1", [SVC]) ?? "(allowed)", /user_profiles_service_never_admin/);
+    await q("select set_config('request.jwt.claims', $1, true)", [JSON.stringify(adminClaims())]);
+    await q("set local role authenticated");
+    assert.match(await errOf(q, "update public.user_profiles set is_admin = true where id = $1", [SVC]) ?? "(allowed)", /user_profiles_service_never_admin/, "admin via REST");
+    assert.equal(await errOf(q, "update public.user_profiles set is_admin = true where id = $1", [OPERATOR]), null, "control: a human operator can still be made admin");
+    assert.equal(await errOf(q, "update public.user_profiles set data_mode = 'all', status = 'rejected' where id = $1", [SVC]), null, "other fields stay editable");
+    await q("reset role");
+  });
+});
+
+test("account_type can't change after creation, in either direction, for anyone", async () => {
+  await asOwner(async (q) => {
+    await svcCreate(q);
+    assert.match(await errOf(q, "update public.user_profiles set account_type = 'human' where id = $1", [SVC]) ?? "(allowed)", /cannot change/, "owner: service -> human");
+    assert.match(await errOf(q, "update public.user_profiles set account_type = 'service' where id = $1", [OPERATOR]) ?? "(allowed)", /cannot change/, "owner: human -> service");
+    assert.equal(await errOf(q, "update public.user_profiles set account_type = 'service', data_mode = 'all' where id = $1", [SVC]), null, "same value is fine");
+    await q("select set_config('request.jwt.claims', $1, true)", [JSON.stringify(adminClaims())]);
+    await q("set local role authenticated");
+    assert.match(await errOf(q, "update public.user_profiles set account_type = 'human', is_admin = true where id = $1", [SVC]) ?? "(allowed)", /cannot change|service_never_admin/, "admin: flip + promote in one statement");
+    assert.match(await errOf(q, "update public.user_profiles set account_type = 'human' where id = $1", [SVC]) ?? "(allowed)", /cannot change/, "admin: flip alone");
+    await q("reset role");
+  });
+});
+
+test("a service account's keys work through the gateway exactly like a person's, with its own scope and data_mode", async () => {
+  await asOwner(async (q) => {
+    await svcCreate(q);
+    await q("update public.user_profiles set status = 'approved', role = 'operator', data_mode = 'real_only' where id = $1", [SVC]);
+    const k = await issueOwner(q, SVC, "agent 1");
+    const hash = await sha256Hex(k.key);
+    await q("set local role mcp_gateway");
+    const [hit] = await q("select user_id from public.mcp_authenticate($1)", [hash]);
+    await q("reset role");
+    assert.equal(hit?.user_id, SVC, "no gateway change needed");
+    const row = (await q("select * from public.agent_key_list()")).find((r) => r.id === k.id);
+    assert.equal(row.account_type, "service"); assert.equal(row.account_data_mode, "real_only"); assert.equal(row.owner_eligible, true);
+    // Kill switches: un-approve the account, or ban it -- all its keys stop.
+    await q("update public.user_profiles set status = 'rejected' where id = $1", [SVC]);
+    await q("set local role mcp_gateway");
+    assert.equal((await q("select * from public.mcp_authenticate($1)", [hash])).length, 0, "un-approved");
+    await q("reset role");
+    await q("update public.user_profiles set status = 'approved' where id = $1", [SVC]);
+    await q("update auth.users set banned_until = now() + interval '1 day' where id = $1", [SVC]);
+    await q("set local role mcp_gateway");
+    assert.equal((await q("select * from public.mcp_authenticate($1)", [hash])).length, 0, "banned");
+    await q("reset role");
+  });
 });
 
 // ---- static: one implementation, and the page never touches the secret material -------

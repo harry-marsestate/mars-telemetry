@@ -83,6 +83,20 @@ gateway calls it made (latest 50), and its expiry, which can be changed to
 1-365 days from now but never past 365 days from issue -- no re-auth needed. It calls the same database functions as
 the CLI below.
 
+**Service accounts** (keys for AI agents that aren't a person). Create one
+per distinct scope, then issue one key per agent under it as usual:
+
+```zsh
+node scripts/service-accounts.mjs create --name nightly-reports --label "Nightly reports" --role operator
+node scripts/service-accounts.mjs create --name acct03-bot --label "ACCT-03 bot" --role customer --customer-account ACCT-03 --data-mode all
+node scripts/service-accounts.mjs list
+node scripts/service-accounts.mjs disable --id <uuid>   # every key it holds stops working; enable to undo
+```
+
+`svc-<name>@service.invalid`, no password (nobody can sign in as it), never
+admin, `data_mode` real_only unless `--data-mode all`. Needs
+`SUPABASE_SERVICE_ROLE_KEY` in `.env`.
+
 **From the CLI** (`scripts/agent-keys.mjs`, run by the owner against `DATABASE_URL`):
 
 ```zsh

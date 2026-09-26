@@ -1,0 +1,8 @@
+{
+  "name": "mars-telemetry-scripts",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pg": "^8.23.0"
+  }
+}

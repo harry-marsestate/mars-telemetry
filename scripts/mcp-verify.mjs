@@ -62,6 +62,9 @@ async function withDb(fn) {
 async function asUser(db, userId, sql, params = [], role = "authenticated") {
   await db.query("begin");
   try {
+    // The mcp_* roles aren't granted to postgres; a transaction-local
+    // self-grant (rolled back below) lets this session take them on.
+    if (role === "mcp_gateway" || role === "mcp_reader") await db.query(`grant ${role} to postgres with inherit false, set true`);
     await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: userId, role })]);
     await db.query(`set local role ${role}`);
     return (await db.query(sql, params)).rows;
@@ -301,11 +304,18 @@ await withDb(async (db) => {
   for (const k of pendingKeys) {
     const r = await mcp(`Bearer ${k.plaintext}`, "tools/list", {});
     const [after] = (await db.query("select last_used_at from public.agent_api_keys where id = $1", [k.id])).rows;
-    const [direct] = await asUser(db, null, "select count(*)::int n from public.mcp_authenticate($1)", [k.hash_hex], "anon");
-    const [contrast] = await asUser(db, null, "select count(*)::int n from public.mcp_authenticate($1)", [colin.hash_hex], "anon");
+    // As mcp_gateway -- the only role with EXECUTE since Option B' (it was
+    // anon under Option A; calling it as anon is now itself a negative check).
+    const [direct] = await asUser(db, null, "select count(*)::int n from public.mcp_authenticate($1)", [k.hash_hex], "mcp_gateway");
+    const [contrast] = await asUser(db, null, "select count(*)::int n from public.mcp_authenticate($1)", [colin.hash_hex], "mcp_gateway");
+    let anonDenied = false;
+    try { await asUser(db, null, "select count(*) from public.mcp_authenticate($1)", [k.hash_hex], "anon"); } catch (e) { anonDenied = e.code === "42501"; }
+    verdict("mcp_authenticate is not callable as anon or authenticated (no public RPC surface)", anonDenied && await (async () => {
+      try { await asUser(db, null, "select count(*) from public.mcp_authenticate($1)", [k.hash_hex], "authenticated"); return false; } catch (e) { return e.code === "42501"; }
+    })(), "anon -> 42501, authenticated -> 42501");
     verdict(`pending-account key ${k.key_prefix} -> 401, rejected inside mcp_authenticate()`,
       r.status === 401 && after.last_used_at === null && direct.n === 0 && contrast.n === 1,
-      `HTTP ${r.status}; mcp_authenticate(its hash) as anon = ${direct.n} rows (Colin key contrast = ${contrast.n}); last_used_at=${after.last_used_at ?? "null (never passed the function's checks)"}`);
+      `HTTP ${r.status}; mcp_authenticate(its hash) as mcp_gateway = ${direct.n} rows (Colin key contrast = ${contrast.n}); last_used_at=${after.last_used_at ?? "null (never passed the function's checks)"}`);
   }
 
   // revoked key: revoke, then immediately re-call; nothing cached

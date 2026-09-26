@@ -1,4 +1,11 @@
-{{ config(materialized='incremental', unique_key=['vintage','day']) }}
+{# read_policy must match daily_weather_read in the latest migration that
+   defines it (20260810204144_approval_status_rls_gaps.sql); the
+   apply_security_invoker post-hook re-applies it on every run. #}
+{{ config(
+    materialized='incremental',
+    unique_key=['vintage','day'],
+    meta={'read_policy': "current_role_name() in ('operator','customer')"}
+) }}
 
 with hourly_raw as (
   -- (recorded_at at time zone 'America/Los_Angeles')::date::timestamptz,

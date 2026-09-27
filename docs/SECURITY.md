@@ -73,6 +73,14 @@ through the RLS model documented above, not just "another function."
   working also surfaced that `service_role` had no table-level GRANTs
   anywhere in this project at all, BYPASSRLS notwithstanding -- see the
   dedicated entry near the end of this file.
+- `admin_list_agent_keys()` / `admin_issue_agent_key()` /
+  `admin_revoke_agent_key()` - SECURITY DEFINER, **reachable through
+  PostgREST** (EXECUTE for `authenticated` only), each gated on
+  `is_admin_user()` inside the function. The only browser path onto
+  `agent_api_keys`; they wrap the owner-only `agent_key_*` functions that
+  `scripts/agent-keys.mjs` also calls. Issue additionally requires a password
+  or Google sign-in in the last 10 minutes (`amr`). See the "Agent key admin"
+  entry.
 
 ## Two parallel API key systems - legacy JWT vs new secret/publishable
 
@@ -6222,3 +6230,453 @@ not given); throughput/latency under concurrent agents (single calls take
 - **Client config:** project `.mcp.json` committed (no secret; header reads
   `${MARS_TELEMETRY_MCP_KEY}`). Claude Code's project-server approval is
   interactive, so that expansion is documented, not yet verified in Claude Code.
+
+## Agent key admin: MCP API keys managed from User Management (2026-09-26)
+
+Branch `feat/agent-keys-admin`. A third User Management tab, "API keys",
+lists every `agent_api_keys` row (prefix only, never a hash or plaintext),
+issues keys with a show-once panel, and revokes them. Same overlay, same
+cosmetic `is_admin` menu gate, same classes as the two existing tabs.
+
+### One implementation, in Postgres (migration `20260926160000`)
+
+- `agent_key_issue` / `agent_key_revoke` / `agent_key_list` are THE
+  implementation: key generation (`mtk_` + base64url of 32 bytes from
+  pgcrypto's `gen_random_bytes`), SHA-256 of the UTF-8 key, eligibility
+  (approved operator/customer, mirroring `mcp_authenticate()`), label suffix,
+  1-365 day expiry, computed status. **Owner-only**: EXECUTE revoked from
+  PUBLIC, anon, authenticated, service_role (so also from `mcp_gateway` /
+  `mcp_reader`). `scripts/agent-keys.mjs` now calls them instead of running its
+  own `randomBytes`/`createHash`/INSERT/UPDATE -- the CLI and the web app
+  cannot drift.
+- `admin_*` wrappers: EXECUTE for `authenticated` only. Each raises 42501
+  `forbidden` unless `is_admin_user()` -- the same predicate as
+  `admin_manages_profiles`, i.e. exactly the User Management gate, enforced
+  in the function rather than by the UI. `created_by` is built from the
+  caller's own signed JWT (email + uid), never a client string.
+- The tables are unchanged: RLS on, zero policies, no grants to any API
+  role. Even an admin gets `permission denied for table`.
+- Moving generation from Node to SQL means the plaintext never appears in
+  any statement text (statement/slow-query logs, `pg_stat_statements`) --
+  only in the issue function's single result row. It is not in any request
+  body either: the browser sends account/label/days, and gets the key back.
+- `data_mode` is not a key property: the gateway resolves the key owner's
+  `user_profiles.data_mode` per request. The tab shows it read-only.
+- The gateway (`supabase/functions/mcp/`), `mcp_authenticate()`, and
+  `mcp-verify.mjs` are untouched. `check-mcp-boundaries.mjs` still passes.
+
+### Why REST-reachable RPCs, not a dedicated role + Edge Function
+
+The existing User Management mechanism is browser -> PostgREST under the
+admin's own JWT, authorized by `is_admin_user()`; that is what this follows.
+The alternative -- a new Postgres role with EXECUTE on the implementation,
+logged into by an Edge Function holding its connection string (the
+`mcp_gateway` pattern) -- would keep these functions off PostgREST entirely,
+but adds another rotatable credential and a second deploy surface for no
+gain in who-can-do-what: that function would still have to trust the same
+`is_admin_user()` check on the same JWT. Re-granting `service_role` on the
+tables was rejected outright (it undoes 20260926150001's deliberate revoke).
+The trade-off accepted: the three `admin_*` functions are a new
+admin-only PostgREST surface, listed in "Service-role-equivalent access
+points" above.
+
+### Fresh authentication for issue (not list/revoke)
+
+A key turns a browser session into a 1-365 day bearer credential that
+survives sign-out and password change, and can act as another account. So
+`admin_issue_agent_key` requires the JWT's `amr` claim to hold a
+`"password"` or `"oauth"` entry stamped within the last 10 minutes.
+
+**What GoTrue actually writes** -- read from `supabase/auth`'s source
+(commit `ce9a8ee`, 2026-09-22), not assumed:
+- `amr` is an array of `{"method": <string>, "timestamp": <integer unix
+  seconds>}`, most recent first; a `"provider"` field is added **only** for
+  SAML SSO (`models.AMREntry`, `Session.CalculateAALAndAMR`).
+- Entries come from the session's `auth.mfa_amr_claims` rows; `timestamp` is
+  the row's `updated_at`. A row is written when a session is **issued**
+  (`IssueRefreshToken` -> `AddClaimToSession`) and on MFA verification --
+  never on refresh: the refresh path passes `TokenRefresh` only to the
+  custom-access-token hook's input and rebuilds `amr` from stored rows. So
+  an idle or hijacked long-lived session can't look fresh.
+- Password sign-in writes `"password"`. Google sign-in writes `"oauth"`
+  (`external.go` / `token_oidc.go` pass `models.OAuth`) -- the same string
+  for any OAuth provider; Google is the only one this project enables.
+
+**The two client paths** (create-key form, `web/index.html`), both for the
+signed-in account only:
+1. Password: `signInWithPassword` with the **session's own email** -- only
+   the password is typed, so it can't switch accounts. Offered only to
+   admins who have a password.
+2. Google: "Re-authenticate with Google", offered to every admin. The same
+   `signInWithOAuth` call the sign-in screen already makes, which already
+   passes `prompt: 'select_account'` (checked, not added), plus `login_hint`
+   = the session's email. Google shows its account chooser and waits for a
+   click instead of completing silently from an existing Google session.
+   It's a full-page redirect: the form's non-secret fields (label, account,
+   days) ride along in `sessionStorage` and the form reopens on return, **only
+   if the same account came back** -- picking a different Google account on
+   the chooser signs that account in instead (the app's normal Google
+   sign-in behaviour) and nothing is resumed. After a fresh Google sign-in
+   the form needs no password; the server still makes the decision.
+
+**Trust boundary.** The server sees only the resulting token, never how it
+was obtained. The Google path therefore relies on the **client** asking for
+interactive account selection; a compromised client could request a silent
+re-auth instead. That is the same boundary the password path already has --
+a compromised client could replay a stored password -- so accepting `oauth`
+doesn't weaken the model; both are defences against an idle or stolen
+*session*, not a compromised *page*. Note `select_account` forces a click
+on Google's chooser, not re-entry of the Google password.
+
+Fails closed, all tested: no `amr` (e.g. the MCP gateway's claims), a
+non-array, string timestamps, entries older than 10 minutes, and other
+methods (`recovery`, `otp`, `magiclink`). List and revoke need no re-auth
+(revocation must be frictionless in an incident).
+
+**Confirmed on real tokens (owner, 2026-09-26)**, decoding `amr` in the live
+app's console: password sign-in -> `{method: "password", timestamp:
+1790449623}` (number, age 5s); Google sign-in, with a real click on Google's
+account chooser (not silent) -> `{method: "oauth", timestamp: 1790449547}`
+(number, age 23s); after `refreshSession()` the timestamp stayed at
+1790449623 and the age kept climbing (62s) -- a refresh does not make a
+session look fresh. Exactly the source-derived shape above. (A custom
+access-token hook could still rewrite `amr`; none is configured in
+`supabase/config.toml`, and the real tokens show none is rewriting it.)
+
+### Verification
+
+- `tests/agent-keys-sql.test.mjs` (node:test on PGlite, real migrations
+  applied, no network): 13/13. SQL-generated keys pass `mcp/auth.ts`'s own
+  `parseBearerKey` and hash to its `sha256Hex`; an issued key authenticates
+  via `mcp_authenticate` as `mcp_gateway` and stops after revoke;
+  eligibility/expiry/label rules; every API role refused on every function
+  and table; the fresh-auth matrix; list shape/status/owner_eligible; static
+  checks that `agent-keys.mjs` has no key logic of its own, that
+  `web/index.html` never names `key_hash`, never calls `agent_key_*`, never
+  logs the key, and that its Google re-auth passes
+  `prompt:'select_account'` and `login_hint`. **Mutation-tested**: dropping
+  the admin check, dropping the freshness check, granting the
+  implementation to `authenticated`, no longer accepting `oauth`, and
+  accepting any `amr` method each failed both this suite and the harness.
+- `scripts/agent-keys-admin-verify.mjs` (live; every write rolled back; key
+  redacted from output; accounts shown by 8-char prefix): function
+  definitions, EXECUTE matrix, tables still deny-all, denial as anon /
+  service_role / mcp_gateway / mcp_reader-with-admin-claims / non-admin
+  operator / customer / pending, admin can't call the implementation or read
+  the table, fresh-auth matrix, admin list == CLI list, end-to-end issue ->
+  hash match -> `mcp_authenticate` -> revoke -> rejected -> still listed ->
+  rolled back, `pg_stat_statements` never saw the key, and the real REST API
+  refuses all six functions and both tables to the anon key. Dry run
+  against PGlite: 34/34 (sections 5-6 need production).
+- Browser (local page, Supabase client stubbed in-page -- no production
+  calls except one anonymous `admin-pending-emails` that production
+  correctly refused): list, search (label/name/email, case-insensitive),
+  account and status filters, create validation, wrong password stops before
+  the issue RPC, success shows the key once (only in the input's value, never
+  in markup), dismiss / tab switch / closing the overlay all clear it,
+  inline revoke confirm, revoked rows stay listed, Google-only admin message,
+  server refusal surfaced in the form, a hostile label rendered as text; no
+  page-level horizontal scroll at 390px (the tab bar now wraps).
+
+### Deployed and verified live (2026-09-26)
+
+- `supabase db push --dry-run` listed exactly one migration,
+  `20260926160000_agent_keys_admin.sql` (no seeds, no roles); `supabase db
+  push` applied it.
+- `agent-keys-admin-verify.mjs` against production: **45/45 PASS**, no
+  redactions. All six functions SECURITY DEFINER with `search_path=""`;
+  EXECUTE matrix exactly as designed (wrappers: authenticated only;
+  implementation: no API role); key tables still no privilege for any API
+  role, RLS on, 0 policies. Refused as anon, service_role, mcp_gateway,
+  mcp_reader holding the admin's claims, and as a real non-admin operator
+  (`03b52829`), customer (`9782853b`) and pending account (`30346b0e`);
+  the admin (`5bb6b29e`) can't call the implementation or read the table.
+  Fresh-auth: refused with no amr, password or Google 11 min old, fresh
+  recovery/otp; allowed with password or Google 9 min old. Admin list ==
+  CLI list, 7/7 keys (3 active, 4 revoked). End to end (rolled back): key
+  `mtk_GfrodLUa` had the gateway's shape, its stored hash matched
+  `sha256Hex`, `mcp_authenticate` as `mcp_gateway` resolved it to
+  `03b52829`, revoke -> 0 rows, still listed as revoked, gone after
+  rollback. `pg_stat_statements`: 0 statements contain the key. Real REST
+  API with the anon key: all six functions and both tables -> 401/42501.
+- Rewired CLI, `agent-keys.mjs list` against production: the same 7 keys
+  through `agent_key_list()`; active = Colin `mtk_vIfyFJL1`, Colin
+  `mtk_KqE9zEvd`, owner `mtk_jvOeHpCG` -- unchanged from the entry above.
+
+**Pending (owner):** a real create-and-revoke click-through on the branch's
+Vercel preview (password and, once the preview domain is on Supabase Auth's
+redirect allowlist, Google). Not merged to `main` until then.
+
+### Round 2: key detail view, audit trail, editable expiry (migration `20260926170000`, not yet applied)
+
+Same shape as round 1 -- three owner-only implementation functions, three
+`admin_*` wrappers (EXECUTE for `authenticated` only, `is_admin_user()`
+inside), no table reachable from any API role:
+
+- `agent_key_calls` / `admin_list_agent_key_calls(id, limit)`: the key's
+  rows from `agent_api_key_calls` (written only by `mcp_log_call()`), newest
+  first, limit clamped to 1-200, plus the key's total count. Columns:
+  `called_at, tool, is_error, args, total_calls` -- no key material.
+- `agent_key_set_expiry` / `admin_update_agent_key_expiry(id, days)`:
+  `expires_at = now() + days`. **No fresh-auth step** -- it creates no new
+  credential; same trust level as revoke.
+- `agent_key_expiry_changes` / `admin_list_agent_key_expiry_changes(id)`.
+
+**Range: 1-365 days from now, and never past `created_at + 365 days`.** The
+cap is measured from issue rather than from now because a no-re-auth
+metadata edit must not be able to keep one credential alive indefinitely:
+"365 days from now" would let an admin session (or a hijacked one) roll a
+key forward forever, sidestepping both the fresh-auth step issuing requires
+and the rotation re-issuing forces. With the cap, extending can never grant
+more lifetime than issuing already did (with re-auth); past a year you
+issue a new key. For the same reason only **active** keys can change --
+extending an expired key would resurrect it, and a revoked key stays
+revoked. Under a day: revoke.
+
+**Audit:** a new append-only table, `agent_api_key_expiry_changes` (key,
+old value, new value, `changed_by`, `changed_at`), rather than "last changed
+by" columns, so every change and the value it replaced stays on record.
+`changed_by` uses `created_by`'s convention, built from the caller's signed
+JWT (`email (uid) via web admin`). Deny-all like the other key tables
+(RLS on, zero policies, no API-role grants); written in the same
+transaction as the update. **Gap noticed, not changed:** revocation still
+records only `revoked_at`, not who revoked -- the same table pattern could
+cover it if wanted.
+
+**UI:** clicking a row (or Enter/Space on it) expands a detail row beneath it
+-- the table's version of the Approve form's expand-in-place; one open at a
+time, and it stays open across the reload after a save. It shows every list
+field plus the key id, full `created_by`, exact timestamps, the expiry editor
+(active keys only; its max is the cap), the expiry history and the latest 50
+gateway calls. Prefix only, as in the list.
+
+**Verification (offline):** SQL tests 18/18 -- audit trail via real
+`mcp_log_call` rows (ordering, total, limit clamp, per-key isolation, no
+key columns); expiry change with a day-old sign-in, logged with old/new/who;
+range, cap (+66 refused / +65 allowed at day 300), revoked/expired/unknown
+refused, a refused change writes nothing; the credential is untouched (same
+hash, still authenticates, stops at the new expiry); the access matrix now
+covers all 12 functions and 3 tables. Harness dry run 47/47 (adds: gateway
+call visible in the audit trail, expiry without re-auth, logged, cap, key
+still authenticates, revoked key immutable; REST checks for the new
+functions/table). Mutation-tested: no admin check on the expiry update, no
+cap, no audit write, no admin check on the audit read -- each caught.
+Browser pass with fakes: fields, "Latest N of M", hostile tool names/args
+rendered as text, long args truncated, client range check, save keeps the
+row open and shows the new history line, revoke click doesn't toggle the
+row, capped/revoked/expired states, keyboard toggle. The PGlite stub now
+carries the real `status` check constraint (an earlier test had used a
+`'suspended'` status the real schema rejects; fixed to `'rejected'`).
+
+## Security fix: a banned or deleted Supabase Auth user's MCP keys kept working (2026-09-26)
+
+Branch `fix/mcp-auth-banned-users`, migration `20260926165000` -- standalone,
+cut from the production state (`7d65cec`) so it can ship on its own.
+
+**The gap.** `mcp_authenticate()` checked the key (not revoked, not expired)
+and the owner's `user_profiles` row (approved operator/customer), never
+`auth.users`. Banning a user in Supabase Auth -- which GoTrue enforces at
+password sign-in, token refresh, OAuth sign-in, OTP/magic-link/recovery
+verification and every authenticated endpoint (read from supabase/auth's
+source) -- therefore left their `mtk_` keys working, because the gateway
+never talks to GoTrue. Same for a soft-deleted user (`deleted_at`).
+
+**The fix.** `mcp_authenticate()` now also requires the owner's `auth.users`
+row to have no future `banned_until` and no `deleted_at`: such a key gets
+zero rows -> the same indistinguishable 401 as a revoked key, on the very
+next request (nothing is cached; lifting the ban restores it). Put in the
+function, not the Edge Function handler: it is the one choke point every
+request already passes, next to the other "usable key" predicates, and it
+runs as the owner, which can read `auth.users` -- the handler route would
+have meant granting the table-less `mcp_gateway` role access to
+`auth.users`. No gateway code change, no function deploy. `mcp_log_call()`
+gets the same predicate (it re-checks the active-key conditions);
+`agent_key_issue()` refuses to issue a dead key for a banned/deleted owner
+(except under the CLI's negative-test flag); `agent_key_list()`'s
+`owner_eligible` reflects it, so the web tab shows such keys as "account not
+eligible -- key won't work". All four keep their signatures (`create or
+replace`), so every GRANT is unchanged -- tested.
+
+**Incident playbook, updated:** to cut off a person's agents immediately,
+any of these works on the next request: revoke the key(s), un-approve the
+profile, or ban/delete the user in Supabase Auth.
+
+**Verification (offline):** SQL tests (banned -> 0 rows; ban expired ->
+works again; soft-deleted -> 0 rows; `mcp_log_call` writes nothing; issue
+refused; list flags the key; grants intact); harness dry run 43/43 -- the
+harness now bans the test account's auth row inside its rolled-back
+transaction and checks the key dies and revives (reports SKIP, not PASS,
+if the connecting role can't update `auth.users` in production), and checks
+the live definitions of all four functions contain the predicate.
+Mutation-tested: dropping the ban predicate or the `deleted_at` predicate
+from `mcp_authenticate`, or the ban predicate from `mcp_log_call` -- each
+caught.
+
+## Service accounts: non-human identities for AI agents' keys (migration `20260926180000`, not yet applied)
+
+**Why an auth user at all.** `user_profiles.id` and `agent_api_keys.user_id`
+are both foreign keys to `auth.users`, and the gateway resolves RLS and
+`data_mode` from the key owner's profile on every request -- a key has no
+permissions of its own. So a service account is an ordinary `auth.users` +
+`user_profiles` pair; nothing in the gateway, `mcp_authenticate()` or the
+handler's `data_mode` lookup changes (tested: a service account's key
+authenticates as that account, with its own role/scope/`data_mode`).
+
+**Shape** (`scripts/service-accounts.mjs create`, owner-only: Admin API with
+the service-role key + `DATABASE_URL`; no browser-reachable path):
+`svc-<name>@service.invalid`, email confirmed (like any working account),
+**no password, no ban**, `app_metadata.account_type = 'service'`, then
+approved with the requested role / customer scope / `data_mode` (default
+`real_only`). Nobody can sign in as one: no password to enter (and the
+password grant also needs one to exist), the reserved `.invalid` domain can't
+receive a magic link / OTP / recovery email, and no Google account can have
+that address. **No ban, deliberately**: a ban now kills the owner's keys
+(banned-user fix above), which keeps "ban" a uniform incident kill switch --
+including for service accounts.
+
+**Guardrails, all in the database:**
+- `user_profiles.account_type` (`human` default / `service`), set only by
+  `handle_new_user()` from `raw_app_meta_data` -- which only the service role
+  and GoTrue can write. **Never** from `raw_user_meta_data`: a signing-up
+  user controls that, so reading it would let anyone self-declare as a
+  service account (tested; mutation-tested). Anything but exactly `service`
+  is `human`, so the signup trigger can't throw on odd input.
+- `user_profiles_service_never_admin`: a service account can never have
+  `is_admin` -- enforced by the table, not just the UI, since
+  `admin_manages_profiles` lets an admin update any column over REST.
+- `guard_account_type` trigger: `account_type` can't change after creation,
+  either direction, for anyone (else: flip service -> human -> admin).
+- The web app never offers "Grant admin privileges" for a service account --
+  not in Accounts, not in the Approve form (checked with fakes, including
+  that saving/approving one sends no `is_admin: true`).
+
+**Admin notification.** A confirmed service account fires the same
+`confirmed_at` transition as a signup. `notify-admin-approval` now skips
+`record.account_type === 'service'` (set at INSERT, immutable, so the
+webhook payload's value is authoritative). **That Edge Function change needs
+its own deploy -- before the first service account is created**, or you'll
+get one "new user" email per creation (harmless, just noise). The CLI
+approves the account itself, so it never waits in the pending queue.
+
+**Scope model.** An account defines scope (role + customer scope +
+`data_mode`); a key defines the agent (label, prefix, its own audit trail,
+revoke, expiry). One service account per distinct scope, one key per agent.
+Kill switches: revoke a key (one agent), `service-accounts.mjs disable`
+(un-approve: every key it holds), or ban it in Supabase Auth (same).
+Deleting a service account cascades away its keys and their audit history
+-- prefer disable.
+
+**Trade-offs.** Service accounts are `auth.users` rows that aren't people
+(visible in the dashboard's Users list, recognisable by `svc-...@service.invalid`
+and `app_metadata.account_type`). Someone with dashboard or service-role
+access could set a password on one -- but that access is already
+superior to anything the account can do. Considered and rejected: keys with
+no linked user and their own role/`data_mode` columns (would change
+`mcp_authenticate`, the gateway's claims and every RLS helper).
+
+**Verification (offline):** SQL tests 26/26 (adds: `account_type` from
+`app_metadata` only, `user_metadata` and odd values -> human; never-admin as
+owner and as admin over REST, human operator still promotable; immutability
+both directions, owner and admin, same-value update allowed; a service
+account's key works through the gateway and dies when un-approved or
+banned). Harness dry run 62/62 with a service account present (60/60 +
+SKIP without one). CLI end-to-end against a fake Admin API that behaves as
+GoTrue's source does (INSERT unconfirmed, then a separate confirming
+UPDATE): create operator/customer-scoped, request carries no password and
+no ban, profile is service/approved/real_only/not admin; every validation
+error stops before any Admin API call; a profile that didn't come out as a
+service account gets its auth user deleted; list/disable/enable; disable
+refuses a human id. Mutation-tested: dropping the never-admin constraint,
+the immutability trigger, or reading `user_metadata` in `handle_new_user` --
+each caught.
+
+## Pending-approval queue: does any real signup skip it? No (2026-09-26 investigation)
+
+Prompted by my own earlier (wrong) claim that an account created already
+confirmed would skip `confirmed_at`. `handle_new_user()` inserts the profile
+without `confirmed_at`, and `on_auth_user_confirmed` fires only on an
+`email_confirmed_at` null -> not-null **UPDATE** -- so the question was
+whether GoTrue ever confirms inside the INSERT. From supabase/auth's
+source: it never does. Google sign-up (`external.go`), email sign-up with
+or without auto-confirm (`signup.go`) and Admin API create with
+`email_confirm` (`admin.go`) all INSERT unconfirmed and then call
+`user.Confirm()`, a separate `UpdateOnly(email_confirmed_at)`, so the
+trigger fires, `confirmed_at` is set, and the account reaches both the
+queue and the webhook. Production, read-only aggregate: all 3 Google users
+and every account since the trigger's migration (first on 2026-08-10) have
+`confirmed_at`. The only 2 accounts confirmed in auth but not on the
+profile (`f6df362d`, admin; `9782853b`) were created 2026-08-06, four days
+before the trigger existed, confirmed within milliseconds of creation
+(the seed/Admin-API pattern) and are both approved. **Current exposure:
+none.** Not changed. (The webhook itself is dashboard-configured and was
+not inspected.)
+
+### Rollout record and a production failure: the first service account came out 'human' (2026-09-27)
+
+**Rolled out (owner-approved, one step at a time):** (1) `20260926165000`
+alone from `fix/mcp-auth-banned-users` -- dry run listed only it; harness
+52/52 (live ban/unban check ran, not SKIP) and `mcp-verify.mjs` 53/53
+(both Colin keys, all 5 tools, pending key still 401). (2) `20260926170000`
++ `20260926180000` from `feat/agent-keys-admin` -- dry run listed exactly
+those two; harness 76/76 (+1 expected SKIP: no service account yet).
+(3) `notify-admin-approval` v14 deployed; deployed `index.ts`/`deno.json`
+byte-identical to the branch (downloaded and diffed; v13 had been identical
+to `main`). A direct test call with a crafted service payload could not be
+made: the function accepts only the new `sb_secret_` key, not the legacy
+service-role key in `.env`.
+
+**(4) failed safely.** `service-accounts.mjs create --name nightly-checks`
+exited 1 -- the profile was not a service account -- and deleted the auth
+user it had just created (verified: no `svc-*` user left, 16 human
+profiles as before). **Cause** (supabase/auth `adminUserCreate`): inside one
+transaction GoTrue INSERTs the user with `app_metadata = {provider,
+providers}` only, then `UpdateAppMetaData()` UPDATEs `raw_app_meta_data`
+with the caller's values, then `Confirm()`. `handle_new_user()` fires on the
+INSERT, before `account_type` exists. **Why the offline suite passed:** its
+model of the Admin API put `app_metadata` into the INSERT -- I had verified
+the confirm-after-insert order in GoTrue's source but not the app_metadata
+order. **Side effect:** the profile was confirmed while still 'human', so
+`notify-admin-approval` did not skip it and most likely sent one "new user
+awaiting approval" email for `svc-nightly-checks@service.invalid` (unless its
+user lookup lost the race with the cleanup delete).
+
+**Fix, migration `20260926190000` (not yet applied):** `account_type` now
+mirrors `auth.users.raw_app_meta_data ->> 'account_type'` (service-role /
+GoTrue-writable only). A minimal trigger on `auth.users`, `AFTER UPDATE OF
+raw_app_meta_data`, WHEN it becomes `'service'`, sets the profile to
+`service`; since that UPDATE precedes `Confirm()`, the profile is already
+`service` when the webhook row is written (tested with a capture trigger).
+The immutability guard now allows human -> service only when the auth row's
+`app_metadata` says `service` (so the sync can run; an admin over REST still
+can't, a user's `user_metadata` can't), and still forbids service -> human
+for everyone, even if the app_metadata key is later removed. Converting an
+existing admin fails closed (never-admin constraint aborts the GoTrue
+update). The test helper and the scratch fake Admin API now follow GoTrue's
+exact order and reproduced the failure (4 SQL tests failed) before the fix.
+SQL 29/29, harness dry run 64/64 (adds: sync trigger definition, guard
+definition), CLI dry run creates `nightly-checks` correctly; mutation-tested
+(no sync trigger; guard allowing human -> service unconditionally).
+
+**Correction (read back from production after the successful create):** a
+service account does have a password hash. When the Admin API gets no
+password, GoTrue generates a random 64-character one
+(`password.Generate(64, 10, ...)` in `adminUserCreate`), stores only its
+hash and never returns the plaintext. So "no password" in this entry, in
+`20260926180000`'s comments and in the first CLI version is wrong; the
+accurate statement is "a random, never-disclosed password". The sign-in
+lock stands -- nobody knows it and it is not guessable, and `.invalid` still
+blocks every email-based route. The CLI's wording is corrected; the applied
+migration's comments are left as they are (applied migrations aren't edited).
+
+**Rollout completed (2026-09-27):** `20260926190000` applied (dry run listed
+only it; harness 78/78 with the new trigger/guard definition checks). Retried
+`service-accounts.mjs create --name nightly-checks`: `3c254617`, read back
+independently as `account_type=service, status=approved, role=operator,
+data_mode=real_only, is_admin=false, confirmed_at` set; auth row confirmed,
+not banned, email identity only, `app_metadata.account_type=service`. No
+notification email: `net._http_response` shows the confirmation webhook
+answered `{"ok":true,"skipped":"service account"}` (the failed attempt's call
+had answered `{"ok":false,"reason":"user lookup failed"}`, so no email then
+either). Full harness **80/80, no SKIP**: section 4c now exercises the real
+service account -- can't be made admin (owner, admin over REST), can't be
+turned human -- and every other section is unchanged.

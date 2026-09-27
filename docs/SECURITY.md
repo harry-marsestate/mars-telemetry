@@ -6610,3 +6610,49 @@ before the trigger existed, confirmed within milliseconds of creation
 (the seed/Admin-API pattern) and are both approved. **Current exposure:
 none.** Not changed. (The webhook itself is dashboard-configured and was
 not inspected.)
+
+### Rollout record and a production failure: the first service account came out 'human' (2026-09-27)
+
+**Rolled out (owner-approved, one step at a time):** (1) `20260926165000`
+alone from `fix/mcp-auth-banned-users` -- dry run listed only it; harness
+52/52 (live ban/unban check ran, not SKIP) and `mcp-verify.mjs` 53/53
+(both Colin keys, all 5 tools, pending key still 401). (2) `20260926170000`
++ `20260926180000` from `feat/agent-keys-admin` -- dry run listed exactly
+those two; harness 76/76 (+1 expected SKIP: no service account yet).
+(3) `notify-admin-approval` v14 deployed; deployed `index.ts`/`deno.json`
+byte-identical to the branch (downloaded and diffed; v13 had been identical
+to `main`). A direct test call with a crafted service payload could not be
+made: the function accepts only the new `sb_secret_` key, not the legacy
+service-role key in `.env`.
+
+**(4) failed safely.** `service-accounts.mjs create --name nightly-checks`
+exited 1 -- the profile was not a service account -- and deleted the auth
+user it had just created (verified: no `svc-*` user left, 16 human
+profiles as before). **Cause** (supabase/auth `adminUserCreate`): inside one
+transaction GoTrue INSERTs the user with `app_metadata = {provider,
+providers}` only, then `UpdateAppMetaData()` UPDATEs `raw_app_meta_data`
+with the caller's values, then `Confirm()`. `handle_new_user()` fires on the
+INSERT, before `account_type` exists. **Why the offline suite passed:** its
+model of the Admin API put `app_metadata` into the INSERT -- I had verified
+the confirm-after-insert order in GoTrue's source but not the app_metadata
+order. **Side effect:** the profile was confirmed while still 'human', so
+`notify-admin-approval` did not skip it and most likely sent one "new user
+awaiting approval" email for `svc-nightly-checks@service.invalid` (unless its
+user lookup lost the race with the cleanup delete).
+
+**Fix, migration `20260926190000` (not yet applied):** `account_type` now
+mirrors `auth.users.raw_app_meta_data ->> 'account_type'` (service-role /
+GoTrue-writable only). A minimal trigger on `auth.users`, `AFTER UPDATE OF
+raw_app_meta_data`, WHEN it becomes `'service'`, sets the profile to
+`service`; since that UPDATE precedes `Confirm()`, the profile is already
+`service` when the webhook row is written (tested with a capture trigger).
+The immutability guard now allows human -> service only when the auth row's
+`app_metadata` says `service` (so the sync can run; an admin over REST still
+can't, a user's `user_metadata` can't), and still forbids service -> human
+for everyone, even if the app_metadata key is later removed. Converting an
+existing admin fails closed (never-admin constraint aborts the GoTrue
+update). The test helper and the scratch fake Admin API now follow GoTrue's
+exact order and reproduced the failure (4 SQL tests failed) before the fix.
+SQL 29/29, harness dry run 64/64 (adds: sync trigger definition, guard
+definition), CLI dry run creates `nightly-checks` correctly; mutation-tested
+(no sync trigger; guard allowing human -> service unconditionally).

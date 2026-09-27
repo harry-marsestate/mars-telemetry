@@ -82,6 +82,7 @@ before(async () => {
   await db.exec(migration("20260926165000_mcp_auth_banned_users.sql"));
   await db.exec(migration("20260926170000_agent_keys_admin_detail.sql"));
   await db.exec(migration("20260926180000_service_accounts.sql"));
+  await db.exec(migration("20260926190000_service_account_type_sync.sql"));
   await db.exec(`
     insert into auth.users values
       ('${ADMIN}', '${ADMIN_EMAIL}'), ('${OPERATOR}', 'op@example.test'), ('${CUSTOMER}', 'cust@example.test'),
@@ -506,11 +507,19 @@ test("the fix keeps every grant: still mcp_gateway-only for the gateway function
 });
 
 // ---- service accounts (20260926180000) ------------------------------------------------
-// GoTrue's Admin API create, as read from supabase/auth: INSERT the user
-// unconfirmed (handle_new_user fires), then Confirm() as a separate UPDATE
-// (handle_user_confirmed fires).
+// GoTrue's Admin API create (adminUserCreate, supabase/auth internal/api/admin.go),
+// in its exact order, inside one transaction:
+//   1. INSERT with app_metadata = {provider, providers} ONLY  -> handle_new_user fires
+//   2. UpdateAppMetaData: UPDATE raw_app_meta_data (merges the caller's app_metadata)
+//   3. Confirm(): UPDATE email_confirmed_at                    -> handle_user_confirmed fires
+// The first version of this helper put app_metadata into the INSERT, which is
+// why the offline suite missed the 2026-09-27 production failure (docs/SECURITY.md).
 async function gotrueCreate(q, { id, email, appMeta = {}, userMeta = {}, confirm = true }) {
-  await q("insert into auth.users (id, email, raw_app_meta_data, raw_user_meta_data) values ($1, $2, $3::jsonb, $4::jsonb)", [id, email, appMeta, userMeta]);
+  await q("insert into auth.users (id, email, raw_app_meta_data, raw_user_meta_data) values ($1, $2, $3::jsonb, $4::jsonb)",
+    [id, email, { provider: "email", providers: ["email"] }, userMeta]);
+  if (Object.keys(appMeta).length) {
+    await q("update auth.users set raw_app_meta_data = raw_app_meta_data || $2::jsonb where id = $1", [id, appMeta]);
+  }
   if (confirm) await q("update auth.users set email_confirmed_at = now() where id = $1", [id]);
   return (await q("select * from public.user_profiles where id = $1", [id]))[0];
 }
@@ -584,6 +593,48 @@ test("a service account's keys work through the gateway exactly like a person's,
     await q("update auth.users set banned_until = now() + interval '1 day' where id = $1", [SVC]);
     await q("set local role mcp_gateway");
     assert.equal((await q("select * from public.mcp_authenticate($1)", [hash])).length, 0, "banned");
+    await q("reset role");
+  });
+});
+
+test("the profile is already 'service' when the confirmation webhook's row is written (so notify-admin-approval skips it)", async () => {
+  await asOwner(async (q) => {
+    // Stand-in for the dashboard Database Webhook: record the row as of each
+    // confirmed_at null -> not-null UPDATE, which is what the webhook sends.
+    await q("create temp table webhook_rows (id uuid, account_type text)");
+    await q(`create function pg_temp.capture() returns trigger language plpgsql as $$ begin
+               if old.confirmed_at is null and new.confirmed_at is not null then insert into webhook_rows values (new.id, new.account_type); end if;
+               return new; end $$`);
+    await q("create trigger capture_confirm after update on public.user_profiles for each row execute function pg_temp.capture()");
+    await svcCreate(q);
+    await gotrueCreate(q, { id: HUMAN_NEW, email: "person@example.test", userMeta: { first_name: "P", last_name: "Q" } });
+    const rows = await q("select id, account_type from webhook_rows order by account_type");
+    assert.deepEqual(rows, [{ id: HUMAN_NEW, account_type: "human" }, { id: SVC, account_type: "service" }]);
+  });
+});
+
+test("app_metadata is the source of truth: setting it later (service role) makes a human a service account; an admin can't be converted", async () => {
+  await asOwner(async (q) => {
+    await gotrueCreate(q, { id: HUMAN_NEW, email: "later@example.test", userMeta: { first_name: "L", last_name: "T" } });
+    await q("update auth.users set raw_app_meta_data = raw_app_meta_data || '{\"account_type\":\"service\"}' where id = $1", [HUMAN_NEW]);
+    assert.equal((await q("select account_type from public.user_profiles where id = $1", [HUMAN_NEW]))[0].account_type, "service");
+    // Removing it again does NOT turn it back: service -> human is never allowed.
+    await q("update auth.users set raw_app_meta_data = raw_app_meta_data - 'account_type' where id = $1", [HUMAN_NEW]);
+    assert.equal((await q("select account_type from public.user_profiles where id = $1", [HUMAN_NEW]))[0].account_type, "service");
+    assert.match(await errOf(q, "update public.user_profiles set account_type = 'human' where id = $1", [HUMAN_NEW]) ?? "(allowed)", /cannot change/);
+    // An admin human can't be converted: the whole auth.users update fails closed.
+    assert.match(await errOf(q, `update auth.users set raw_app_meta_data = raw_app_meta_data || '{"account_type":"service"}' where id = '${ADMIN}'`) ?? "(allowed)", /service_never_admin/);
+    assert.equal((await q(`select account_type from public.user_profiles where id = '${ADMIN}'`))[0].account_type, "human");
+  });
+});
+
+test("nobody can convert a human without the service role: not an admin over REST, not the user via user_metadata", async () => {
+  await asOwner(async (q) => {
+    await q(`update auth.users set raw_user_meta_data = '{"account_type":"service"}' where id = '${OPERATOR}'`);
+    assert.equal((await q(`select account_type from public.user_profiles where id = '${OPERATOR}'`))[0].account_type, "human", "user_metadata ignored");
+    await q("select set_config('request.jwt.claims', $1, true)", [JSON.stringify(adminClaims())]);
+    await q("set local role authenticated");
+    assert.match(await errOf(q, `update public.user_profiles set account_type = 'service' where id = '${OPERATOR}'`) ?? "(allowed)", /cannot change/, "admin over REST");
     await q("reset role");
   });
 });

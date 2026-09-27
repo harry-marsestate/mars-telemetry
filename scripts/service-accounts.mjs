@@ -116,7 +116,12 @@ async function create(env, args) {
           returning id, role, status, data_mode, customer_account_id, account_type`,
         [id, role, dataMode, account],
       );
-      if (rows.length !== 1) throw new Error("profile was not created as a service account (is migration 20260926180000 applied?)");
+      if (rows.length !== 1) {
+        // account_type mirrors app_metadata via the on_auth_user_service_type
+        // trigger (migration 20260926190000); without it GoTrue's INSERT-then-
+        // update order leaves the profile 'human'.
+        throw new Error("the new profile is not a service account -- migrations 20260926180000 and 20260926190000 must both be applied");
+      }
       return rows[0];
     });
     console.log(`Created service account ${id}`);

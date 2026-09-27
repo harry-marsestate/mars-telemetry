@@ -407,6 +407,14 @@ await withDb(async (db) => {
   const [{ def: hnu }] = (await db.query("select pg_get_functiondef('public.handle_new_user()'::regprocedure) def")).rows;
   verdict("handle_new_user takes account_type from raw_app_meta_data only (users control raw_user_meta_data)",
     /raw_app_meta_data->>'account_type'/.test(hnu) && !/raw_user_meta_data->>'account_type'/.test(hnu));
+  const [sync] = (await db.query(
+    `select t.tgenabled, pg_get_triggerdef(t.oid) def from pg_trigger t
+      where t.tgrelid = 'auth.users'::regclass and t.tgname = 'on_auth_user_service_type' and not t.tgisinternal`)).rows;
+  verdict("trigger on_auth_user_service_type (20260926190000): enabled, AFTER UPDATE OF raw_app_meta_data, only on the -> 'service' transition",
+    sync?.tgenabled === "O" && /AFTER UPDATE OF raw_app_meta_data/.test(sync.def) && /account_type/.test(sync.def), sync?.def ?? "missing");
+  const [{ def: guardDef }] = (await db.query("select pg_get_functiondef('public.prevent_account_type_change()'::regprocedure) def")).rows;
+  verdict("account_type guard allows human -> service only when auth app_metadata says service",
+    /raw_app_meta_data ->> 'account_type' = 'service'/.test(guardDef) && /SECURITY DEFINER/i.test(guardDef));
   const types = (await db.query("select account_type, count(*)::int n from public.user_profiles group by 1 order by 1")).rows;
   out(`  profiles by account_type: ${types.map((t) => `${t.account_type}=${t.n}`).join(" ")}`);
 

@@ -93,7 +93,7 @@ node scripts/service-accounts.mjs list
 node scripts/service-accounts.mjs disable --id <uuid>   # every key it holds stops working; enable to undo
 ```
 
-`svc-<name>@service.invalid`, no password (nobody can sign in as it), never
+`svc-<name>@service.invalid`, a random never-disclosed password (nobody can sign in as it), never
 admin, `data_mode` real_only unless `--data-mode all`. Needs
 `SUPABASE_SERVICE_ROLE_KEY` in `.env`.
 

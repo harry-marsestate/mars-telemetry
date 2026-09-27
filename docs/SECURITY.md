@@ -6656,3 +6656,14 @@ exact order and reproduced the failure (4 SQL tests failed) before the fix.
 SQL 29/29, harness dry run 64/64 (adds: sync trigger definition, guard
 definition), CLI dry run creates `nightly-checks` correctly; mutation-tested
 (no sync trigger; guard allowing human -> service unconditionally).
+
+**Correction (read back from production after the successful create):** a
+service account does have a password hash. When the Admin API gets no
+password, GoTrue generates a random 64-character one
+(`password.Generate(64, 10, ...)` in `adminUserCreate`), stores only its
+hash and never returns the plaintext. So "no password" in this entry, in
+`20260926180000`'s comments and in the first CLI version is wrong; the
+accurate statement is "a random, never-disclosed password". The sign-in
+lock stands -- nobody knows it and it is not guessable, and `.invalid` still
+blocks every email-based route. The CLI's wording is corrected; the applied
+migration's comments are left as they are (applied migrations aren't edited).

@@ -12,12 +12,13 @@
 //   node scripts/service-accounts.mjs disable --id <uuid>    # un-approve: every key it holds stops working
 //   node scripts/service-accounts.mjs enable  --id <uuid>
 //
-// A service account is svc-<name>@service.invalid, email confirmed, with NO
-// password and no ban (a ban would kill its keys -- migration 20260926165000),
+// A service account is svc-<name>@service.invalid, email confirmed, with no
+// KNOWN password (none is sent; GoTrue then sets a random 64-character one and
+// never discloses it -- adminUserCreate, supabase/auth admin.go) and no ban (a ban would kill its keys -- migration 20260926165000),
 // and app_metadata.account_type = 'service' (handle_new_user() copies that into
 // user_profiles.account_type, which then can never change and never be admin).
-// Nobody can sign in as it: no password, and .invalid can't receive a magic
-// link, OTP or recovery email. Default data_mode is real_only.
+// Nobody can sign in as it: its password is random and never disclosed, and
+// .invalid can't receive a magic link, OTP or recovery email. Default data_mode is real_only.
 //
 // One service account per distinct scope (role + customer scope + data_mode);
 // issue one key per agent under it, in the web app's API keys tab or with
@@ -97,7 +98,8 @@ async function create(env, args) {
     }
   });
 
-  // No password, no ban. email_confirm: true, like any working account.
+  // No password sent (GoTrue sets a random, never-disclosed one), no ban.
+  // email_confirm: true, like any working account.
   const user = await adminApi(env, "POST", "users", {
     email,
     email_confirm: true,
@@ -125,7 +127,7 @@ async function create(env, args) {
       return rows[0];
     });
     console.log(`Created service account ${id}`);
-    console.log(`  email:     ${email}  (no password, cannot sign in)`);
+    console.log(`  email:     ${email}  (random undisclosed password, nobody can sign in)`);
     console.log(`  name:      Service ${label}`);
     console.log(`  scope:     ${profile.role}${profile.customer_account_id ? ` / ${profile.customer_account_id}` : ""}, ${profile.status}, data_mode ${profile.data_mode}`);
     console.log("");

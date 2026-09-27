@@ -6667,3 +6667,16 @@ accurate statement is "a random, never-disclosed password". The sign-in
 lock stands -- nobody knows it and it is not guessable, and `.invalid` still
 blocks every email-based route. The CLI's wording is corrected; the applied
 migration's comments are left as they are (applied migrations aren't edited).
+
+**Rollout completed (2026-09-27):** `20260926190000` applied (dry run listed
+only it; harness 78/78 with the new trigger/guard definition checks). Retried
+`service-accounts.mjs create --name nightly-checks`: `3c254617`, read back
+independently as `account_type=service, status=approved, role=operator,
+data_mode=real_only, is_admin=false, confirmed_at` set; auth row confirmed,
+not banned, email identity only, `app_metadata.account_type=service`. No
+notification email: `net._http_response` shows the confirmation webhook
+answered `{"ok":true,"skipped":"service account"}` (the failed attempt's call
+had answered `{"ok":false,"reason":"user lookup failed"}`, so no email then
+either). Full harness **80/80, no SKIP**: section 4c now exercises the real
+service account -- can't be made admin (owner, admin over REST), can't be
+turned human -- and every other section is unchanged.

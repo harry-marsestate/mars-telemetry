@@ -1,5 +1,6 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
+import { addDays, lastCompletePacificDay, lastElapsedHourMs, stampUtc } from "./window.ts";
 
 // Daily real-2026-climate ingestion. Ports ingestion/open_meteo/client.py +
 // backfill_phase1.py/backfill_climate_round2.py's fetch/scale/upsert logic
@@ -37,21 +38,32 @@ export default {
       const startStr = start.toISOString().slice(0, 10);
       const endStr = end.toISOString().slice(0, 10);
 
-      const VINTAGE = 2026;
-      const results: Record<string, { written: number; nulls: number; error?: string }> = {};
+      // Never store an hour that hasn't happened, and never aggregate a day
+      // that hasn't ended -- see window.ts. Applies to explicit
+      // start_date/end_date backfill requests too.
+      const runAt = new Date();
+      const cutoffMs = lastElapsedHourMs(runAt.getTime());
+      const refreshEnd = [endStr, lastCompletePacificDay(runAt)].sort()[0];
+      // start/end are Pacific dates; Open-Meteo is asked for UTC dates (see
+      // stampUtc), so fetch one extra UTC day to cover the Pacific evening
+      // of endStr. The cutoff above trims anything not yet elapsed.
+      const fetchEnd = addDays(endStr, 1);
 
-      const weatherData = await fetchHourly(startStr, endStr, ["temperature_2m", "relative_humidity_2m", "precipitation"]);
+      const VINTAGE = 2026;
+      const results: Record<string, MetricResult> = {};
+
+      const weatherData = await fetchHourly(startStr, fetchEnd, ["temperature_2m", "relative_humidity_2m", "precipitation"]);
       if (weatherData.error) {
         results.air_temp = { written: 0, nulls: 0, error: weatherData.error };
         results.humidity = { written: 0, nulls: 0, error: weatherData.error };
         results.precipitation = { written: 0, nulls: 0, error: weatherData.error };
       } else {
-        await upsertMetric(ctx, results, "air_temp", weatherData.data!, "temperature_2m", VINTAGE, 1);
-        await upsertMetric(ctx, results, "humidity", weatherData.data!, "relative_humidity_2m", VINTAGE, 1);
-        await upsertMetric(ctx, results, "precipitation", weatherData.data!, "precipitation", VINTAGE, 1, "inch");
+        await upsertMetric(ctx, results, cutoffMs, "air_temp", weatherData.data!, "temperature_2m", VINTAGE, 1);
+        await upsertMetric(ctx, results, cutoffMs, "humidity", weatherData.data!, "relative_humidity_2m", VINTAGE, 1);
+        await upsertMetric(ctx, results, cutoffMs, "precipitation", weatherData.data!, "precipitation", VINTAGE, 1);
       }
 
-      const soilData = await fetchHourly(startStr, endStr, ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"], "era5_land");
+      const soilData = await fetchHourly(startStr, fetchEnd, ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"], "era5_land");
       if (soilData.error) {
         results.soil_moisture = { written: 0, nulls: 0, error: soilData.error };
         results.soil_temp = { written: 0, nulls: 0, error: soilData.error };
@@ -60,15 +72,15 @@ export default {
         // fraction; every consumer here (the mock data, soil_below_refill's
         // threshold, the "% VWC" unit) expects 0-100 -- see client.py's
         // matching comment.
-        await upsertMetric(ctx, results, "soil_moisture", soilData.data!, "soil_moisture_0_to_7cm", VINTAGE, 100);
-        await upsertMetric(ctx, results, "soil_temp", soilData.data!, "soil_temperature_0_to_7cm", VINTAGE, 1);
+        await upsertMetric(ctx, results, cutoffMs, "soil_moisture", soilData.data!, "soil_moisture_0_to_7cm", VINTAGE, 100);
+        await upsertMetric(ctx, results, cutoffMs, "soil_temp", soilData.data!, "soil_temperature_0_to_7cm", VINTAGE, 1);
       }
 
       const anyWritten = Object.values(results).some((r) => r.written > 0);
       let refreshError: string | undefined;
-      if (anyWritten) {
+      if (anyWritten && startStr <= refreshEnd) {
         const { error } = await ctx.supabaseAdmin.rpc("refresh_daily_weather_range", {
-          p_vintage: VINTAGE, p_start: startStr, p_end: endStr,
+          p_vintage: VINTAGE, p_start: startStr, p_end: refreshEnd,
         });
         if (error) {
           console.error("ingest-climate-2026: refresh_daily_weather_range failed", error);
@@ -82,7 +94,7 @@ export default {
       const anyError = Object.values(results).some((r) => r.error) || !!refreshError;
       return Response.json({
         ok: !anyError,
-        window: { start: startStr, end: endStr },
+        window: { start: startStr, end: endStr, stored_through: new Date(cutoffMs).toISOString(), daily_weather_through: refreshEnd },
         results,
         daily_weather_refreshed: anyWritten && !refreshError,
         refresh_error: refreshError ?? null,
@@ -109,6 +121,7 @@ const SENSOR_ID = "OM-ERA5";
 
 interface OpenMeteoResponse {
   elevation?: number;
+  utc_offset_seconds?: number;
   hourly?: { time: string[]; [key: string]: unknown };
 }
 
@@ -118,7 +131,7 @@ async function fetchHourly(
   const params = new URLSearchParams({
     latitude: String(LATITUDE), longitude: String(LONGITUDE), elevation: String(ELEVATION_M),
     start_date: startDate, end_date: endDate, hourly: hourlyVars.join(","),
-    temperature_unit: "fahrenheit", timezone: "America/Los_Angeles",
+    temperature_unit: "fahrenheit", timezone: "UTC",
     precipitation_unit: "inch",
   });
   if (models) params.set("models", models);
@@ -130,45 +143,47 @@ async function fetchHourly(
     if (data.elevation == null || Math.abs(data.elevation - ELEVATION_M) > 1) {
       return { error: `elevation mismatch: got ${data.elevation}, expected ${ELEVATION_M} -- refusing to ingest` };
     }
+    if (data.utc_offset_seconds !== 0) {
+      return { error: `utc_offset_seconds is ${data.utc_offset_seconds}, expected 0 for timezone=UTC -- refusing to ingest` };
+    }
     return { data };
   } catch (err) {
     return { error: String(err) };
   }
 }
 
-// Same fixed PDT (-07:00) convention as backfill_phase1.py -- valid for
-// this job's Apr-Oct operating window (matches the app's own season
-// scope), same DST caveat that script documents: would need real
-// timezone logic if this ever needed to run in Nov-Mar.
-const PDT_OFFSET = "-07:00";
+interface MetricResult { written: number; nulls: number; future_skipped?: number; error?: string }
 
 async function upsertMetric(
   ctx: { supabaseAdmin: { from: (t: string) => any } },
-  results: Record<string, { written: number; nulls: number; error?: string }>,
+  results: Record<string, MetricResult>,
+  cutoffMs: number,
   metricKey: string, data: OpenMeteoResponse, variable: string, vintage: number, scale: number,
 ) {
   try {
     const times = data.hourly?.time ?? [];
     const values = (data.hourly?.[variable] as (number | null)[] | undefined) ?? [];
     const rows: { metric_key: string; sensor_id: string; block_id: null; tank_id: null; recorded_at: string; value: number; source_system: string; vintage: number }[] = [];
-    let nulls = 0;
+    let nulls = 0, futureSkipped = 0;
     for (let i = 0; i < times.length; i++) {
+      const recordedAt = stampUtc(times[i]);
+      if (Date.parse(recordedAt) > cutoffMs) { futureSkipped++; continue; }
       const v = values[i];
       if (v == null) { nulls++; continue; }
       rows.push({
         metric_key: metricKey, sensor_id: SENSOR_ID, block_id: null, tank_id: null,
-        recorded_at: `${times[i]}${PDT_OFFSET}`, value: v * scale, source_system: SOURCE_SYSTEM, vintage,
+        recorded_at: recordedAt, value: v * scale, source_system: SOURCE_SYSTEM, vintage,
       });
     }
-    if (rows.length === 0) { results[metricKey] = { written: 0, nulls }; return; }
+    if (rows.length === 0) { results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped }; return; }
     const { error } = await ctx.supabaseAdmin.from("sensor_readings")
       .upsert(rows, { onConflict: "metric_key,sensor_id,recorded_at" });
     if (error) {
       console.error(`ingest-climate-2026: upsert failed for ${metricKey}`, error);
-      results[metricKey] = { written: 0, nulls, error: error.message };
+      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, error: error.message };
       return;
     }
-    results[metricKey] = { written: rows.length, nulls };
+    results[metricKey] = { written: rows.length, nulls, future_skipped: futureSkipped };
   } catch (err) {
     console.error(`ingest-climate-2026: unexpected error upserting ${metricKey}`, err);
     results[metricKey] = { written: 0, nulls: 0, error: String(err) };

@@ -6738,3 +6738,31 @@ Must change before the 2027 season. The job is scheduled every day of the year
 (`17 13 * * *`, no season guard in the code), so from 2027-01-01 it will write
 2027 hours as `vintage = 2026`. A nightly health check is planned for this:
 warn when the current date's vintage has no ingest.
+
+### Follow-up: the DST commit's extra fetch day broke every run (2026-09-29, fixed the same evening)
+
+The post-deploy triggered run of the fix above returned 207 with every metric
+failing: `Open-Meteo 400: Parameter 'end_date' is out of allowed range from
+1940-01-01 to 2026-09-29`. The DST commit fetched `end_date = endStr + 1`
+(UTC) to cover the Pacific evening of `endStr`; Open-Meteo rejects any
+`end_date` past its own current date. Nothing was written (the failure is
+fail-closed: 0 rows, no daily refresh), and the cleanup had already run, so
+no forecast rows came back.
+
+Fix (`fix/climate-fetch-end`): `fetchWindowEnd()` caps the extra day at today
+(UTC); if Open-Meteo still answers the out-of-range 400, the fetch is retried
+ONCE with `end_date` a day earlier, never earlier than `endStr`, and the
+response records `window.fetch_end` and `window.fetch_end_fallback`. For the
+scheduled 13:17 UTC run `fetchEnd` is already `endStr` (today), which every
+previous run proved acceptable, so the retry never applies there. Before
+merging, the exact URLs the new code builds (via `window.ts`'s `archiveUrl()`)
+were requested live: the scheduled-run and backfill shapes were accepted, and
+a forced `end_date` one day past today returned the out-of-range 400 and
+recovered through the single retry.
+
+RULE (process): unit tests cannot catch an upstream API's limits. For any
+change to an ingest function's request parameters, make one live read-only
+request with the exact URL/parameters the new code will build, confirm the
+upstream accepts it, and only then merge and deploy. The triggered run stays
+as the post-deploy check -- it caught this one, which is the only reason the
+failure was found before the scheduled run.

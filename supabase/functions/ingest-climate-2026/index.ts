@@ -1,6 +1,9 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
-import { addDays, lastCompletePacificDay, lastElapsedHourMs, stampUtc } from "./window.ts";
+import {
+  archiveUrl, ELEVATION_M, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
+  lastElapsedHourMs, stampUtc,
+} from "./window.ts";
 
 // Daily real-2026-climate ingestion. Ports ingestion/open_meteo/client.py +
 // backfill_phase1.py/backfill_climate_round2.py's fetch/scale/upsert logic
@@ -45,14 +48,17 @@ export default {
       const cutoffMs = lastElapsedHourMs(runAt.getTime());
       const refreshEnd = [endStr, lastCompletePacificDay(runAt)].sort()[0];
       // start/end are Pacific dates; Open-Meteo is asked for UTC dates (see
-      // stampUtc), so fetch one extra UTC day to cover the Pacific evening
-      // of endStr. The cutoff above trims anything not yet elapsed.
-      const fetchEnd = addDays(endStr, 1);
+      // stampUtc), so fetch up to one extra UTC day to cover the Pacific
+      // evening of endStr -- capped at today (UTC), and retried once a day
+      // earlier if Open-Meteo still says out of range (fetchWithEndFallback).
+      // The cutoff above trims anything not yet elapsed.
+      const fetchEnd = fetchWindowEnd(endStr, runAt);
 
       const VINTAGE = 2026;
       const results: Record<string, MetricResult> = {};
 
-      const weatherData = await fetchHourly(startStr, fetchEnd, ["temperature_2m", "relative_humidity_2m", "precipitation"]);
+      const weatherData = await fetchWithEndFallback(
+        (e) => fetchHourly(startStr, e, ["temperature_2m", "relative_humidity_2m", "precipitation"]), fetchEnd, endStr);
       if (weatherData.error) {
         results.air_temp = { written: 0, nulls: 0, error: weatherData.error };
         results.humidity = { written: 0, nulls: 0, error: weatherData.error };
@@ -63,7 +69,8 @@ export default {
         await upsertMetric(ctx, results, cutoffMs, "precipitation", weatherData.data!, "precipitation", VINTAGE, 1);
       }
 
-      const soilData = await fetchHourly(startStr, fetchEnd, ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"], "era5_land");
+      const soilData = await fetchWithEndFallback(
+        (e) => fetchHourly(startStr, e, ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"], "era5_land"), fetchEnd, endStr);
       if (soilData.error) {
         results.soil_moisture = { written: 0, nulls: 0, error: soilData.error };
         results.soil_temp = { written: 0, nulls: 0, error: soilData.error };
@@ -94,7 +101,11 @@ export default {
       const anyError = Object.values(results).some((r) => r.error) || !!refreshError;
       return Response.json({
         ok: !anyError,
-        window: { start: startStr, end: endStr, stored_through: new Date(cutoffMs).toISOString(), daily_weather_through: refreshEnd },
+        window: {
+          start: startStr, end: endStr, stored_through: new Date(cutoffMs).toISOString(), daily_weather_through: refreshEnd,
+          fetch_end: { weather: weatherData.endUsed, soil: soilData.endUsed },
+          fetch_end_fallback: weatherData.fallback || soilData.fallback,
+        },
         results,
         daily_weather_refreshed: anyWritten && !refreshError,
         refresh_error: refreshError ?? null,
@@ -112,10 +123,6 @@ export default {
   }),
 };
 
-const LATITUDE = 38.603091360858635;
-const LONGITUDE = -122.45867651725105;
-const ELEVATION_M = 670;
-const ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive";
 const SOURCE_SYSTEM = "open_meteo_era5";
 const SENSOR_ID = "OM-ERA5";
 
@@ -127,18 +134,13 @@ interface OpenMeteoResponse {
 
 async function fetchHourly(
   startDate: string, endDate: string, hourlyVars: string[], models?: string,
-): Promise<{ data?: OpenMeteoResponse; error?: string }> {
-  const params = new URLSearchParams({
-    latitude: String(LATITUDE), longitude: String(LONGITUDE), elevation: String(ELEVATION_M),
-    start_date: startDate, end_date: endDate, hourly: hourlyVars.join(","),
-    temperature_unit: "fahrenheit", timezone: "UTC",
-    precipitation_unit: "inch",
-  });
-  if (models) params.set("models", models);
-
+): Promise<{ data?: OpenMeteoResponse; error?: string; outOfRange?: boolean }> {
   try {
-    const resp = await fetch(`${ARCHIVE_URL}?${params.toString()}`);
-    if (!resp.ok) return { error: `Open-Meteo ${resp.status}: ${await resp.text()}` };
+    const resp = await fetch(archiveUrl(startDate, endDate, hourlyVars, models));
+    if (!resp.ok) {
+      const text = await resp.text();
+      return { error: `Open-Meteo ${resp.status}: ${text}`, outOfRange: isEndDateOutOfRange(resp.status, text) };
+    }
     const data: OpenMeteoResponse = await resp.json();
     if (data.elevation == null || Math.abs(data.elevation - ELEVATION_M) > 1) {
       return { error: `elevation mismatch: got ${data.elevation}, expected ${ELEVATION_M} -- refusing to ingest` };

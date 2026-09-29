@@ -1,6 +1,6 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
-import { lastCompletePacificDay, lastElapsedHourMs } from "./window.ts";
+import { addDays, lastCompletePacificDay, lastElapsedHourMs, stampUtc } from "./window.ts";
 
 // Daily real-2026-climate ingestion. Ports ingestion/open_meteo/client.py +
 // backfill_phase1.py/backfill_climate_round2.py's fetch/scale/upsert logic
@@ -44,11 +44,15 @@ export default {
       const runAt = new Date();
       const cutoffMs = lastElapsedHourMs(runAt.getTime());
       const refreshEnd = [endStr, lastCompletePacificDay(runAt)].sort()[0];
+      // start/end are Pacific dates; Open-Meteo is asked for UTC dates (see
+      // stampUtc), so fetch one extra UTC day to cover the Pacific evening
+      // of endStr. The cutoff above trims anything not yet elapsed.
+      const fetchEnd = addDays(endStr, 1);
 
       const VINTAGE = 2026;
       const results: Record<string, MetricResult> = {};
 
-      const weatherData = await fetchHourly(startStr, endStr, ["temperature_2m", "relative_humidity_2m", "precipitation"]);
+      const weatherData = await fetchHourly(startStr, fetchEnd, ["temperature_2m", "relative_humidity_2m", "precipitation"]);
       if (weatherData.error) {
         results.air_temp = { written: 0, nulls: 0, error: weatherData.error };
         results.humidity = { written: 0, nulls: 0, error: weatherData.error };
@@ -59,7 +63,7 @@ export default {
         await upsertMetric(ctx, results, cutoffMs, "precipitation", weatherData.data!, "precipitation", VINTAGE, 1);
       }
 
-      const soilData = await fetchHourly(startStr, endStr, ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"], "era5_land");
+      const soilData = await fetchHourly(startStr, fetchEnd, ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"], "era5_land");
       if (soilData.error) {
         results.soil_moisture = { written: 0, nulls: 0, error: soilData.error };
         results.soil_temp = { written: 0, nulls: 0, error: soilData.error };
@@ -117,6 +121,7 @@ const SENSOR_ID = "OM-ERA5";
 
 interface OpenMeteoResponse {
   elevation?: number;
+  utc_offset_seconds?: number;
   hourly?: { time: string[]; [key: string]: unknown };
 }
 
@@ -126,7 +131,7 @@ async function fetchHourly(
   const params = new URLSearchParams({
     latitude: String(LATITUDE), longitude: String(LONGITUDE), elevation: String(ELEVATION_M),
     start_date: startDate, end_date: endDate, hourly: hourlyVars.join(","),
-    temperature_unit: "fahrenheit", timezone: "America/Los_Angeles",
+    temperature_unit: "fahrenheit", timezone: "UTC",
     precipitation_unit: "inch",
   });
   if (models) params.set("models", models);
@@ -138,17 +143,14 @@ async function fetchHourly(
     if (data.elevation == null || Math.abs(data.elevation - ELEVATION_M) > 1) {
       return { error: `elevation mismatch: got ${data.elevation}, expected ${ELEVATION_M} -- refusing to ingest` };
     }
+    if (data.utc_offset_seconds !== 0) {
+      return { error: `utc_offset_seconds is ${data.utc_offset_seconds}, expected 0 for timezone=UTC -- refusing to ingest` };
+    }
     return { data };
   } catch (err) {
     return { error: String(err) };
   }
 }
-
-// Same fixed PDT (-07:00) convention as backfill_phase1.py -- valid for
-// this job's Apr-Oct operating window (matches the app's own season
-// scope), same DST caveat that script documents: would need real
-// timezone logic if this ever needed to run in Nov-Mar.
-const PDT_OFFSET = "-07:00";
 
 interface MetricResult { written: number; nulls: number; future_skipped?: number; error?: string }
 
@@ -164,7 +166,7 @@ async function upsertMetric(
     const rows: { metric_key: string; sensor_id: string; block_id: null; tank_id: null; recorded_at: string; value: number; source_system: string; vintage: number }[] = [];
     let nulls = 0, futureSkipped = 0;
     for (let i = 0; i < times.length; i++) {
-      const recordedAt = `${times[i]}${PDT_OFFSET}`;
+      const recordedAt = stampUtc(times[i]);
       if (Date.parse(recordedAt) > cutoffMs) { futureSkipped++; continue; }
       const v = values[i];
       if (v == null) { nulls++; continue; }

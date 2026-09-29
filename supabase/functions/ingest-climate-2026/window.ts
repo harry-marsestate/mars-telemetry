@@ -19,6 +19,24 @@ export function lastElapsedHourMs(nowMs: number): number {
   return Math.floor(nowMs / HOUR_MS) * HOUR_MS;
 }
 
+// Open-Meteo is asked for timezone=UTC, so an hourly time is a UTC wall
+// clock ("2026-09-29T14:00"). Stamping it Z makes recorded_at independent of
+// DST. The previous request used America/Los_Angeles and stamped a fixed
+// -07:00, which was only correct while Open-Meteo labelled its response with
+// a -07:00 offset: it reports ONE utc_offset_seconds per response, observed
+// as -25200 even for PST dates while the request was made during PDT.
+export function stampUtc(time: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(time)) throw new Error(`unexpected Open-Meteo time '${time}'`);
+  return `${time}:00Z`;
+}
+
+// YYYY-MM-DD plus n calendar days.
+export function addDays(date: string, n: number): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
 // Yesterday, in America/Los_Angeles, as YYYY-MM-DD.
 export function lastCompletePacificDay(now: Date): string {
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(now);

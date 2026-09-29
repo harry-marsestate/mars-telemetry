@@ -6068,6 +6068,13 @@ result as describing the gateway -- both silently change the answer.
   RLS (including an admin's). It cannot write, bypass RLS, or become any
   other role. Strictly narrower than the legacy JWT secret (mints anything,
   including `service_role`) and than the auto-injected `SUPABASE_DB_URL`.
+  **CORRECTED 2026-09-29 -- this was not true while a secret API key sat in
+  a trigger's arguments.** Every role can read `pg_trigger.tgargs`, and the
+  dashboard webhook stored the project's `sb_secret_` key there, so a leaked
+  `MCP_GATEWAY_DB_URL` led to full service-role-equivalent access. See "A
+  secret API key was readable from pg_trigger" at the end of this file. The
+  statement holds again only while no trigger, function or view embeds a key
+  (a nightly health check enforces that).
 - **PUBLIC grants a direct connection inherits.** `net.http_*` (pg_net:
   outbound HTTP from the database) and `extensions.pg_stat_statements`
   (query statistics) are granted to PUBLIC -- unreachable through PostgREST,
@@ -6766,3 +6773,73 @@ request with the exact URL/parameters the new code will build, confirm the
 upstream accepts it, and only then merge and deploy. The triggered run stays
 as the post-deploy check -- it caught this one, which is the only reason the
 failure was found before the scheduled run.
+
+## A secret API key was readable from pg_trigger (2026-09-29)
+
+Branch `fix/vault-webhook`, migration `20260930000000_vault_backed_webhook.sql`.
+Found while building a local shadow database for the nightly health checks.
+
+**What.** The dashboard-configured Database Webhook `notify-admin-on-confirmation`
+(`AFTER UPDATE` on `public.user_profiles` -> `notify-admin-approval`) was a
+trigger calling `supabase_functions.http_request()` with the project's
+`sb_secret_` key as a literal trigger argument. Trigger arguments are stored in
+`pg_trigger.tgargs`, which Postgres grants to PUBLIC: `mcp_gateway`,
+`mcp_reader`, `authenticated` and `anon` could all read it (checked with
+`has_column_privilege`). PostgREST doesn't expose `pg_catalog`, so the browser
+path was closed -- but `mcp_gateway` is a login role, and whoever held
+`MCP_GATEWAY_DB_URL` could read a full-privilege key. It was the same key, byte
+for byte, as the three Vault secrets the cron jobs send (compared by SHA-256
+fingerprint, never by value) and as the platform-injected
+`SUPABASE_SERVICE_ROLE_KEY` Edge Function variable. No function, view or cron
+command embedded a key; only this trigger did.
+
+**The key was also exposed in a Claude Code session transcript.** While loading a
+schema-only `pg_dump` of production into a local database, the assistant
+printed the dump line holding the trigger definition, key included. The key
+is being rotated for that reason alone, whatever else is fixed.
+
+RULE: treat a schema dump (and `pg_get_triggerdef`, `pg_proc.prosrc`,
+`cron.job.command`, `pg_views.definition`) as sensitive. Grep it for
+`sb_secret_`, `eyJ` and similar before printing any part of it, and print
+redacted text only (`regexp_replace` in the query, or `sed` on the file).
+
+**Fix.**
+1. The webhook is replaced by `public.notify_admin_approval_webhook()`
+   (SECURITY DEFINER, `search_path = public`) on trigger `notify_admin_approval`:
+   it reads the key from Vault by name at call time and calls `net.http_post`,
+   the pattern the cron jobs already used. It reproduces the webhook exactly:
+   same URL, body (`old_record`/`record`/`type`/`table`/`schema`), headers and
+   5000ms timeout, `AFTER UPDATE FOR EACH ROW` with no WHEN clause. Verified on
+   a local database against Supabase's own `supabase_functions.http_request()`
+   source copied from production: identical request except the key. Deliberate
+   differences: no `supabase_functions.hooks` row (it isn't a dashboard webhook
+   any more; pg_net still records the request), and a missing Vault secret
+   logs a warning instead of sending a keyless request -- the profile update
+   is never blocked. EXECUTE is revoked from every API role; a trigger
+   function needs it only at CREATE TRIGGER time (verified: it still fires for
+   an `authenticated` admin writer).
+2. One Vault secret, `edge_functions_secret_key`, for the new trigger and all
+   three cron jobs, so a rotation is one update. Each cron command is rewritten
+   from its own live text with exactly one substitution (the secret name). The
+   three per-job secrets, which held the old key, are deleted. The migration
+   refuses to run until the new secret exists.
+3. Rotation: new secret key created in the dashboard, stored only in Vault by
+   the owner; old key revoked after every consumer is confirmed moved.
+
+**How Edge Functions check the key** (read from `@supabase/server` 1.8.1, the
+version `npm:@supabase/server@^1` resolves to): `withSupabase({auth:["secret"]})`
+accepts the request if its `apikey` equals ANY entry of the platform-injected
+`SUPABASE_SECRET_KEYS` (a JSON map, read from the environment per request).
+`ctx.supabaseAdmin` uses the entry named `default`, else the first one.
+
+**Accepted residual risk: `net.http_request_queue`.** pg_net's queue table is
+readable by PUBLIC too, and while a request waits there its headers -- including
+the Vault-decrypted key -- are visible to any role that can connect directly.
+Requests normally leave the queue within seconds. Revoking Supabase-managed
+pg_net grants risks breaking pg_net itself, so this stays, with a nightly
+health check that warns if any request has been queued for more than 10
+minutes (the only situation in which the window is long).
+
+RULE: never put a key in a trigger argument, function body, view or cron
+command -- read it from Vault at call time. A nightly health check fails if
+any trigger, function or view embeds `sb_secret_` or a JWT.

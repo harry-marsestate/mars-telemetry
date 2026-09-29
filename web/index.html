@@ -4,7 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mars Telemetry — Mars Estate, Howell Mountain</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- supabase-js pinned to an exact version and file, with SRI (was "@2", which
+     jsDelivr resolves at request time -- a new release would have reached
+     production unreviewed). The pinned file is byte-identical to what "@2"
+     served on 2026-09-29 minus jsDelivr's generated comment header; that
+     generated bare-URL response is explicitly not SRI-safe, the static file is.
+     To upgrade: pick a version, recompute sha384 of dist/umd/supabase.js
+     (openssl dgst -sha384 -binary | openssl base64 -A), update both. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"
+        integrity="sha384-Rj26LVGvoeRVR6+mwQmFfcR3QOBEwT+ZmuCWpuiqeTzJpCs0ER4ITAWGb4Hiy3Ok"
+        crossorigin="anonymous"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">

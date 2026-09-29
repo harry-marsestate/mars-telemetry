@@ -8,7 +8,13 @@ import { withSupabase } from "@supabase/server";
 // filtered to confirmed_at is not null). Server-to-server only -- auth is
 // restricted to the secret key, never publishable.
 export default {
-  fetch: withSupabase({ auth: ["secret"] }, async (req, ctx) => {
+  fetch: withSupabase({
+    // "secret:*": any of the project's secret keys. Bare "secret" accepts only
+    // the key NAMED "default", so a rotation to a new key failed with 401
+    // until code changed (docs/SECURITY.md, 2026-09-29). Every secret key
+    // carries the same full privilege, so accepting any is no weaker.
+    auth: ["secret:*"],
+  }, async (req, ctx) => {
     try {
       const payload = await req.json();
       const { type, table, record, old_record } = payload ?? {};

@@ -18,7 +18,13 @@ import {
 // pg_cron-only, same auth mode as insights-scan/notify-admin-approval
 // (server-to-server, secret key only).
 export default {
-  fetch: withSupabase({ auth: ["secret"] }, async (req, ctx) => {
+  fetch: withSupabase({
+    // "secret:*": any of the project's secret keys. Bare "secret" accepts only
+    // the key NAMED "default", so a rotation to a new key failed with 401
+    // until code changed (docs/SECURITY.md, 2026-09-29). Every secret key
+    // carries the same full privilege, so accepting any is no weaker.
+    auth: ["secret:*"],
+  }, async (req, ctx) => {
     try {
       const body = await req.json().catch(() => ({}));
       const { start_date, end_date, days_back } = body ?? {};

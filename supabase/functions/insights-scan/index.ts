@@ -25,7 +25,13 @@ interface PendingRow {
 // notify-admin-approval, for the same reason (server-to-server, secret
 // key only -- see docs/SECURITY.md's two-key-system note).
 export default {
-  fetch: withSupabase({ auth: ["secret"] }, async (_req, ctx) => {
+  fetch: withSupabase({
+    // "secret:*": any of the project's secret keys. Bare "secret" accepts only
+    // the key NAMED "default", so a rotation to a new key failed with 401
+    // until code changed (docs/SECURITY.md, 2026-09-29). Every secret key
+    // carries the same full privilege, so accepting any is no weaker.
+    auth: ["secret:*"],
+  }, async (_req, ctx) => {
     try {
       const runId = crypto.randomUUID();
       const pending: PendingRow[] = [];

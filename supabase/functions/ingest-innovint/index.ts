@@ -33,7 +33,13 @@ import { withSupabase } from "@supabase/server";
 // invariants (fetch-everything-before-any-write; explicit vintage list,
 // never derived from fetched rows).
 export default {
-  fetch: withSupabase({ auth: ["secret"] }, async (_req, ctx) => {
+  fetch: withSupabase({
+    // "secret:*": any of the project's secret keys. Bare "secret" accepts only
+    // the key NAMED "default", so a rotation to a new key failed with 401
+    // until code changed (docs/SECURITY.md, 2026-09-29). Every secret key
+    // carries the same full privilege, so accepting any is no weaker.
+    auth: ["secret:*"],
+  }, async (_req, ctx) => {
     const token = Deno.env.get("INNOVINT_TOKEN");
     const wineryId = Deno.env.get("INNOVINT_WINERY_ID") ?? "wnry_2PW0KJ93L726WKKG54OQE1RY";
     if (!token) {

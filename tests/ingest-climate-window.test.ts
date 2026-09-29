@@ -1,7 +1,10 @@
 // ingest-climate-2026's upsert/refresh window (window.ts).
 //   npx deno test --no-lock tests/ingest-climate-window.test.ts
 import { assertEquals } from "jsr:@std/assert@1";
-import { addDays, lastCompletePacificDay, lastElapsedHourMs, stampUtc } from "../supabase/functions/ingest-climate-2026/window.ts";
+import {
+  addDays, archiveUrl, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
+  lastElapsedHourMs, stampUtc,
+} from "../supabase/functions/ingest-climate-2026/window.ts";
 
 Deno.test("cutoff is the top of the current hour", () => {
   assertEquals(lastElapsedHourMs(Date.parse("2026-09-29T13:17:03Z")), Date.parse("2026-09-29T13:00:00Z"));
@@ -60,4 +63,69 @@ Deno.test("stampUtc rejects anything but a bare hourly wall-clock time", () => {
 Deno.test("addDays crosses month ends", () => {
   assertEquals(addDays("2026-09-30", 1), "2026-10-01");
   assertEquals(addDays("2026-10-31", 1), "2026-11-01");
+});
+
+Deno.test("fetchWindowEnd: one day past endStr, never past today (UTC)", () => {
+  // The 13:17 UTC scheduled run: endStr is today, so no extra day.
+  assertEquals(fetchWindowEnd("2026-09-30", new Date("2026-09-30T13:17:00Z")), "2026-09-30");
+  // A backfill ending in the past keeps its extra day.
+  assertEquals(fetchWindowEnd("2026-09-20", new Date("2026-09-30T13:17:00Z")), "2026-09-21");
+  // Late Pacific evening, UTC already a day ahead: endStr+1 == UTC today.
+  assertEquals(fetchWindowEnd("2026-09-29", new Date("2026-09-30T03:00:00Z")), "2026-09-30");
+});
+
+const OUT_OF_RANGE = `{"error":true,"reason":"Parameter 'end_date' is out of allowed range from 1940-01-01 to 2026-09-29"}`;
+
+Deno.test("isEndDateOutOfRange recognises only that 400", () => {
+  assertEquals(isEndDateOutOfRange(400, OUT_OF_RANGE), true);
+  assertEquals(isEndDateOutOfRange(400, `{"error":true,"reason":"Cannot initialize WeatherVariable"}`), false);
+  assertEquals(isEndDateOutOfRange(500, OUT_OF_RANGE), false);
+});
+
+Deno.test("fetchWithEndFallback: success first time, no retry", async () => {
+  const calls: string[] = [];
+  const r = await fetchWithEndFallback(async (e) => { calls.push(e); return { data: 1 }; }, "2026-09-21", "2026-09-20");
+  assertEquals(calls, ["2026-09-21"]);
+  assertEquals([r.data, r.endUsed, r.fallback], [1, "2026-09-21", false]);
+});
+
+Deno.test("fetchWithEndFallback: out-of-range 400 retries exactly once, a day earlier", async () => {
+  const calls: string[] = [];
+  const r = await fetchWithEndFallback(async (e) => {
+    calls.push(e);
+    return e === "2026-09-30" ? { error: `Open-Meteo 400: ${OUT_OF_RANGE}`, outOfRange: true } : { data: 2 };
+  }, "2026-09-30", "2026-09-29");
+  assertEquals(calls, ["2026-09-30", "2026-09-29"]);
+  assertEquals([r.data, r.endUsed, r.fallback, r.error], [2, "2026-09-29", true, undefined]);
+});
+
+Deno.test("fetchWithEndFallback: a second out-of-range is returned, not retried again", async () => {
+  const calls: string[] = [];
+  const r = await fetchWithEndFallback(async (e) => { calls.push(e); return { error: "Open-Meteo 400", outOfRange: true }; },
+    "2026-09-30", "2026-09-29");
+  assertEquals(calls, ["2026-09-30", "2026-09-29"]);
+  assertEquals([r.fallback, r.error], [true, "Open-Meteo 400"]);
+});
+
+Deno.test("fetchWithEndFallback: never goes earlier than endStr", async () => {
+  const calls: string[] = [];
+  const r = await fetchWithEndFallback(async (e) => { calls.push(e); return { error: "Open-Meteo 400", outOfRange: true }; },
+    "2026-09-30", "2026-09-30");
+  assertEquals(calls, ["2026-09-30"]);
+  assertEquals([r.fallback, r.endUsed, r.error], [false, "2026-09-30", "Open-Meteo 400"]);
+});
+
+Deno.test("fetchWithEndFallback: other errors are not retried", async () => {
+  const calls: string[] = [];
+  await fetchWithEndFallback(async (e) => { calls.push(e); return { error: "Open-Meteo 500" }; }, "2026-09-21", "2026-09-20");
+  assertEquals(calls, ["2026-09-21"]);
+});
+
+Deno.test("archiveUrl builds the request the function sends", () => {
+  const u = new URL(archiveUrl("2026-09-16", "2026-09-30", ["temperature_2m", "precipitation"], "era5_land"));
+  assertEquals(u.origin + u.pathname, "https://archive-api.open-meteo.com/v1/archive");
+  assertEquals(u.searchParams.get("timezone"), "UTC");
+  assertEquals(u.searchParams.get("end_date"), "2026-09-30");
+  assertEquals(u.searchParams.get("hourly"), "temperature_2m,precipitation");
+  assertEquals(u.searchParams.get("models"), "era5_land");
 });

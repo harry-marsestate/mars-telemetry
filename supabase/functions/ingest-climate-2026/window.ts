@@ -90,3 +90,11 @@ export async function fetchWithEndFallback<T>(
 export function isEndDateOutOfRange(status: number, body: string): boolean {
   return status === 400 && /end_date/.test(body) && /out of allowed range/.test(body);
 }
+
+// Calendar year of an instant in America/Los_Angeles -- the vintage an hour
+// belongs to. The VINTAGE guard in index.ts refuses to write an hour whose
+// Pacific year isn't the job's hard-coded VINTAGE (docs/SECURITY.md tracked
+// item: VINTAGE = 2026 must change before 2027).
+export function pacificYear(ms: number): number {
+  return Number(new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric" }).format(new Date(ms)));
+}

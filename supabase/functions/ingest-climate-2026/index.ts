@@ -3,7 +3,7 @@ import { withSupabase } from "@supabase/server";
 import { summarizeClimate, withIngestionLog } from "../_shared/ingestion-log.ts";
 import {
   archiveUrl, ELEVATION_M, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
-  lastElapsedHourMs, stampUtc,
+  lastElapsedHourMs, pacificYear, stampUtc,
 } from "./window.ts";
 
 // Daily real-2026-climate ingestion. Ports ingestion/open_meteo/client.py +
@@ -167,7 +167,7 @@ async function fetchHourly(
   }
 }
 
-interface MetricResult { written: number; nulls: number; future_skipped?: number; error?: string }
+interface MetricResult { written: number; nulls: number; future_skipped?: number; wrong_vintage?: number; error?: string }
 
 async function upsertMetric(
   ctx: { supabaseAdmin: { from: (t: string) => any } },
@@ -179,10 +179,12 @@ async function upsertMetric(
     const times = data.hourly?.time ?? [];
     const values = (data.hourly?.[variable] as (number | null)[] | undefined) ?? [];
     const rows: { metric_key: string; sensor_id: string; block_id: null; tank_id: null; recorded_at: string; value: number; source_system: string; vintage: number }[] = [];
-    let nulls = 0, futureSkipped = 0;
+    let nulls = 0, futureSkipped = 0, wrongVintage = 0;
     for (let i = 0; i < times.length; i++) {
       const recordedAt = stampUtc(times[i]);
       if (Date.parse(recordedAt) > cutoffMs) { futureSkipped++; continue; }
+      // VINTAGE guard: never label an hour from another year as this vintage.
+      if (pacificYear(Date.parse(recordedAt)) !== vintage) { wrongVintage++; continue; }
       const v = values[i];
       if (v == null) { nulls++; continue; }
       rows.push({
@@ -190,15 +192,21 @@ async function upsertMetric(
         recorded_at: recordedAt, value: v * scale, source_system: SOURCE_SYSTEM, vintage,
       });
     }
-    if (rows.length === 0) { results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped }; return; }
+    const vintageError = wrongVintage
+      ? `VINTAGE is ${vintage} but ${wrongVintage} hour(s) fall in another year and were NOT written -- update VINTAGE (docs/SECURITY.md tracked item)`
+      : undefined;
+    if (rows.length === 0) {
+      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, wrong_vintage: wrongVintage, error: vintageError };
+      return;
+    }
     const { error } = await ctx.supabaseAdmin.from("sensor_readings")
       .upsert(rows, { onConflict: "metric_key,sensor_id,recorded_at" });
     if (error) {
       console.error(`ingest-climate-2026: upsert failed for ${metricKey}`, error);
-      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, error: error.message };
+      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, wrong_vintage: wrongVintage, error: error.message };
       return;
     }
-    results[metricKey] = { written: rows.length, nulls, future_skipped: futureSkipped };
+    results[metricKey] = { written: rows.length, nulls, future_skipped: futureSkipped, wrong_vintage: wrongVintage, error: vintageError };
   } catch (err) {
     console.error(`ingest-climate-2026: unexpected error upserting ${metricKey}`, err);
     results[metricKey] = { written: 0, nulls: 0, error: String(err) };

@@ -1,5 +1,6 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
+import { summarizeInnovint, withIngestionLog } from "../_shared/ingestion-log.ts";
 
 // Daily InnoVint sync. Ports ingestion/innovint/{client,db,assets,capacity,
 // weights}.py's three Dagster assets (analyses_sync, vessels_sync,
@@ -39,7 +40,14 @@ export default {
     // until code changed (docs/SECURITY.md, 2026-09-29). Every secret key
     // carries the same full privilege, so accepting any is no weaker.
     auth: ["secret:*"],
-  }, async (_req, ctx) => {
+  }, (req, ctx) => withIngestionLog(ctx, "ingest-innovint", () => sync(req, ctx), summarizeInnovint)),
+};
+
+// The sync itself, unchanged. withIngestionLog (../_shared/ingestion-log.ts)
+// records one system_health.ingestion_runs row for every run, whatever
+// this returns or throws.
+// deno-lint-ignore no-explicit-any
+async function sync(_req: Request, ctx: any): Promise<Response> {
     const token = Deno.env.get("INNOVINT_TOKEN");
     const wineryId = Deno.env.get("INNOVINT_WINERY_ID") ?? "wnry_2PW0KJ93L726WKKG54OQE1RY";
     if (!token) {
@@ -274,8 +282,7 @@ export default {
         http_call_count: httpCallCount, duration_ms: Date.now() - runStartedAt,
       }, { status: 500 });
     }
-  }),
-};
+}
 
 const BASE_URL = "https://sutter.innovint.us/api/v1";
 const HARVEST_RECEIPTS_FIRST_VINTAGE = 2022;

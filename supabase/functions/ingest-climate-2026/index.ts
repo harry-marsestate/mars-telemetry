@@ -1,5 +1,6 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
+import { summarizeClimate, withIngestionLog } from "../_shared/ingestion-log.ts";
 import {
   archiveUrl, ELEVATION_M, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
   lastElapsedHourMs, stampUtc,
@@ -24,7 +25,14 @@ export default {
     // until code changed (docs/SECURITY.md, 2026-09-29). Every secret key
     // carries the same full privilege, so accepting any is no weaker.
     auth: ["secret:*"],
-  }, async (req, ctx) => {
+  }, (req, ctx) => withIngestionLog(ctx, "ingest-climate-2026", () => sync(req, ctx), summarizeClimate)),
+};
+
+// The sync itself, unchanged. withIngestionLog (../_shared/ingestion-log.ts)
+// records one system_health.ingestion_runs row for every run, whatever
+// this returns or throws.
+// deno-lint-ignore no-explicit-any
+async function sync(req: Request, ctx: any): Promise<Response> {
     try {
       const body = await req.json().catch(() => ({}));
       const { start_date, end_date, days_back } = body ?? {};
@@ -126,8 +134,7 @@ export default {
       console.error("ingest-climate-2026: unexpected error", err);
       return Response.json({ ok: false, reason: "unexpected error", detail: String(err) }, { status: 500 });
     }
-  }),
-};
+}
 
 const SOURCE_SYSTEM = "open_meteo_era5";
 const SENSOR_ID = "OM-ERA5";

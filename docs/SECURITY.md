@@ -6831,10 +6831,20 @@ redacted text only (`regexp_replace` in the query, or `sed` on the file).
    the owner; old key revoked after every consumer is confirmed moved.
 
 **How Edge Functions check the key** (read from `@supabase/server` 1.8.1, the
-version `npm:@supabase/server@^1` resolves to): `withSupabase({auth:["secret"]})`
-accepts the request if its `apikey` equals ANY entry of the platform-injected
-`SUPABASE_SECRET_KEYS` (a JSON map, read from the environment per request).
-`ctx.supabaseAdmin` uses the entry named `default`, else the first one.
+version `npm:@supabase/server@^1` resolves to): the platform injects every
+active secret key into `SUPABASE_SECRET_KEYS` (a JSON map, name -> key; it was
+updated within a second of the new key's creation). **CORRECTION, found by the
+first post-migration run:** bare `auth: ["secret"]` accepts ONLY the key named
+`default` -- an earlier version of this paragraph said it accepted any entry.
+Every pg_cron-triggered call with the new key (named
+`edge_functions_2026_09_29`) got 401 `INVALID_API_KEY`, with the library's own
+hint naming the cause; a redeploy alone didn't change it.
+`tests/secret-auth-mode.test.ts` runs the real library against a two-key map
+and reproduces it. The four server-to-server functions now use
+`auth: ["secret:*"]` -- any configured secret key, nothing else -- so a
+rotation never needs a code change. That is no weaker: every secret key
+carries the same full privilege. `ctx.supabaseAdmin` uses the entry named
+`default`, else the first one.
 
 **Accepted residual risk: `net.http_request_queue`.** pg_net's queue table is
 readable by PUBLIC too, and while a request waits there its headers -- including

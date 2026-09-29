@@ -6680,3 +6680,61 @@ had answered `{"ok":false,"reason":"user lookup failed"}`, so no email then
 either). Full harness **80/80, no SKIP**: section 4c now exercises the real
 service account -- can't be made admin (owner, admin over REST), can't be
 turned human -- and every other section is unchanged.
+
+## ingest-climate-2026 stored Open-Meteo forecast hours as real ERA5 data (2026-09-29)
+
+Branch `fix/climate-forecast-clamp`. Found while designing the nightly health
+checks: 24 `open_meteo_era5` rows were dated after `now()`.
+
+**Cause.** Open-Meteo's archive endpoint returns a value for every hour of
+`end_date`, including hours that haven't happened yet (confirmed with a direct
+request at 15:26 PDT: it returned 16:00-23:00 PDT values). The daily run
+(13:17 UTC, 06:17 PDT) asked for `end_date = today` and stored the rest of the
+Pacific day -- forecasts -- under `source_system='open_meteo_era5'`, then
+refreshed `daily_weather` for that still-running day from them. The next day's
+run overwrote both, so at any moment only the latest run's rows were wrong:
+51 rows (air_temp, humidity, precipitation x 17 hours, 2026-09-29 14:00 UTC to
+2026-09-30 06:00 UTC, all written 13:17:02-03 UTC), 24 of them still in the
+future, plus the 2026-09-29 `daily_weather` row built from them. Soil was
+unaffected (ERA5-Land's lag leaves future hours null), and so was
+`real_climate_as_of_2026()` (held back to 2026-09-23 by that same soil lag).
+
+**Fix (two commits).**
+1. Clamp: store only hours up to the top of the current hour, and refresh
+   `daily_weather` only through the last complete America/Los_Angeles day
+   (`window.ts`). The response reports `future_skipped` per metric and
+   `window.stored_through` / `window.daily_weather_through`.
+2. DST: `recorded_at` was Open-Meteo's local time plus a hard-coded `-07:00`.
+   Open-Meteo reports ONE `utc_offset_seconds` per response -- observed as
+   -25200 today even for PST dates (2025-11-10) -- so the stamp was right only
+   while that offset was -07:00. After 2026-11-01 a -28800 response would move
+   every re-fetched hour of the 14-day window an hour early onto its
+   neighbour's key, and let one not-yet-elapsed hour past the clamp. Now:
+   `timezone=UTC`, stamped `Z`, and the run refuses to ingest if
+   `utc_offset_seconds` isn't 0. Stored rows keep their keys: all 240 rows for
+   2026-09-10..11 have the same key and an identical value in the UTC
+   response. `daily_weather` still buckets by Pacific day in
+   `refresh_daily_weather_range()`'s SQL, unchanged.
+
+Also fixed on the way: `main` failed `deno check` (TS2554) on a dead 8th
+argument (`"inch"`) to `upsertMetric`, which would otherwise have landed in
+the new `cutoffMs` parameter for precipitation.
+
+**Cleanup, after the fix is deployed from `main` and before any triggered
+run** (a run would rewrite rows in the delete window): delete exactly the 51
+rows (`source_system='open_meteo_era5' and vintage=2026 and metric_key in
+('air_temp','humidity','precipitation') and recorded_at >= '2026-09-29
+14:00:00+00'`), asserting first that there are exactly 51 and all were written
+by the 13:17 UTC run, and the 2026-09-29 `daily_weather` row. The next run
+re-inserts those hours as elapsed-hour values and rebuilds the day from them.
+
+RULE: never store an hour later than the run's own clock under a real
+`source_system`, and never aggregate a day that hasn't ended. An upstream
+"archive" API can still hand back forecasts for the tail of the window.
+
+### Tracked, not fixed: `VINTAGE = 2026` is hard-coded in ingest-climate-2026
+
+Must change before the 2027 season. The job is scheduled every day of the year
+(`17 13 * * *`, no season guard in the code), so from 2027-01-01 it will write
+2027 hours as `vintage = 2026`. A nightly health check is planned for this:
+warn when the current date's vintage has no ingest.

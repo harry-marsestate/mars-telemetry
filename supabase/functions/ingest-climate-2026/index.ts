@@ -1,8 +1,9 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
+import { summarizeClimate, withIngestionLog } from "../_shared/ingestion-log.ts";
 import {
   archiveUrl, ELEVATION_M, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
-  lastElapsedHourMs, stampUtc,
+  lastElapsedHourMs, pacificYear, stampUtc,
 } from "./window.ts";
 
 // Daily real-2026-climate ingestion. Ports ingestion/open_meteo/client.py +
@@ -24,7 +25,14 @@ export default {
     // until code changed (docs/SECURITY.md, 2026-09-29). Every secret key
     // carries the same full privilege, so accepting any is no weaker.
     auth: ["secret:*"],
-  }, async (req, ctx) => {
+  }, (req, ctx) => withIngestionLog(ctx, "ingest-climate-2026", () => sync(req, ctx), summarizeClimate)),
+};
+
+// The sync itself, unchanged. withIngestionLog (../_shared/ingestion-log.ts)
+// records one system_health.ingestion_runs row for every run, whatever
+// this returns or throws.
+// deno-lint-ignore no-explicit-any
+async function sync(req: Request, ctx: any): Promise<Response> {
     try {
       const body = await req.json().catch(() => ({}));
       const { start_date, end_date, days_back } = body ?? {};
@@ -126,8 +134,7 @@ export default {
       console.error("ingest-climate-2026: unexpected error", err);
       return Response.json({ ok: false, reason: "unexpected error", detail: String(err) }, { status: 500 });
     }
-  }),
-};
+}
 
 const SOURCE_SYSTEM = "open_meteo_era5";
 const SENSOR_ID = "OM-ERA5";
@@ -160,7 +167,7 @@ async function fetchHourly(
   }
 }
 
-interface MetricResult { written: number; nulls: number; future_skipped?: number; error?: string }
+interface MetricResult { written: number; nulls: number; future_skipped?: number; wrong_vintage?: number; error?: string }
 
 async function upsertMetric(
   ctx: { supabaseAdmin: { from: (t: string) => any } },
@@ -172,10 +179,12 @@ async function upsertMetric(
     const times = data.hourly?.time ?? [];
     const values = (data.hourly?.[variable] as (number | null)[] | undefined) ?? [];
     const rows: { metric_key: string; sensor_id: string; block_id: null; tank_id: null; recorded_at: string; value: number; source_system: string; vintage: number }[] = [];
-    let nulls = 0, futureSkipped = 0;
+    let nulls = 0, futureSkipped = 0, wrongVintage = 0;
     for (let i = 0; i < times.length; i++) {
       const recordedAt = stampUtc(times[i]);
       if (Date.parse(recordedAt) > cutoffMs) { futureSkipped++; continue; }
+      // VINTAGE guard: never label an hour from another year as this vintage.
+      if (pacificYear(Date.parse(recordedAt)) !== vintage) { wrongVintage++; continue; }
       const v = values[i];
       if (v == null) { nulls++; continue; }
       rows.push({
@@ -183,15 +192,21 @@ async function upsertMetric(
         recorded_at: recordedAt, value: v * scale, source_system: SOURCE_SYSTEM, vintage,
       });
     }
-    if (rows.length === 0) { results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped }; return; }
+    const vintageError = wrongVintage
+      ? `VINTAGE is ${vintage} but ${wrongVintage} hour(s) fall in another year and were NOT written -- update VINTAGE (docs/SECURITY.md tracked item)`
+      : undefined;
+    if (rows.length === 0) {
+      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, wrong_vintage: wrongVintage, error: vintageError };
+      return;
+    }
     const { error } = await ctx.supabaseAdmin.from("sensor_readings")
       .upsert(rows, { onConflict: "metric_key,sensor_id,recorded_at" });
     if (error) {
       console.error(`ingest-climate-2026: upsert failed for ${metricKey}`, error);
-      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, error: error.message };
+      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, wrong_vintage: wrongVintage, error: error.message };
       return;
     }
-    results[metricKey] = { written: rows.length, nulls, future_skipped: futureSkipped };
+    results[metricKey] = { written: rows.length, nulls, future_skipped: futureSkipped, wrong_vintage: wrongVintage, error: vintageError };
   } catch (err) {
     console.error(`ingest-climate-2026: unexpected error upserting ${metricKey}`, err);
     results[metricKey] = { written: 0, nulls: 0, error: String(err) };

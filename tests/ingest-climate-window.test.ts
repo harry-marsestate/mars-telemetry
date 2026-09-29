@@ -3,7 +3,7 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import {
   addDays, archiveUrl, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
-  lastElapsedHourMs, stampUtc,
+  lastElapsedHourMs, pacificYear, stampUtc,
 } from "../supabase/functions/ingest-climate-2026/window.ts";
 
 Deno.test("cutoff is the top of the current hour", () => {
@@ -128,4 +128,11 @@ Deno.test("archiveUrl builds the request the function sends", () => {
   assertEquals(u.searchParams.get("end_date"), "2026-09-30");
   assertEquals(u.searchParams.get("hourly"), "temperature_2m,precipitation");
   assertEquals(u.searchParams.get("models"), "era5_land");
+});
+
+Deno.test("pacificYear decides the vintage at the Pacific New Year, not UTC's", () => {
+  assertEquals(pacificYear(Date.parse("2026-12-31T23:30:00-08:00")), 2026);
+  assertEquals(pacificYear(Date.parse("2027-01-01T07:30:00Z")), 2026); // 23:30 PST Dec 31
+  assertEquals(pacificYear(Date.parse("2027-01-01T08:30:00Z")), 2027); // 00:30 PST Jan 1
+  assertEquals(pacificYear(Date.parse(stampUtc("2026-09-30T13:00"))), 2026);
 });

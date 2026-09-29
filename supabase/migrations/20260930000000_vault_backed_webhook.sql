@@ -26,9 +26,12 @@ end $$;
 -- Reproduces supabase_functions.http_request()'s POST branch exactly, as the
 -- webhook invoked it: same URL, same body (old_record/record/type/table/
 -- schema), same headers (including the 'Content-type' spelling), same
--- 5000ms timeout, fired AFTER UPDATE FOR EACH ROW with no WHEN clause (the
--- webhook had none; notify-admin-approval itself checks for the
--- confirmed_at null -> not-null transition). Differences, both deliberate:
+-- 5000ms timeout, AFTER UPDATE FOR EACH ROW. Differences, all deliberate:
+--   - WHEN (old.confirmed_at is null and new.confirmed_at is not null): the
+--     webhook had no WHEN clause and sent the key on EVERY profile update;
+--     notify-admin-approval ignores everything except exactly this
+--     transition (`old_record?.confirmed_at == null && record?.confirmed_at
+--     != null`), so the request is now made only when it can matter;
 --   - the key comes from Vault, not from a trigger argument;
 --   - no row is written to supabase_functions.hooks (the dashboard's webhook
 --     history), because this is no longer a dashboard webhook. The request
@@ -67,7 +70,9 @@ revoke all on function public.notify_admin_approval_webhook() from public, anon,
 drop trigger if exists "notify-admin-on-confirmation" on public.user_profiles;
 create trigger notify_admin_approval
   after update on public.user_profiles
-  for each row execute function public.notify_admin_approval_webhook();
+  for each row
+  when (old.confirmed_at is null and new.confirmed_at is not null)
+  execute function public.notify_admin_approval_webhook();
 
 -- The three cron jobs: each command is rewritten from its own live text with
 -- exactly one substitution -- the Vault secret name -- so nothing else about

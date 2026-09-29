@@ -6809,7 +6809,11 @@ redacted text only (`regexp_replace` in the query, or `sed` on the file).
    it reads the key from Vault by name at call time and calls `net.http_post`,
    the pattern the cron jobs already used. It reproduces the webhook exactly:
    same URL, body (`old_record`/`record`/`type`/`table`/`schema`), headers and
-   5000ms timeout, `AFTER UPDATE FOR EACH ROW` with no WHEN clause. Verified on
+   5000ms timeout, `AFTER UPDATE FOR EACH ROW` -- now with `WHEN (old.confirmed_at
+   IS NULL AND new.confirmed_at IS NOT NULL)`, exactly the confirmation
+   transition `notify-admin-approval` checks (`old_record?.confirmed_at == null
+   && record?.confirmed_at != null`); the webhook had no WHEN clause and sent
+   the key on every profile update, all but these ignored. Verified on
    a local database against Supabase's own `supabase_functions.http_request()`
    source copied from production: identical request except the key. Deliberate
    differences: no `supabase_functions.hooks` row (it isn't a dashboard webhook

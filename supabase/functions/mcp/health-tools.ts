@@ -33,7 +33,13 @@ export const HEALTH_TOOL_NAMES: readonly string[] = HEALTH_TOOLS.map((t) => t.na
 export async function runHealthTool(client: any, name: string, input: Record<string, unknown>): Promise<GatewayResult> {
   let r: { data: unknown; error: { message: string } | null };
   if (name === "get_system_health") r = await client.rpc("health_system_status");
-  else if (name === "get_health_history") r = await client.rpc("health_history", { p_days: input.days ?? 7 });
+  else if (name === "get_health_history") {
+    // Checked here too (health_history() raises): a SQL error aborts the
+    // scoped transaction and would surface only as a generic failure.
+    const days = input.days ?? 7;
+    if (!Number.isInteger(days) || (days as number) < 1 || (days as number) > 30) return { content: "days must be an integer between 1 and 30", isError: true };
+    r = await client.rpc("health_history", { p_days: days });
+  }
   else if (name === "get_health_baselines") r = await client.rpc("health_baselines");
   else return { content: `Unknown tool: ${name}`, isError: true };
   if (r.error) {

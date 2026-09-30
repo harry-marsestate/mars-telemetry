@@ -46,8 +46,9 @@ const ORIGIN = new URL(env.SUPABASE_URL).origin;
 const DATABASE_URL = process.env.DATABASE_URL ?? env.DATABASE_URL;
 const NO_REST = process.argv.includes("--no-rest");
 
-const ADMIN_FNS = ["admin_list_agent_keys()", "admin_issue_agent_key(uuid,text,integer)", "admin_revoke_agent_key(uuid)",
-  "admin_update_agent_key_expiry(uuid,integer)", "admin_list_agent_key_calls(uuid,integer)", "admin_list_agent_key_expiry_changes(uuid)"];
+const ADMIN_FNS = ["admin_list_agent_keys()", "admin_issue_agent_key(uuid,text,integer,text[])", "admin_revoke_agent_key(uuid)",
+  "admin_update_agent_key_expiry(uuid,integer)", "admin_list_agent_key_calls(uuid,integer)", "admin_list_agent_key_expiry_changes(uuid)",
+  "admin_update_agent_key_tools(uuid,text[])", "admin_list_agent_key_scope_changes(uuid)", "admin_list_mcp_tools()"];
 const INTERNAL_FNS = ["agent_key_list()", "agent_key_issue(uuid,text,integer,text,boolean,text[])", "agent_key_revoke(uuid)",
   "agent_key_set_expiry(uuid,integer,text)", "agent_key_calls(uuid,integer)", "agent_key_expiry_changes(uuid)",
   "agent_key_set_tools(uuid,text[],text)"];
@@ -191,7 +192,7 @@ await withDb(async (db) => {
 
   const calls = [
     ["list", "select * from public.admin_list_agent_keys()", []],
-    ["issue", "select id, key_prefix from public.admin_issue_agent_key($1, 'agent-keys-admin-verify (rolled back)', 1)", [operator?.id ?? admin.id]],
+    ["issue", "select id, key_prefix from public.admin_issue_agent_key($1, 'agent-keys-admin-verify (rolled back)', 1, array['get_berry_maturity'])", [operator?.id ?? admin.id]],
     ["revoke", "select * from public.admin_revoke_agent_key($1)", [NO_SUCH_KEY]],
     ["expiry", "select * from public.admin_update_agent_key_expiry($1, 30)", [NO_SUCH_KEY]],
     ["calls", "select * from public.admin_list_agent_key_calls($1)", [NO_SUCH_KEY]],
@@ -235,7 +236,7 @@ await withDb(async (db) => {
   // Fresh-auth rule on issue; list/revoke need none.
   const target = operator ?? admin;
   const issueAs = (amr) => attempt(db, "authenticated", claimsFor(admin.id, admin.email, amr),
-    "select id from public.admin_issue_agent_key($1, 'agent-keys-admin-verify (rolled back)', 1)", [target.id]);
+    "select id from public.admin_issue_agent_key($1, 'agent-keys-admin-verify (rolled back)', 1, array['get_berry_maturity'])", [target.id]);
   const reauth = /recent sign-in required/;
   for (const [desc, amr] of [
     ["no amr claim", undefined],
@@ -285,7 +286,7 @@ await withDb(async (db) => {
   const e2e = await rolledBack(db, async ({ q, as, owner }) => {
     const r = {};
     await as("authenticated", claimsFor(admin.id, admin.email, fresh()));
-    const [issued] = await q("select * from public.admin_issue_agent_key($1, 'agent-keys-admin-verify (rolled back)', 1)", [target.id]);
+    const [issued] = await q("select * from public.admin_issue_agent_key($1, 'agent-keys-admin-verify (rolled back)', 1, array['get_berry_maturity'])", [target.id]);
     secrets.push(issued.key, issued.key.slice(4), issued.key.slice(12));
     r.issued = { id: issued.id, prefix: issued.key_prefix, label: issued.label, expires: issued.expires_at, cols: Object.keys(issued) };
     r.shapeOk = parseBearerKey(`Bearer ${issued.key}`) === issued.key && issued.key_prefix === issued.key.slice(0, 12);
@@ -487,7 +488,7 @@ const rest = async (path, body) => {
 };
 for (const [path, body] of NO_REST ? [] : [
   ["rpc/admin_list_agent_keys", {}],
-  ["rpc/admin_issue_agent_key", { p_user_id: NO_SUCH_KEY, p_label: "x", p_days: 1 }],
+  ["rpc/admin_issue_agent_key", { p_user_id: NO_SUCH_KEY, p_label: "x", p_days: 1, p_allowed_tools: ["get_berry_maturity"] }],
   ["rpc/admin_revoke_agent_key", { p_id: NO_SUCH_KEY }],
   ["rpc/agent_key_list", {}],
   ["rpc/agent_key_issue", { p_user_id: NO_SUCH_KEY, p_label: "x", p_days: 1, p_created_by: "x", p_allow_unapproved: true }],
@@ -495,6 +496,9 @@ for (const [path, body] of NO_REST ? [] : [
   ["rpc/admin_update_agent_key_expiry", { p_id: NO_SUCH_KEY, p_days: 30 }],
   ["rpc/admin_list_agent_key_calls", { p_id: NO_SUCH_KEY }],
   ["rpc/admin_list_agent_key_expiry_changes", { p_id: NO_SUCH_KEY }],
+  ["rpc/admin_update_agent_key_tools", { p_id: NO_SUCH_KEY, p_tools: ["get_berry_maturity"] }],
+  ["rpc/admin_list_agent_key_scope_changes", { p_id: NO_SUCH_KEY }],
+  ["rpc/admin_list_mcp_tools", {}],
   ["rpc/agent_key_set_expiry", { p_id: NO_SUCH_KEY, p_days: 30, p_changed_by: "x" }],
   ["rpc/agent_key_calls", { p_id: NO_SUCH_KEY }],
   ["rpc/agent_key_expiry_changes", { p_id: NO_SUCH_KEY }],

@@ -600,6 +600,12 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .keys-detail-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(210px, 1fr)); gap:14px 22px; padding:8px 0 4px}
 .keys-detail-grid .flabel{margin-bottom:5px}
 .keys-detail-sect{margin-top:16px; padding-top:14px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:6px}
+.keys-tools-presets{display:flex; flex-wrap:wrap; gap:8px; margin:4px 0 8px}
+.keys-tools-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:4px 16px}
+.keys-tools-grid label{display:flex; align-items:center; gap:7px; font-family:var(--mono); font-size:11.5px}
+.keys-tools-grid label.off{opacity:.45}
+.keys-tools-group{grid-column:1/-1; margin-top:6px}
+.keys-review{border:1px solid var(--line); padding:12px 14px; margin-top:4px}
 .keys-id{font-size:9.5px; color:var(--muted); word-break:break-all}
 .keys-expiry-row{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
 .keys-expiry-row input{width:90px; background:var(--ink-3); border:1px solid var(--line); border-radius:3px; color:var(--cream); font-family:var(--ui); font-size:13px; padding:7px 10px}
@@ -5955,6 +5961,68 @@ function closeKeyDetail(tr){
    material beyond the prefix -- the plaintext isn't stored anywhere. The
    expiry editor calls admin_update_agent_key_expiry: no re-auth (same trust
    level as revoke), 1-365 days from now, capped at 365 days from issue. */
+/* Tool selection for API keys (docs/SECURITY.md, "API key tool scopes in the
+   admin UI"). The catalogue and each tool's preset group come from the
+   database (admin_list_mcp_tools), never a list kept here. Nothing is
+   preselected: the admin must choose. Health tools are offered only when
+   the key's owner is an operator -- and the database refuses them on any
+   other owner regardless (agent_api_keys_scope_guard). */
+let mcpToolCatalogue=null;
+async function loadToolCatalogue(){
+  if(mcpToolCatalogue) return mcpToolCatalogue;
+  const { data, error } = await sb.rpc('admin_list_mcp_tools');
+  if(error) throw error;
+  mcpToolCatalogue=data;
+  return data;
+}
+function keyToolPresets(cat, ownerRole){
+  const original=cat.filter(t=>t.preset==='original').map(t=>t.tool);
+  const data=cat.filter(t=>t.preset!=='health').map(t=>t.tool);
+  const presets=[
+    {id:'original', label:`Original data tools (${original.length})`, tools:original},
+    {id:'data', label:`All data tools (${data.length})`, tools:data},
+  ];
+  if(ownerRole==='operator') presets.push({id:'full', label:`Full, including health tools (${cat.length})`, tools:cat.map(t=>t.tool)});
+  return presets;
+}
+function keyToolsHtml(tools){
+  return (tools||[]).length ? tools.map(t=>`<code>${escapeHtml(t)}</code>`).join(' ') : '&mdash;';
+}
+// Renders the picker into `box`; returns {get: ()=>string[]}. `initial` is
+// the key's current tools (detail view) or [] (new key: nothing preselected).
+function renderToolPicker(box, cat, ownerRole, initial, onChange){
+  const isOp = ownerRole==='operator';
+  const selected=new Set((initial||[]).filter(t=>isOp || !cat.find(c=>c.tool===t && c.preset==='health')));
+  const groups=[['original','Original data tools'],['data','More data tools'],['health','Health tools &middot; operator-owned keys only']];
+  box.innerHTML=`
+    <div class="keys-tools-presets">${keyToolPresets(cat, ownerRole).map(p=>`<button type="button" class="queue-btn-secondary keys-tools-preset" data-preset="${p.id}">${escapeHtml(p.label)}</button>`).join('')}</div>
+    <div class="keys-tools-grid">${groups.map(([g, title])=>{
+      const items=cat.filter(t=>t.preset===g);
+      if(!items.length) return '';
+      const off = g==='health' && !isOp;
+      return `<div class="keys-tools-group flabel">${title}</div>`+items.map(t=>`<label class="${off?'off':''}" title="${escapeHtml(t.note||'')}"><input type="checkbox" value="${escapeHtml(t.tool)}"${off?' disabled':''}>${escapeHtml(t.tool)}</label>`).join('')
+        + (off ? `<div class="keys-note" style="grid-column:1/-1">Not available: this key&rsquo;s owner isn&rsquo;t an operator (enforced by the database).</div>` : '');
+    }).join('')}</div>
+    <div class="keys-note keys-tools-count"></div>`;
+  const boxes=[...box.querySelectorAll('input[type=checkbox]')];
+  const count=box.querySelector('.keys-tools-count');
+  const sync=()=>{
+    boxes.forEach(b=>{ b.checked=selected.has(b.value); });
+    const ordered=cat.map(t=>t.tool).filter(t=>selected.has(t));
+    count.innerHTML = ordered.length ? `${ordered.length} tool${ordered.length===1?'':'s'} selected` : 'No tools selected &mdash; choose a preset or tick tools.';
+    if(onChange) onChange(ordered);
+  };
+  boxes.forEach(b=>{ b.onchange=()=>{ if(b.checked) selected.add(b.value); else selected.delete(b.value); sync(); }; });
+  box.querySelectorAll('.keys-tools-preset').forEach(btn=>{
+    btn.onclick=()=>{
+      const p=keyToolPresets(cat, ownerRole).find(x=>x.id===btn.dataset.preset);
+      selected.clear(); p.tools.forEach(t=>selected.add(t)); sync();
+    };
+  });
+  sync();
+  return { get: ()=>cat.map(t=>t.tool).filter(t=>selected.has(t)) };
+}
+
 function openKeyDetail(r, tr){
   tr.classList.add('open');
   tr.setAttribute('aria-expanded','true');
@@ -5977,12 +6045,46 @@ function openKeyDetail(r, tr){
       <div><div class="flabel">Status</div><span class="keys-st-${escapeHtml(r.status)}">${KEY_STATUS_LABELS[r.status]||escapeHtml(r.status)}</span>${r.revoked_at ? `<span class="dim">revoked ${keysDateTime(r.revoked_at)}</span>` : ''}</div>
       <div><div class="flabel">Rate limits</div>${r.rate_per_minute!=null ? `${Number(r.rate_per_minute)}/min &middot; ${Number(r.rate_per_day).toLocaleString()}/day` : '&mdash;'}<span class="dim">excess calls get HTTP 429</span></div>
     </div>
-    <div class="keys-detail-sect"><div class="flabel">Allowed tools</div><div class="keys-note">${(r.allowed_tools||[]).map(t=>`<code>${escapeHtml(t)}</code>`).join(' ') || '&mdash;'}</div><div class="keys-note dim">Read-only here; change with scripts/agent-keys.mjs set-tools (audited).</div></div>
+    <div class="keys-detail-sect keys-tools-edit"><div class="flabel">Allowed tools</div><div class="keys-note">${keyToolsHtml(r.allowed_tools)}</div></div>
+    <div class="keys-detail-sect"><div class="flabel">Tool changes</div><div class="keys-scope-log"><div class="keys-note">Loading&hellip;</div></div></div>
     <div class="keys-detail-sect keys-expiry-edit"></div>
     <div class="keys-detail-sect"><div class="flabel">Expiry changes</div><div class="keys-expiry-log"><div class="keys-note">Loading&hellip;</div></div></div>
     <div class="keys-detail-sect"><div class="flabel">Recent gateway calls</div><div class="keys-calls"><div class="keys-note">Loading&hellip;</div></div></div>
   </td>`;
   tr.after(detail);
+
+  const toolsEdit=detail.querySelector('.keys-tools-edit');
+  if(r.status==='active'){
+    loadToolCatalogue().then(cat=>{
+      if(!detail.isConnected) return;
+      toolsEdit.innerHTML=`<div class="flabel">Allowed tools</div><div class="keys-note">Now: ${keyToolsHtml(r.allowed_tools)}</div>
+        <div class="keys-tools-picker"></div>
+        <div class="queue-form-actions"><button type="button" class="queue-btn-secondary keys-tools-save" disabled>Save tools</button></div>
+        <div class="keys-note">Every change is audited (Tool changes, below). An agent sees the new list on its next tools/list.</div>
+        <div class="auth-err keys-tools-err"></div>`;
+      const save=toolsEdit.querySelector('.keys-tools-save'), terr=toolsEdit.querySelector('.keys-tools-err');
+      const same=(a,b)=>a.length===b.length && a.every((x,i)=>x===b[i]);
+      const current=cat.map(t=>t.tool).filter(t=>(r.allowed_tools||[]).includes(t));
+      const picker=renderToolPicker(toolsEdit.querySelector('.keys-tools-picker'), cat, r.account_role, r.allowed_tools||[],
+        (tools)=>{ save.disabled = !tools.length || same(tools, current); });
+      save.onclick=async ()=>{
+        terr.textContent=''; terr.classList.remove('on');
+        const tools=picker.get();
+        if(!tools.length){ terr.textContent='Choose at least one tool.'; terr.classList.add('on'); return; }
+        save.disabled=true; save.textContent='Saving…';
+        const { error } = await sb.rpc('admin_update_agent_key_tools', { p_id:r.id, p_tools:tools });
+        if(error){
+          console.error('tools update failed', error.message);
+          save.disabled=false; save.textContent='Save tools';
+          terr.textContent=`Couldn't change tools: ${error.message}`; terr.classList.add('on'); return;
+        }
+        await loadAgentKeys();   // keysState.openId keeps this row open
+      };
+    }).catch(err=>{
+      console.error('tool catalogue failed', err.message);
+      toolsEdit.insertAdjacentHTML('beforeend', `<div class="keys-note keys-st-revoked">Couldn&rsquo;t load the tool list: ${escapeHtml(err.message)}</div>`);
+    });
+  }
 
   const edit=detail.querySelector('.keys-expiry-edit');
   if(r.status!=='active'){
@@ -6023,11 +6125,24 @@ function openKeyDetail(r, tr){
 }
 
 async function loadKeyAudit(r, detail){
-  const [calls, changes] = await Promise.all([
+  const [calls, changes, scopes] = await Promise.all([
     sb.rpc('admin_list_agent_key_calls', { p_id:r.id, p_limit:50 }),
     sb.rpc('admin_list_agent_key_expiry_changes', { p_id:r.id }),
+    sb.rpc('admin_list_agent_key_scope_changes', { p_id:r.id }),
   ]);
   if(!detail.isConnected) return;
+  const slog=detail.querySelector('.keys-scope-log');
+  if(scopes.error){
+    console.error('tool change log failed', scopes.error.message);
+    slog.innerHTML=`<div class="keys-note keys-st-revoked">Couldn&rsquo;t load: ${escapeHtml(scopes.error.message)}</div>`;
+  } else if(!scopes.data.length){
+    slog.innerHTML=`<div class="keys-note">None &mdash; tools are as issued.</div>`;
+  } else {
+    slog.innerHTML=scopes.data.map(c=>{
+      const added=c.new_tools.filter(t=>!c.old_tools.includes(t)), removed=c.old_tools.filter(t=>!c.new_tools.includes(t));
+      return `<div class="keys-note">${keysDateTime(c.changed_at)}: ${c.old_tools.length} &rarr; <b>${c.new_tools.length}</b> tools${added.length?` &middot; added ${keyToolsHtml(added)}`:''}${removed.length?` &middot; removed ${keyToolsHtml(removed)}`:''} &middot; ${escapeHtml(c.changed_by)}</div>`;
+    }).join('');
+  }
   const log=detail.querySelector('.keys-expiry-log');
   if(changes.error){
     console.error('expiry log failed', changes.error.message);
@@ -6186,6 +6301,12 @@ async function renderCreateKeyForm(host, draft={}){
     host.innerHTML=`<div class="empty">Couldn&rsquo;t resolve accounts&rsquo; emails.<br><b>${escapeHtml(message)}</b></div>`;
     return;
   }
+  let toolCat;
+  try{ toolCat=await loadToolCatalogue(); }
+  catch(err){
+    host.innerHTML=`<div class="empty">Couldn&rsquo;t load the tool list.<br><b>${escapeHtml(err.message||'Unknown error')}</b></div>`;
+    return;
+  }
   // Fresh-auth: a password or Google sign-in within 10 minutes. Password
   // re-entry is offered only to admins who have one; Google to everyone.
   const providers = session.user.app_metadata?.providers || [session.user.app_metadata?.provider];
@@ -6211,6 +6332,10 @@ async function renderCreateKeyForm(host, draft={}){
         <div class="keys-note keys-account-note"></div>
       </div>
       <div class="fgroup">
+        <div class="flabel">Tools <span class="dim">required</span></div>
+        <div class="keys-tools-picker"><div class="keys-note">Select an account first: the tools on offer depend on its role.</div></div>
+      </div>
+      <div class="fgroup">
         <div class="flabel">Expires in (days)</div>
         <input type="number" class="keys-days-input" min="1" max="365" step="1" value="90">
         <div class="keys-note keys-expiry-note"></div>
@@ -6226,8 +6351,9 @@ async function renderCreateKeyForm(host, draft={}){
              <div class="queue-form-actions"><button type="button" class="queue-btn-secondary keys-google-btn">Re-authenticate with Google</button></div>`}
       </div>
       <div class="auth-err keys-create-err"></div>
-      <div class="queue-form-actions">
-        <button type="button" class="out-b keys-create-submit">Create key</button>
+      <div class="keys-review" style="display:none"></div>
+      <div class="queue-form-actions keys-create-actions">
+        <button type="button" class="out-b keys-create-submit">Review key</button>
         <button type="button" class="queue-btn-secondary keys-create-cancel">Cancel</button>
       </div>
     </div>`;
@@ -6242,6 +6368,10 @@ async function renderCreateKeyForm(host, draft={}){
   const formErr=host.querySelector('.keys-create-err');
   const submitBtn=host.querySelector('.keys-create-submit');
   const byId=Object.fromEntries(accounts.map(a=>[a.id, a]));
+  const pickerBox=host.querySelector('.keys-tools-picker');
+  const review=host.querySelector('.keys-review');
+  const actions=host.querySelector('.keys-create-actions');
+  let picker=null;
 
   // data_mode is the ACCOUNT's (user_profiles.data_mode), resolved by the
   // gateway per request -- shown here read-only, not a key setting.
@@ -6250,6 +6380,11 @@ async function renderCreateKeyForm(host, draft={}){
     accountNote.innerHTML = a
       ? `Acts as ${escapeHtml(`${a.first_name||''} ${a.last_name||''}`.trim())} with their own access (${escapeHtml(ROLE_LABELS[a.role]||a.role)}) and data mode: <b>${escapeHtml(DATA_MODE_LABELS[a.data_mode]||a.data_mode)}</b>. Change data mode on the Accounts tab.`
       : '';
+    // Re-rendered per owner (health tools are operator-only); keeps any
+    // still-allowed choices, never preselects.
+    const keep = picker ? picker.get() : (draft.tools || []);
+    picker = a ? renderToolPicker(pickerBox, toolCat, a.role, keep) : null;
+    if(!a) pickerBox.innerHTML=`<div class="keys-note">Select an account first: the tools on offer depend on its role.</div>`;
   };
   const syncExpiry=()=>{
     const d=Number(daysInput.value);
@@ -6271,26 +6406,46 @@ async function renderCreateKeyForm(host, draft={}){
     googleBtn.disabled=true; googleBtn.textContent='Opening Google…';
     try{
       const { data: { session: current } } = await sb.auth.getSession();
-      await keysReauthWithGoogle(current, { label:labelInput.value, userId:accountSelect.value, days:daysInput.value });
+      await keysReauthWithGoogle(current, { label:labelInput.value, userId:accountSelect.value, days:daysInput.value, tools: picker ? picker.get() : [] });
     }catch(err){
       googleBtn.disabled=false; googleBtn.textContent='Re-authenticate with Google';
       fail(`Couldn't start Google sign-in: ${err.message}`);
     }
   };
+  // Step 1: validate and show exactly what will be issued (incl. tools).
   submitBtn.onclick=async ()=>{
     formErr.textContent=''; formErr.classList.remove('on');
     const label=labelInput.value.trim(), userId=accountSelect.value, days=Number(daysInput.value);
     if(!label) return fail('Enter a label.');
     if(!userId) return fail('Select a linked account.');
+    const tools = picker ? picker.get() : [];
+    if(!tools.length) return fail('Choose the key\u2019s tools: a preset or individual tools.');
     if(!Number.isInteger(days) || days<1 || days>365) return fail('Expiry must be a whole number of days from 1 to 365.');
     const { data: { session: current } } = await sb.auth.getSession();
     const viaGoogle = keysFreshSignIn(current)?.method==='oauth';
     if(!viaGoogle && !passwordInput?.value){
       return fail(hasPassword ? 'Enter your password, or re-authenticate with Google.' : 'Re-authenticate with Google first.');
     }
-
-    submitBtn.disabled=true; submitBtn.textContent='Creating…';
-    const reset=()=>{ submitBtn.disabled=false; submitBtn.textContent='Create key'; };
+    const a=byId[userId];
+    review.style.display='';
+    actions.style.display='none';
+    review.innerHTML=`
+      <div class="flabel">Review before creating</div>
+      <div class="keys-note">Account: <b>${escapeHtml(`${a.first_name||''} ${a.last_name||''}`.trim())}</b> &middot; ${escapeHtml(ROLE_LABELS[a.role]||a.role)}${a.account_type==='service' ? ' &middot; Service account' : ''}</div>
+      <div class="keys-note">Label: ${escapeHtml(label)} &middot; expires ${keysDate(new Date(Date.now()+days*86400000).toISOString())}</div>
+      <div class="keys-note">Tools (${tools.length}): ${keyToolsHtml(tools)}</div>
+      <div class="queue-form-actions">
+        <button type="button" class="out-b keys-confirm-create">Confirm and create key</button>
+        <button type="button" class="queue-btn-secondary keys-review-back">Back</button>
+      </div>`;
+    review.querySelector('.keys-review-back').onclick=()=>{ review.style.display='none'; review.innerHTML=''; actions.style.display=''; };
+    review.querySelector('.keys-confirm-create').onclick=()=>createKey(label, userId, days, tools, viaGoogle, current);
+  };
+  // Step 2: issue.
+  const createKey=async (label, userId, days, tools, viaGoogle, current)=>{
+    const confirmBtn=review.querySelector('.keys-confirm-create');
+    confirmBtn.disabled=true; confirmBtn.textContent='Creating…';
+    const reset=()=>{ review.style.display='none'; review.innerHTML=''; actions.style.display=''; };
     if(!viaGoogle){
       // Re-sign-in as the SAME account (its email from the live session,
       // never a typed one), which stamps a fresh `amr` password entry.
@@ -6299,7 +6454,7 @@ async function renderCreateKeyForm(host, draft={}){
       if(reauthErr){ reset(); return fail(`Password not accepted: ${reauthErr.message}`); }
     }
 
-    const { data: issued, error } = await sb.rpc('admin_issue_agent_key', { p_user_id:userId, p_label:label, p_days:days }).single();
+    const { data: issued, error } = await sb.rpc('admin_issue_agent_key', { p_user_id:userId, p_label:label, p_days:days, p_allowed_tools:tools }).single();
     if(error){
       console.error('issue failed', error.message);
       reset();
@@ -6320,6 +6475,7 @@ function showOneTimeKey(issued){
     <div class="queue-row keys-once">
       <div class="queue-row-email">Copy this key now &mdash; you won&rsquo;t see it again</div>
       <div class="queue-row-name">${escapeHtml(issued.label)} &middot; ${escapeHtml(issued.key_prefix)}&hellip; &middot; expires ${keysDate(issued.expires_at)}</div>
+      <div class="keys-note">Tools (${(issued.allowed_tools||[]).length}): ${keyToolsHtml(issued.allowed_tools)}</div>
       <div class="keys-once-row">
         <input type="text" class="keys-once-key" readonly spellcheck="false" autocomplete="off" aria-label="New API key">
         <button type="button" class="out-b keys-copy-btn">Copy</button>

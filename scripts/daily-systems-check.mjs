@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Mars Telemetry daily systems check. Self-contained: Node >= 22.21, no npm packages.
-// Usage: node mars-check.mjs [--prev FILE] [--subject-out FILE] [--html-out FILE]
-//   --prev         file holding the previous report email body (or just its BASELINES-JSON line)
+// Usage: node mars-check.mjs [--subject-out FILE] [--html-out FILE]
 //   --subject-out  where to write the email subject (without any [TEST] prefix)
-//   --html-out     where to write the report wrapped as HTML <pre> for the mail client
-// stdout: the plain-text report followed by the BASELINES-JSON line, nothing else.
+//   --html-out     where to write the report as an HTML email body
+// stdout: the plain-text report ending with the BASELINES-JSON line, nothing else.
+// "Changes since last run" compares against the gateway's own run history
+// (get_health_history) and the baselines below, so no earlier report is needed.
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // Node's fetch ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY=1; re-exec once with it set.
@@ -30,9 +31,19 @@ const EXPECTED_TOOLS = [
   'get_smoke_markers', 'get_wine_lab_results',
 ];
 const PRODUCER_LAYERS = { p1_database: ['ingestion', 'database', 'security'], p2_probes: ['sources'], p3_frontend: ['dashboard'] };
+const PRODUCER_NAMES = { p1_database: 'Database checks (P1)', p2_probes: 'Upstream source probes (P2)', p3_frontend: 'Dashboard checks (P3)', p3_backup: 'P3 backup dispatch' };
 const LAYERS = ['sources', 'ingestion', 'database', 'gateway', 'dashboard', 'security'];
+const LAYER_NAMES = { sources: 'Sources', ingestion: 'Ingestion', database: 'Database', gateway: 'Gateway', dashboard: 'Dashboard', security: 'Security' };
 const SEV_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
 const KNOWN_ISSUES = { 'source.anthropic.model': 'known: Anthropic key pending replacement' };
+// Items that are structurally not checkable; anything else becoming NOT CHECKABLE turns the report YELLOW.
+const EXPECTED_UNCHECKABLE = new Set(['spot.soil_b2']);
+// Lab field lists recorded 2026-09-30; a change is schema drift.
+const LAB_FIELDS = {
+  get_berry_maturity: ['berry_volume_ml', 'berry_volume_variability_pct', 'berry_weight_g', 'block_id', 'brix', 'collected_on', 'glucose_fructose', 'l_malic_acid', 'ph', 'sugar_per_berry_mg', 'titratable_acidity', 'vintage'],
+  get_smoke_markers: ['analysis_code', 'analysis_name_raw', 'analyzed_at', 'block_id', 'collected_on', 'lab_sample_no', 'result_numeric', 'result_operator', 'result_raw', 'sample_description', 'units', 'vintage'],
+  get_wine_lab_results: ['analysis_code', 'analysis_name_raw', 'analyzed_at', 'collected_on', 'fruit_source', 'lab_sample_no', 'lot_analyses_lot_code', 'lot_analyses_match', 'lot_analyses_value', 'result_numeric', 'result_operator', 'result_raw', 'sample_description', 'sample_type', 'units', 'vintage'],
+};
 
 // ---------- args ----------
 const args = {};
@@ -44,11 +55,12 @@ for (let i = 2; i < process.argv.length; i++) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = new Date();
 const findings = [];
-const notChecked = []; // {id, reason}
-const obs = {}; // observed values for the baselines line
+const notChecked = []; // {id, reason, short}
+const obs = { spot: {}, lab: {}, ops: {} }; // observed values
+const changes = [];
 const add = (severity, layer, check_id, title, observed, expected, next) =>
   findings.push({ severity, layer, check_id, title, observed, expected, next });
-const nc = (id, reason) => notChecked.push({ id, reason });
+const nc = (id, reason, short = reason) => notChecked.push({ id, reason, short });
 const fmt = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
 const clip = (s, n = 400) => (s.length > n ? s.slice(0, n) + '...' : s);
 
@@ -75,21 +87,18 @@ async function post(body) {
   } finally { clearTimeout(t); }
 }
 
-// One JSON-RPC request with the retry rules. Returns {ok, result, error, failure}
+// One JSON-RPC request with the retry rules. Returns {ok, result, failure}
 async function rpc(method, params, { first = false } = {}) {
   const body = { jsonrpc: '2.0', id: rpcId++, method, ...(params ? { params } : {}) };
   let retried = false;
   let throttles = 0;
   for (;;) {
     let r;
-    const t0 = Date.now();
     try { r = await post(body); } catch (e) {
-      if (process.env.MARS_DEBUG) console.error(`${method} ${params?.name || ''} error ${e.kind} ${Date.now() - t0}ms`);
       if (first && e.kind === 'network') return { ok: false, failure: `network error (${e.code}) before reaching the gateway` };
       if (!retried) { retried = true; await sleep(30_000); continue; }
       return { ok: false, failure: e.kind === 'timeout' ? 'TIMEOUT (60 s, retried once)' : `TIMEOUT (network error ${e.code}, retried once)` };
     }
-    if (process.env.MARS_DEBUG) console.error(`${method} ${params?.name || ''} HTTP ${r.status} ${Date.now() - t0}ms`);
     if (r.status === 429) {
       if (++throttles > 5) return { ok: false, failure: 'HTTP 429 (rate limited, gave up after 5 waits)' };
       const wait = Math.min(Math.max(Number(r.retryAfter) || 60, 1), 300);
@@ -110,7 +119,7 @@ async function rpc(method, params, { first = false } = {}) {
   }
 }
 
-// tools/call -> {ok, data, text, failure}. data = structuredContent, else leading JSON of the text.
+// tools/call -> {ok, data, failure}. data = structuredContent, else the leading JSON of the text.
 async function tool(name, a = {}) {
   if (!allowedToCall.has(name)) return { ok: false, failure: 'not in tools/list' };
   const r = await rpc('tools/call', { name, arguments: a });
@@ -125,7 +134,7 @@ async function tool(name, a = {}) {
       try { data = s ? jsonPrefix(s) : null; } catch { data = null; }
     }
   }
-  return { ok: true, data, text };
+  return { ok: true, data };
 }
 function jsonPrefix(s) {
   // Parse the leading JSON value of s (tools append prose notes after the JSON).
@@ -142,19 +151,6 @@ function jsonPrefix(s) {
   throw new Error('unterminated json');
 }
 const rowsOf = (d) => (Array.isArray(d) ? d : Array.isArray(d?.rows) ? d.rows : null);
-
-// ---------- previous baselines ----------
-let prev = null;
-let prevNote = null;
-if (args.prev && existsSync(args.prev)) {
-  const raw = readFileSync(args.prev, 'utf8');
-  const m = raw.match(/BASELINES-JSON:\s*(.*)/);
-  if (m) {
-    const unesc = m[1].replace(/<[^>]*>.*$/s, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').trim();
-    try { prev = jsonPrefix(unesc); } catch { prev = null; }
-  }
-  if (!prev) prevNote = 'Previous report found but it has no parseable BASELINES-JSON line; treated as first run, baselines recorded.';
-}
 
 // ---------- next steps (from docs/SECURITY.md "Every check_id") ----------
 function nextStep(id) {
@@ -186,7 +182,7 @@ function nextStep(id) {
     [/^security\.definer\.search_path_pinned$/, 'Add SET search_path to the named SECURITY DEFINER function.'],
     [/^security\.mcp_reader\.grants$/, "Compare mcp_reader's grants with the baseline, revoke extras, run check-mcp-boundaries.mjs."],
     [/^security\.health_writer\.privileges$/, 'Revoke extra privileges from health_writer (only record_run/record_result).'],
-    [/^security\.no_embedded_keys$/, 'Remove the key from the named object and rotate that key immediately.'],
+    [/^security\.no_embedded_keys$/, 'A secret appears in a database object: remove it from the named object and rotate that secret now.'],
     [/^security\.pg_net\.queue_not_stale$/, 'Inspect the pg_net request queue for the stuck request.'],
     [/^source\.innovint\.api$/, 'Check INNOVINT_TOKEN validity and InnoVint API status.'],
     [/^source\.open_meteo\./, 'Check Open-Meteo archive status; a short IFS day is often transient, re-check tomorrow.'],
@@ -199,8 +195,7 @@ function nextStep(id) {
     [/^frontend\.[a-z0-9_]+\.rls_boundary$/, 'Possible data leak across the RLS boundary: review the sensor_readings/vessels/user_profiles policies now.'],
     [/^frontend\.fidelity\./, "Dashboard disagrees with the gateway: compare the panel's series_bucketed call with get_series/get_derived_series."],
     [/^gateway\.tools\./, 'Adapter disagrees with REST: run scripts/mcp-parity.mjs.'],
-    [/^gateway\.p4\.key_expiry$/, 'Issue a replacement svc-nightly-checks key, then delete and re-add the environment credential, then revoke the old key.'],
-    [/^gateway\.p4\.write_capable_tools$/, "Remove the tool from the key's allowed_tools now (agent-keys.mjs set-tools)."],
+    [/^gateway\.p4\.write_capable_tools$/, "Remove the tool from the key's allowed_tools now (agent-keys.mjs set-tools) and review the key's audit log for misuse."],
     [/^gateway\.p4\./, 'Check the mcp Edge Function logs and the gateway role password.'],
     [/^p3_backup/, 'P3 schedule was missed: check nightly-health-p3.yml runs and github_p3_dispatch_token in Vault.'],
   ];
@@ -220,23 +215,23 @@ const layerOf = (l, id) => {
 
 // ---------- main ----------
 let allowedToCall = new Set();
-const producerTimes = {};
+const producers = {}; // producer -> {run_id, started_at, finished_at, status, stale, counts, schedule_utc}
 let overall = null, currentVintage = null, health = null;
 const stale = new Set();
 
 async function main() {
   // 1. initialize (first call: auth failures stop the run)
-  const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'mars-daily-check', version: '1.0' } }, { first: true });
+  const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'mars-daily-check', version: '2.0' } }, { first: true });
   if (!init.ok) {
     if (authFailure || /network error/.test(init.failure)) {
       add('CRITICAL', 'gateway', 'gateway.auth', 'Gateway auth failed: credential missing, key revoked/expired, or service account disabled',
         authFailure ? `HTTP ${authFailure} on MCP initialize` : `${init.failure} (a proxy 403 means the domain/credential is not set up for this environment)`,
-        'HTTP 200 on initialize', 'Check the key in User Management (revoked/expired?) and the service account; if rotated, delete and re-add the environment credential.');
-      for (const l of LAYERS) nc(`layer.${l}`, 'gateway auth failed on the first call');
+        'HTTP 200 on initialize', 'Check the key in User Management (revoked/expired?) and the service account; if the key was replaced, delete and re-add the environment credential.');
+      for (const l of LAYERS) nc(`layer.${l}`, 'gateway auth failed on the first call', `${LAYER_NAMES[l]} layer (gateway auth failed)`);
       return;
     }
     add('HIGH', 'gateway', 'gateway.initialize', 'MCP initialize failed', init.failure, 'HTTP 200 with a result', 'Check the mcp Edge Function logs.');
-    for (const l of LAYERS) nc(`layer.${l}`, 'MCP initialize failed');
+    for (const l of LAYERS) nc(`layer.${l}`, 'MCP initialize failed', `${LAYER_NAMES[l]} layer (gateway unavailable)`);
     return;
   }
   await rpc('notifications/initialized'); // notification; response ignored
@@ -245,21 +240,23 @@ async function main() {
   const tl = await rpc('tools/list');
   if (!tl.ok) {
     add('HIGH', 'gateway', 'gateway.tools_list', 'tools/list failed', tl.failure, '12 tools', 'Check the mcp Edge Function logs.');
-    nc('inventory', 'tools/list failed');
+    nc('inventory', 'tools/list failed', 'tool inventory (tools/list failed)');
     return;
   }
   const tools = tl.result?.tools || [];
   const names = tools.map((t) => t.name).sort();
   obs.tools = names;
-  for (const t of EXPECTED_TOOLS) if (!names.includes(t))
-    add('HIGH', 'gateway', 'inventory.missing', `Tool missing from tools/list: ${t}`, `${names.length} tools listed`, 'all 12 expected tools',
+  obs.missing = EXPECTED_TOOLS.filter((t) => !names.includes(t));
+  obs.unexpected = names.filter((t) => !EXPECTED_TOOLS.includes(t));
+  for (const t of obs.missing)
+    add('HIGH', 'gateway', 'inventory.missing', `Tool missing from the gateway: ${t}`, `${names.length} tools listed`, 'all 12 expected tools',
       "Add the tool back to the key's allowed_tools (scripts/agent-keys.mjs set-tools).");
   for (const t of tools) if (!EXPECTED_TOOLS.includes(t.name)) {
     const a = t.annotations || {};
     const writes = !/^get_/.test(t.name) || a.readOnlyHint === false || a.destructiveHint === true;
-    add(writes ? 'CRITICAL' : 'MEDIUM', 'gateway', 'inventory.unexpected', `Unexpected tool in tools/list: ${t.name}${writes ? ' (write-capable)' : ''}`,
+    add(writes ? 'CRITICAL' : 'MEDIUM', 'gateway', 'inventory.unexpected', `Unexpected tool on the gateway: ${t.name}${writes ? ' (can write)' : ''}`,
       `tool "${t.name}" exposed to svc-nightly-checks`, 'exactly the 12 read-only tools',
-      writes ? "Remove it from the key's allowed_tools immediately and check the catalogue (mcp_tool_catalogue)." : 'Confirm it is intended; otherwise remove it from allowed_tools.');
+      writes ? "Remove it from the key's allowed_tools immediately, check mcp_tool_catalogue, and review the key's audit log for misuse." : 'Confirm it is intended; otherwise remove it from allowed_tools.');
   }
   allowedToCall = new Set(names.filter((n) => EXPECTED_TOOLS.includes(n))); // never call anything unexpected
 
@@ -267,74 +264,88 @@ async function main() {
   const sh = await tool('get_system_health');
   if (!sh.ok) {
     add('HIGH', 'gateway', 'get_system_health', 'get_system_health failed', sh.failure, 'a health summary', 'Check the mcp Edge Function logs.');
-    for (const l of ['sources', 'ingestion', 'database', 'dashboard', 'security']) nc(`layer.${l}`, 'get_system_health unavailable');
+    for (const l of ['sources', 'ingestion', 'database', 'dashboard', 'security']) nc(`layer.${l}`, 'get_system_health unavailable', `${LAYER_NAMES[l]} layer (health summary unavailable)`);
   } else {
     health = sh.data;
     overall = health.overall;
     currentVintage = health.current_vintage ?? null;
-    obs.overall = overall;
     for (const p of health.producers || []) {
-      producerTimes[p.producer] = { run_id: p.run_id, started_at: p.started_at, finished_at: p.finished_at, status: p.status, stale: !!p.stale };
+      producers[p.producer] = { run_id: p.run_id, started_at: p.started_at, finished_at: p.finished_at, status: p.status, stale: !!p.stale, counts: p.summary?.counts || {}, schedule_utc: p.schedule_utc };
       if (p.stale) {
         stale.add(p.producer);
-        add('HIGH', (PRODUCER_LAYERS[p.producer] || ['database'])[0], `stale.${p.producer}`, `Producer ${p.producer} is stale`,
-          `latest run ${p.run_id} started ${p.started_at}`, `a run after the ${p.schedule_utc} UTC slot (+30 min grace), under 26 h old`,
+        add('HIGH', (PRODUCER_LAYERS[p.producer] || ['database'])[0], `stale.${p.producer}`, `${PRODUCER_NAMES[p.producer] || p.producer} did not run on schedule`,
+          `latest run #${p.run_id} started ${et(p.started_at)}`, `a run after the ${p.schedule_utc} UTC slot (+30 min grace), under 26 h old`,
           { p1_database: 'Check pg_cron job health-p1-database (cron.job_run_details).', p2_probes: 'Check pg_cron job health-p2-probes and the health-probe Edge Function logs.', p3_frontend: 'Check the nightly-health-p3.yml GitHub Actions runs and the P3 backup dispatch.' }[p.producer] || 'Check the producer schedule.');
-        for (const l of PRODUCER_LAYERS[p.producer] || []) nc(`layer.${l}`, `${p.producer} is stale, so its results are not current`);
+        for (const l of PRODUCER_LAYERS[p.producer] || []) nc(`layer.${l}`, `${p.producer} is stale, so its results are not current`, `${LAYER_NAMES[l]} layer (${PRODUCER_NAMES[p.producer] || p.producer} did not run)`);
         continue;
       }
       for (const pr of p.summary?.problems || []) healthProblem(pr, p.producer);
     }
-    // P3 backup dispatches count toward overall
     for (const d of health.p3_backup_dispatches || []) {
       const st = d.status || 'warn';
       if (st !== 'pass') healthProblem({ ...d, check_id: d.check_id || 'p3_backup.dispatch', layer: 'dashboard', status: st }, 'p3_backup');
     }
-    // P4 self-check
     for (const c of health.p4_gateway_self_check || []) p4(c);
+    obs.p4 = (health.p4_gateway_self_check || []).map((c) => c.status);
   }
 
-  // 4. history
+  // 4. history: repeated failures, and changes versus each producer's previous run
   const hh = await tool('get_health_history', { days: 7 });
-  if (!hh.ok) nc('health_history', `get_health_history failed: ${hh.failure}`);
+  if (!hh.ok) nc('health_history', `get_health_history failed: ${hh.failure}`, 'health history (tool failed)');
   else {
+    const runs = hh.data?.runs || [];
     const fails = {};
-    for (const r of hh.data?.runs || []) for (const pr of r.summary?.problems || [])
+    for (const r of runs) for (const pr of r.summary?.problems || [])
       if (pr.status === 'fail') (fails[pr.check_id] ||= { n: 0, layer: pr.layer, producer: r.producer, last: r.started_at }).n++;
     const currentProblems = new Set(findings.map((f) => f.check_id));
     for (const [id, f] of Object.entries(fails)) {
-      if (f.n < 2 || currentProblems.has(id) || stale.has(f.producer) || !producerTimes[f.producer]) continue;
+      if (f.n < 2 || currentProblems.has(id) || stale.has(f.producer) || !producers[f.producer]) continue;
       if (KNOWN_ISSUES[id]) continue; // known issue now passing: stop mentioning it
-      add('LOW', layerOf(f.layer, id), id, 'Failed repeatedly in the last 7 days, passes today',
-        `${f.n} failed runs in 7 days (latest failure ${f.last}); passing in run ${producerTimes[f.producer].run_id}`, 'no failures', nextStep(id) + ' Watch for recurrence.');
+      add('LOW', layerOf(f.layer, id), id, `Health check ${id} failed ${f.n} times in the last 7 days but passes now`,
+        `${f.n} failed runs in 7 days, most recently ${et(f.last)}; passing in run #${producers[f.producer].run_id}`, 'no failures', nextStep(id) + ' Watch for recurrence.');
+    }
+    for (const [p, cur] of Object.entries(producers)) {
+      const mine = runs.filter((r) => r.producer === p).sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)));
+      const i = mine.findIndex((r) => r.run_id === cur.run_id);
+      const before = i >= 0 ? mine[i + 1] : mine[0];
+      const label = PRODUCER_NAMES[p] || p;
+      if (!before) { changes.push(`${label}: no earlier run in the last 7 days to compare with`); continue; }
+      const ids = (r) => new Set((r.summary?.problems || []).map((x) => `${x.check_id} (${x.status})`));
+      const a = ids(before), b = new Set((health.producers.find((x) => x.producer === p)?.summary?.problems || []).map((x) => `${x.check_id} (${x.status})`));
+      const added = [...b].filter((x) => !a.has(x)), gone = [...a].filter((x) => !b.has(x));
+      const parts = [];
+      if (before.status !== cur.status) parts.push(`status ${before.status} -> ${cur.status}`);
+      if (added.length) parts.push(`new: ${added.join(', ')}`);
+      if (gone.length) parts.push(`resolved: ${gone.join(', ')}`);
+      changes.push(`${label}: ${parts.length ? parts.join('; ') : 'no change'} (run #${cur.run_id} vs #${before.run_id} at ${et(before.started_at)})`);
     }
   }
 
   // 5. baselines
   const hb = await tool('get_health_baselines');
   const baselines = {};
-  if (!hb.ok) nc('health_baselines', `get_health_baselines failed: ${hb.failure}`);
+  if (!hb.ok) nc('health_baselines', `get_health_baselines failed: ${hb.failure}`, 'stored baselines (tool failed)');
   else for (const b of hb.data?.baselines || []) baselines[b.check_id] = b.value;
-  const p1ok = producerTimes.p1_database && !stale.has('p1_database');
-  const p3ok = producerTimes.p3_frontend && !stale.has('p3_frontend');
+  const p1ok = producers.p1_database && !stale.has('p1_database');
+  const p3ok = producers.p3_frontend && !stale.has('p3_frontend');
   const passes = (id, prod) => (prod === 'p1' ? p1ok : p3ok) && !findings.some((f) => f.check_id === id && f.severity !== 'LOW');
   const disagree = (id, prod, observed, expected) => {
-    if (passes(id, prod)) add('HIGH', 'gateway', id, `health check ${id} disagrees with direct observation`, observed, expected,
+    if (passes(id, prod)) add('HIGH', 'gateway', id, `Health check ${id} disagrees with direct observation`, observed, expected,
       `${nextStep(id)} Also check whether the health check itself is still testing what it should.`);
   };
 
   // 6. spot-checks
-  obs.spot = {};
   // 6a. soil moisture B2
   const soilArgs = { metric: 'soil_moisture', block: 'B2', vintage: 2024, start: '2024-07-01T00:00:00Z', end: '2024-07-08T00:00:00Z', bucket_hours: 24 };
   const s1 = await tool('get_series', soilArgs);
-  if (!s1.ok) { nc('spot.soil_b2', `get_series failed: ${s1.failure}`); add('HIGH', 'gateway', 'spot.soil_moisture', 'get_series spot-check failed', s1.failure, 'data', 'Check the mcp Edge Function logs.'); }
+  if (!s1.ok) { nc('spot.soil_b2', `get_series failed: ${s1.failure}`, 'B2 soil moisture (tool failed)'); add('HIGH', 'gateway', 'spot.soil_moisture', 'Soil moisture spot-check failed to run', s1.failure, 'data', 'Check the mcp Edge Function logs.'); }
   else {
     const vals = (rowsOf(s1.data) || []).map((r) => r.v).filter((v) => v != null);
     obs.spot.soil_b2 = { total: s1.data?.total_count ?? null, non_null: vals.length, min: vals.length ? Math.min(...vals) : null, max: vals.length ? Math.max(...vals) : null };
     let checkVals = vals, where = 'B2';
     if (!vals.length) {
-      nc('spot.soil_b2', `get_series soil_moisture B2 2024-07-01..08 returned ${s1.data?.total_count ?? 0} buckets, all null (real ERA5-Land soil is estate-level, not per block)`);
+      nc('spot.soil_b2', `get_series soil_moisture B2 2024-07-01..08 returned ${s1.data?.total_count ?? 0} buckets, all empty; real soil data (ERA5-Land) is recorded estate-wide, not per block`,
+        'B2 soil moisture (soil data is recorded estate-wide, not per block)');
       const s2 = await tool('get_series', { ...soilArgs, block: undefined });
       if (s2.ok) {
         checkVals = (rowsOf(s2.data) || []).map((r) => r.v).filter((v) => v != null);
@@ -344,18 +355,18 @@ async function main() {
     }
     const bad = checkVals.filter((v) => v < 0 || v > 100);
     if (bad.length) {
-      add('CRITICAL', 'database', 'spot.soil_moisture', `Soil moisture out of 0-100 (${where}, 2024-07-01..08)`, `${bad.length} bucket(s) out of range: ${bad.slice(0, 5).join(', ')}`, 'every value 0-100', nextStep('database.integrity.soil_moisture_range'));
+      add('CRITICAL', 'database', 'spot.soil_moisture', `Soil moisture outside 0-100% (${where}, 1-8 Jul 2024)`, `${bad.length} bucket(s) out of range: ${bad.slice(0, 5).join(', ')}`, 'every value 0-100', nextStep('database.integrity.soil_moisture_range'));
       disagree('database.integrity.soil_moisture_range', 'p1', `get_series shows ${bad.length} out-of-range bucket(s)`, 'no out-of-range soil readings');
     }
   }
   // 6b. derived GDD
   const d = await tool('get_derived_series', { vintage: 2024 });
-  if (!d.ok) { nc('spot.gdd_2024', `get_derived_series failed: ${d.failure}`); add('HIGH', 'gateway', 'spot.gdd', 'get_derived_series spot-check failed', d.failure, 'data', 'Check the mcp Edge Function logs.'); }
+  if (!d.ok) { nc('spot.gdd_2024', `get_derived_series failed: ${d.failure}`, '2024 GDD (tool failed)'); add('HIGH', 'gateway', 'spot.gdd', 'GDD spot-check failed to run', d.failure, 'data', 'Check the mcp Edge Function logs.'); }
   else {
     const rows = (rowsOf(d.data) || []).filter((r) => r.gdd_cumulative_calibrated != null).sort((a, b) => String(a.day).localeCompare(String(b.day)));
     const last = rows.at(-1);
     obs.spot.gdd_2024 = last ? { value: last.gdd_cumulative_calibrated, day: String(last.day).slice(0, 10) } : null;
-    if (!last) nc('spot.gdd_2024', 'get_derived_series 2024 returned no gdd_cumulative_calibrated values');
+    if (!last) nc('spot.gdd_2024', 'get_derived_series 2024 returned no gdd_cumulative_calibrated values', '2024 GDD (no values returned)');
     else if (!(last.gdd_cumulative_calibrated >= 3000 && last.gdd_cumulative_calibrated <= 4400)) {
       add('CRITICAL', 'database', 'spot.gdd', 'Final 2024 calibrated GDD out of range', `${last.gdd_cumulative_calibrated} on ${String(last.day).slice(0, 10)}`, '3,000-4,400 (about 4,058)', nextStep('database.integrity.gdd_calibrated_2022_2025'));
       disagree('database.integrity.gdd_calibrated_2022_2025', 'p1', `2024 final = ${last.gdd_cumulative_calibrated}`, '3,000-4,400');
@@ -365,17 +376,17 @@ async function main() {
   for (const [asOf, want, id] of [['2024-07-06T02:00:00Z', 3, 'database.anomalies.anchor_2024_07_06'], ['2024-04-06T14:00:00Z', 2, 'database.anomalies.anchor_2024_04_06']]) {
     const key = `anomalies_${asOf.slice(0, 10)}`;
     const a = await tool('get_anomalies', { vintage: 2024, as_of: asOf });
-    if (!a.ok) { nc(`spot.${key}`, `get_anomalies failed: ${a.failure}`); add('HIGH', 'gateway', `spot.${key}`, 'get_anomalies spot-check failed', a.failure, `${want} hits`, 'Check the mcp Edge Function logs.'); continue; }
+    if (!a.ok) { nc(`spot.${key}`, `get_anomalies failed: ${a.failure}`, `anomaly anchor ${asOf.slice(0, 10)} (tool failed)`); add('HIGH', 'gateway', `spot.${key}`, 'Anomaly spot-check failed to run', a.failure, `${want} hits`, 'Check the mcp Edge Function logs.'); continue; }
     const n = a.data?.total_count ?? rowsOf(a.data)?.length ?? null;
-    obs.spot[key] = { total: n, rules: (rowsOf(a.data) || []).map((r) => r.rule_key).sort() };
+    obs.spot[key] = { total: n, want, rules: (rowsOf(a.data) || []).map((r) => r.rule_key).sort() };
     if (n !== want) {
-      add('HIGH', 'database', `spot.${key}`, `Anomaly anchor ${asOf} returned ${n} hit(s)`, `total_count ${n} (${obs.spot[key].rules.join(', ')})`, `${want} hits`, nextStep(id));
+      add('HIGH', 'database', `spot.${key}`, `Anomaly anchor ${asOf.slice(0, 10)} returned ${n} alert(s) instead of ${want}`, `total_count ${n} (${obs.spot[key].rules.join(', ')})`, `${want} hits`, nextStep(id));
       disagree(id, 'p1', `get_anomalies total_count ${n}`, `${want} hits`);
     }
   }
   // 6d. vessels
   const v = await tool('get_vessels', { include_archived: true });
-  if (!v.ok) { nc('spot.vessels', `get_vessels failed: ${v.failure}`); add('HIGH', 'gateway', 'spot.vessels', 'get_vessels spot-check failed', v.failure, 'data', 'Check the mcp Edge Function logs.'); }
+  if (!v.ok) { nc('spot.vessels', `get_vessels failed: ${v.failure}`, 'vessel counts (tool failed)'); add('HIGH', 'gateway', 'spot.vessels', 'Vessel spot-check failed to run', v.failure, 'data', 'Check the mcp Edge Function logs.'); }
   else {
     const total = v.data?.total_count ?? null;
     const rows = rowsOf(v.data) || [];
@@ -383,22 +394,21 @@ async function main() {
     const suspect = truncated ? null : rows.filter((r) => Number(r.capacity_gal) >= 500000).length;
     const active = rows.filter((r) => r.archived === false).length;
     const baseSuspect = baselines['database.vessels.counts']?.capacity_suspect ?? null;
-    obs.spot.vessels = { total, capacity_suspect: suspect, active: truncated ? null : active };
+    obs.spot.vessels = { total, capacity_suspect: suspect, base_suspect: baseSuspect, active: truncated ? null : active };
     if (total !== 241) {
-      add('MEDIUM', 'database', 'spot.vessels_total', 'Vessel total_count changed', `total_count ${total}`, '241', nextStep('database.vessels.counts'));
+      add('MEDIUM', 'database', 'spot.vessels_total', `Vessel count changed to ${total}`, `total_count ${total}`, '241', nextStep('database.vessels.counts'));
       disagree('database.vessels.counts', 'p1', `get_vessels total_count ${total}`, '241');
       disagree('gateway.tools.vessels_vs_rest', 'p3', `get_vessels total_count ${total}`, '241');
     }
-    if (suspect == null) nc('spot.vessels_capacity_suspect', 'get_vessels rows were capped, so the placeholder-capacity count is unreliable');
-    else if (baseSuspect == null) nc('spot.vessels_capacity_suspect', 'no database.vessels.counts baseline available');
+    if (suspect == null) nc('spot.vessels_capacity_suspect', 'get_vessels rows were capped, so the placeholder-capacity count is unreliable', 'placeholder-capacity vessel count (results capped)');
+    else if (baseSuspect == null) nc('spot.vessels_capacity_suspect', 'no database.vessels.counts baseline available', 'placeholder-capacity vessel count (no baseline)');
     else if (suspect !== baseSuspect) {
-      add('MEDIUM', 'database', 'spot.vessels_capacity_suspect', 'Placeholder-capacity vessel count changed', `${suspect} vessels at the 500000 gal placeholder`, `${baseSuspect} (baseline)`, nextStep('database.vessels.counts'));
+      add('MEDIUM', 'database', 'spot.vessels_capacity_suspect', `Vessels with placeholder capacity changed to ${suspect}`, `${suspect} vessels at the 500000 gal placeholder`, `${baseSuspect} (baseline)`, nextStep('database.vessels.counts'));
       if (suspect > baseSuspect) disagree('database.vessels.counts', 'p1', `${suspect} placeholder-capacity vessels`, `<= ${baseSuspect}`);
     }
   }
 
   // 7. lab sanity
-  obs.lab_fields = {};
   const BOUNDS = {
     brix: [0, 35, 'Brix'], ph: [2.8, 4.2, 'pH'], titratable_acidity: [2, 15, 'TA g/L'], yeast_assimilable_nitrogen: [0, 600, 'YAN mg/L'],
     volatile_acidity_acetic_acid: [0, 2, 'VA g/L'], ethanol_at_20c: [0, 17, 'alcohol %'], ethanol_at_60f: [0, 17, 'alcohol %'], free_sulfur_dioxide: [0, 100, 'free SO2 mg/L'],
@@ -408,12 +418,11 @@ async function main() {
     const r = await tool(name, a);
     const rows = r.ok ? rowsOf(r.data) : null;
     if (!r.ok || !rows) {
-      nc(`lab.${name}`, r.ok ? 'response was not a row list' : `${name} failed: ${r.failure}`);
+      nc(`lab.${name}`, r.ok ? 'response was not a row list' : `${name} failed: ${r.failure}`, `${name} (no usable rows)`);
       add('MEDIUM', 'gateway', `lab.${name}`, `${name} did not return usable rows`, r.ok ? 'unparseable response' : r.failure, 'a JSON row list', 'Check the mcp Edge Function logs.');
       continue;
     }
     const fields = [...new Set(rows.flatMap((x) => Object.keys(x)))].sort();
-    obs.lab_fields[name] = fields;
     const issues = [];
     const oob = [];
     const check = (label, val, lo, hi, ref) => { if (typeof val === 'number' && (val < lo || val > hi)) oob.push(`${ref}: ${label}=${val} (allowed ${lo}-${hi})`); };
@@ -423,23 +432,26 @@ async function main() {
       if (name === 'get_wine_lab_results' && BOUNDS[x.analysis_code]) { const b = BOUNDS[x.analysis_code]; check(b[2], x.result_numeric, b[0], b[1], ref); }
       if (name === 'get_smoke_markers' && typeof x.result_numeric === 'number' && x.result_numeric < 0) oob.push(`${ref}: ${x.analysis_code}=${x.result_numeric} (negative)`);
     }
-    if (oob.length) issues.push(['Out-of-bounds lab values', `${oob.length}: ${oob.slice(0, 5).join('; ')}`, 'values inside the sanity bounds']);
+    if (oob.length) issues.push(['values outside sanity bounds', `${oob.length}: ${oob.slice(0, 5).join('; ')}`, 'values inside the sanity bounds']);
     const fut = rows.filter((x) => (x.collected_on && String(x.collected_on).slice(0, 10) > tomorrow) || (x.analyzed_at && new Date(x.analyzed_at) > new Date(now.getTime() + 86400_000)));
-    if (fut.length) issues.push(['Future-dated lab rows', `${fut.length} row(s), e.g. ${fut.slice(0, 3).map((x) => x.collected_on || x.analyzed_at).join(', ')}`, 'no dates after today']);
+    if (fut.length) issues.push(['future-dated rows', `${fut.length} row(s), e.g. ${fut.slice(0, 3).map((x) => x.collected_on || x.analyzed_at).join(', ')}`, 'no dates after today']);
     const seen = new Set(); let dups = 0;
     for (const x of rows) { const k = JSON.stringify(Object.keys(x).sort().map((f) => [f, x[f]])); if (seen.has(k)) dups++; seen.add(k); }
-    if (dups) issues.push(['Duplicate lab rows', `${dups} exact duplicate row(s)`, 'no exact duplicates']);
+    if (dups) issues.push(['duplicate rows', `${dups} exact duplicate row(s)`, 'no exact duplicates']);
     const allNull = rows.length ? fields.filter((f) => rows.every((x) => x[f] == null)) : [];
-    if (allNull.length) issues.push(['Field null on every row', allNull.join(', '), 'each field populated on at least one row']);
-    const pf = prev?.lab_fields?.[name];
-    if (pf) {
-      const added = fields.filter((f) => !pf.includes(f)), removed = pf.filter((f) => !fields.includes(f));
-      if (added.length || removed.length) issues.push(['Schema drift vs last run', `${added.length ? 'added ' + added.join(', ') : ''}${added.length && removed.length ? '; ' : ''}${removed.length ? 'removed ' + removed.join(', ') : ''}`, `fields as last run (${pf.length})`]);
+    if (allNull.length) issues.push(['field empty on every row', allNull.join(', '), 'each field populated on at least one row']);
+    const pf = LAB_FIELDS[name];
+    const added = fields.filter((f) => !pf.includes(f)), removed = pf.filter((f) => !fields.includes(f));
+    if (added.length || removed.length) {
+      issues.push(['schema drift', `${added.length ? 'added ' + added.join(', ') : ''}${added.length && removed.length ? '; ' : ''}${removed.length ? 'removed ' + removed.join(', ') : ''}`, `the ${pf.length} fields recorded on 2026-09-30`]);
+      changes.push(`${name}: fields changed (${added.length} added, ${removed.length} removed)`);
     }
-    for (const [t, o, e] of issues) add('MEDIUM', 'database', `lab.${name}`, `${name}: ${t}`, o, e, 'Compare with the ETS Labs source CSV / InnoVint record and correct the ingest if wrong.');
-    if (name === 'get_wine_lab_results' && rows.length >= 300) nc('lab.get_wine_lab_results.complete', 'returned the 300-row maximum, so later rows were not checked');
+    for (const [t, o, e] of issues) add('MEDIUM', 'database', `lab.${name}`, `Lab data (${name}): ${t}`, o, e, 'Compare with the ETS Labs source CSV / InnoVint record and correct the ingest if wrong.');
+    obs.lab[name] = { rows: rows.length, issues: issues.length, fields };
+    if (name === 'get_wine_lab_results' && rows.length >= 300) nc('lab.get_wine_lab_results.complete', 'returned the 300-row maximum, so later rows were not checked', 'wine lab rows beyond the first 300');
     if (name === 'get_smoke_markers' && currentVintage != null) {
       const hits = rows.filter((x) => x.vintage === currentVintage && typeof x.result_numeric === 'number' && x.result_numeric > 0 && x.result_operator !== '<');
+      obs.lab.smoke_current = hits.length;
       if (hits.length) add('LOW', 'database', 'lab.smoke_current_vintage', `Smoke markers detected in the ${currentVintage} vintage`,
         `${hits.length} value(s) above zero, e.g. ${hits.slice(0, 3).map((x) => `${x.analysis_code}=${x.result_numeric} ${x.units || ''}`.trim()).join('; ')}`, 'none detected', 'Review with the winemaker; compare against smoke-taint thresholds for the sample basis.');
     }
@@ -450,7 +462,7 @@ async function main() {
     const r = await tool(name, a);
     const rows = r.ok ? rowsOf(r.data) : null;
     const hasData = r.ok && (rows ? rows.length > 0 : r.data && (r.data.record_status === 'records_present' || (r.data.categories || []).length > 0));
-    obs[name] = hasData ? 'ok' : 'fail';
+    obs.ops[name] = hasData;
     if (!hasData) add('HIGH', 'gateway', name, `${name} returned no data`, r.ok ? 'empty result' : r.failure, 'data without error', 'Check the mcp Edge Function logs and the underlying table grants/RLS.');
   }
 }
@@ -464,148 +476,181 @@ function healthProblem(pr, producer) {
   else if (st === 'warn' || st === 'error') sev = 'MEDIUM';
   else return;
   const known = KNOWN_ISSUES[id];
-  add(sev, layer, id, `${known ? `[${known}] ` : ''}${producer}: ${st}${pr.detail ? ' - ' + clip(String(pr.detail), 200) : ''}`,
+  add(sev, layer, id, `Health check ${id} ${st === 'fail' ? 'failed' : `returned "${st}"`}${pr.detail ? `: ${clip(String(pr.detail), 200)}` : ''}${known ? ` (${known})` : ''}`,
     clip(fmt(pr.observed ?? '(none recorded)'), 600), clip(fmt(pr.expected ?? '(none recorded)'), 600), nextStep(id));
 }
 
 function p4(c) {
   const id = c.check_id;
   if (id === 'gateway.p4.key_expiry') {
-    const days = c.observed?.days_left;
-    obs.key = { prefix: c.observed?.key_prefix ?? null, expires_at: c.observed?.expires_at ?? null, days_left: days ?? null };
-    if (typeof days === 'number' && days < 14)
-      add(days < 3 ? 'HIGH' : 'MEDIUM', 'gateway', id, `Gateway API key expires in ${days} days`, `key ${c.observed?.key_prefix} expires ${c.observed?.expires_at}`, '14 or more days left', nextStep(id));
-    else if (typeof days !== 'number') nc('p4.key_expiry', 'P4 did not report days_left');
+    // Informational only: key rotation is routine. An expired key shows up as a RED gateway auth failure.
+    obs.key = { prefix: c.observed?.key_prefix ?? null, expires_at: c.observed?.expires_at ?? null, days_left: c.observed?.days_left ?? null };
     return;
   }
   if (id === 'gateway.p4.write_capable_tools') {
     const w = c.observed?.write_capable_tools || [];
-    if (w.length || c.status === 'fail') add('CRITICAL', 'gateway', id, 'Key allows a write-capable tool', w.join(', ') || c.status, 'no write-capable tools', nextStep(id));
+    if (w.length || c.status === 'fail') add('CRITICAL', 'gateway', id, 'The gateway key allows a tool that can write data', w.join(', ') || c.status, 'no write-capable tools', nextStep(id));
     return;
   }
-  if (c.status === 'fail') add('HIGH', 'gateway', id, `P4 ${id} failed`, clip(fmt(c.observed ?? c.detail ?? ''), 400), 'pass', nextStep(id));
-  else if (c.status === 'warn' || c.status === 'error') add('MEDIUM', 'gateway', id, `P4 ${id}: ${c.status}`, clip(fmt(c.observed ?? c.detail ?? ''), 400), 'pass', nextStep(id));
+  if (c.status === 'fail') add('HIGH', 'gateway', id, `Gateway self-check ${id} failed`, clip(fmt(c.observed ?? c.detail ?? ''), 400), 'pass', nextStep(id));
+  else if (c.status === 'warn' || c.status === 'error') add('MEDIUM', 'gateway', id, `Gateway self-check ${id} returned "${c.status}"`, clip(fmt(c.observed ?? c.detail ?? ''), 400), 'pass', nextStep(id));
 }
 
 // ---------- report ----------
 function et(iso) {
   if (!iso) return 'n/a';
-  const dt = new Date(iso);
-  const e = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }).format(dt);
-  return `${dt.toISOString().slice(0, 16).replace('T', ' ')} UTC (${e})`;
+  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }).format(new Date(iso));
 }
+const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
+const countsText = (c) => {
+  const total = Object.values(c || {}).reduce((a, b) => a + b, 0);
+  const bad = Object.entries(c || {}).filter(([k]) => k !== 'pass').map(([k, n]) => `${n} ${k}`);
+  return bad.length ? `${c.pass || 0} of ${total} passed (${bad.join(', ')})` : `all ${total} passed`;
+};
 
 function build() {
   findings.sort((a, b) => SEV_ORDER[a.severity] - SEV_ORDER[b.severity] || a.layer.localeCompare(b.layer));
   const worst = findings[0]?.severity;
-  const prevNC = new Set(prev?.not_checked || []);
-  const newlyUncheckable = prev ? notChecked.filter((n) => !prevNC.has(n.id)) : [];
+  const unexpectedNC = notChecked.filter((n) => !EXPECTED_UNCHECKABLE.has(n.id));
   let status = 'GREEN';
   if (worst === 'CRITICAL' || worst === 'HIGH') status = 'RED';
-  else if (findings.length || newlyUncheckable.length) status = 'YELLOW';
-  const n = findings.length + (findings.length ? 0 : newlyUncheckable.length);
+  else if (findings.length || unexpectedNC.length) status = 'YELLOW';
+  const n = findings.length + (findings.length ? 0 : unexpectedNC.length);
   const dateET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(now);
   const subject = `Mars Telemetry ${status} - ${dateET}${status === 'GREEN' ? '' : `: ${n} issue(s)`}`;
+  const serious = findings.filter((f) => SEV_ORDER[f.severity] <= 1);
+  const minor = findings.filter((f) => SEV_ORDER[f.severity] > 1);
+  const sections = []; // {title, paras: [], items: [{text, sub: []}]}
 
-  const L = [];
-  // SUMMARY
-  const counts = Object.entries(findings.reduce((m, f) => ((m[f.severity] = (m[f.severity] || 0) + 1), m), {}))
-    .sort((a, b) => SEV_ORDER[a[0]] - SEV_ORDER[b[0]]).map(([k, c]) => `${c} ${k}`).join(', ');
-  L.push('SUMMARY');
-  if (authFailure || findings.some((f) => f.check_id === 'gateway.auth'))
-    L.push(`Status ${status}. Gateway auth failed on the first call, so nothing else could be checked. Run at ${et(now.toISOString())}.`);
-  else {
-    L.push(`Status ${status}. Gateway health overall "${overall ?? 'unknown'}"; this run found ${findings.length ? counts : 'no issues'}${notChecked.length ? ` and ${notChecked.length} item(s) not checkable` : ''}.`
-      + ` Producers: ${Object.entries(producerTimes).map(([p, t]) => `${p} run ${t.run_id} ${t.status}${t.stale ? ' STALE' : ''}`).join('; ') || 'none reported'}.`
-      + ` Run at ${et(now.toISOString())}.`);
+  // EXECUTIVE SUMMARY
+  const ex = [];
+  const authFailed = findings.some((f) => f.check_id === 'gateway.auth');
+  if (authFailed) {
+    ex.push('Action needed: the check could not sign in to the Mars Telemetry gateway, so nothing else could be checked today.');
+    ex.push('The key may have been revoked or replaced, or the service account disabled; the finding below says what to look at.');
+  } else {
+    if (status === 'RED') ex.push(`Action needed: ${plural(serious.length, 'serious issue')} found (${serious.slice(0, 3).map((f) => f.title).join('; ')}${serious.length > 3 ? '; ...' : ''}).`);
+    else if (status === 'YELLOW' && findings.length) ex.push(`No urgent problems. ${plural(minor.length, 'lower-priority item')} to be aware of: ${minor.slice(0, 3).map((f) => f.title).join('; ')}${minor.length > 3 ? '; ...' : ''}.`);
+    else if (status === 'YELLOW') ex.push(`No problems found, but ${plural(unexpectedNC.length, 'item')} could not be checked today (${unexpectedNC.map((x) => x.short).join('; ')}).`);
+    else ex.push('Everything looks healthy: no issues found.');
+    const all = Object.values(producers).reduce((m, p) => { for (const [k, v] of Object.entries(p.counts)) m[k] = (m[k] || 0) + v; return m; }, {});
+    const total = Object.values(all).reduce((a, b) => a + b, 0);
+    if (health) ex.push(`The platform's own nightly health checks report "${overall}": ${all.pass || 0} of ${total} checks passed on their latest runs, and ${stale.size ? `${plural(stale.size, 'producer')} did not run on schedule (${[...stale].map((p) => PRODUCER_NAMES[p] || p).join(', ')})` : 'all three producers ran on schedule'}.`);
+    const spotBad = findings.filter((f) => /^(spot\.|lab\.|inventory\.|get_lot|get_labour)/.test(f.check_id) || /disagrees/.test(f.title));
+    ex.push(`The independent checks (tool inventory, GDD, anomaly alerts, vessel counts, lab data) ${spotBad.length ? `found ${plural(spotBad.length, 'discrepancy', 'discrepancies')}` : 'all matched expectations'}.`);
+    const expectedNC = notChecked.filter((x) => EXPECTED_UNCHECKABLE.has(x.id));
+    if (expectedNC.length) ex.push(`As usual, ${expectedNC.map((x) => x.short).join('; ')} could not be checked.`);
   }
-  L.push('');
+  sections.push({ title: 'EXECUTIVE SUMMARY', paras: [ex.join(' ')] });
+
+  // SUMMARY
+  sections.push({ title: 'SUMMARY', items: [
+    { text: `Overall status: ${status}${n && status !== 'GREEN' ? ` (${plural(n, 'issue')})` : ''}` },
+    { text: `Findings: ${findings.length ? Object.entries(findings.reduce((m, f) => ((m[f.severity] = (m[f.severity] || 0) + 1), m), {})).sort((a, b) => SEV_ORDER[a[0]] - SEV_ORDER[b[0]]).map(([k, c]) => `${c} ${k}`).join(', ') : 'none'}` },
+    { text: `Platform health rollup: ${overall ?? 'unknown'}` },
+    { text: `Not checkable: ${notChecked.length ? notChecked.length : 'none'}` },
+    { text: `Report run: ${et(now.toISOString())}` },
+  ] });
+
   // LAYER STATUS
-  L.push('LAYER STATUS');
-  const layerTime = {
-    sources: producerTimes.p2_probes?.finished_at, ingestion: producerTimes.p1_database?.finished_at, database: producerTimes.p1_database?.finished_at,
-    security: producerTimes.p1_database?.finished_at, dashboard: producerTimes.p3_frontend?.finished_at, gateway: health?.generated_at || null,
+  const layerInfo = {
+    sources: ['p2_probes'], ingestion: ['p1_database'], database: ['p1_database'], security: ['p1_database'], dashboard: ['p3_frontend'],
   };
-  const layerSrc = { sources: 'P2', ingestion: 'P1', database: 'P1 + spot-checks', security: 'P1', dashboard: 'P3', gateway: 'P4 + this run' };
-  for (const l of LAYERS) {
+  const layerItems = LAYERS.map((l) => {
     const lf = findings.filter((f) => f.layer === l);
     const ncl = notChecked.find((x) => x.id === `layer.${l}`);
     const st = ncl ? 'NOT CHECKED' : lf.length ? lf[0].severity : 'OK';
-    L.push(`- ${l.padEnd(10)} ${st.padEnd(11)} last check ${et(layerTime[l])} [${layerSrc[l]}]`);
-  }
-  L.push('');
-  // OBSERVED
-  if (obs.spot) {
-    const s = obs.spot;
-    L.push('SPOT-CHECK VALUES (this run)');
-    if (s.soil_b2) L.push(`- soil_moisture B2 2024-07-01..08: ${s.soil_b2.non_null}/${s.soil_b2.total} non-null buckets${s.soil_estate ? `; estate-wide ${s.soil_estate.non_null}/${s.soil_estate.total}, ${s.soil_estate.min}-${s.soil_estate.max}%` : ` ${s.soil_b2.min}-${s.soil_b2.max}%`}`);
-    if (s.gdd_2024) L.push(`- 2024 final calibrated GDD: ${s.gdd_2024.value} (${s.gdd_2024.day})`);
-    for (const k of Object.keys(s).filter((k) => k.startsWith('anomalies_'))) L.push(`- ${k}: ${s[k].total} hits (${s[k].rules.join(', ')})`);
-    if (s.vessels) L.push(`- vessels: total_count ${s.vessels.total}, active ${s.vessels.active}, placeholder capacity ${s.vessels.capacity_suspect}`);
-    if (obs.key) L.push(`- gateway key ${obs.key.prefix} expires ${obs.key.expires_at?.slice(0, 10)} (${obs.key.days_left} days)`);
-    L.push('');
-  }
-  // FINDINGS
-  L.push('FINDINGS');
-  if (!findings.length) L.push('- None.');
-  findings.forEach((f, i) => {
-    L.push(`${i + 1}. [${f.severity}] [${f.layer}] [${f.check_id}] ${f.title}`);
-    L.push(`   Observed: ${f.observed}`);
-    L.push(`   Expected: ${f.expected}`);
-    L.push(`   Next step: ${f.next}`);
-  });
-  L.push('');
-  // NOT CHECKED
-  L.push('NOT CHECKED');
-  if (!notChecked.length) L.push('- Nothing.');
-  for (const x of notChecked) L.push(`- ${x.id}: ${x.reason}${prev && !prevNC.has(x.id) ? ' (checkable last run)' : ''}`);
-  L.push('');
-  // CHANGES
-  L.push('CHANGES SINCE LAST RUN');
-  const cur = baselinesObj(status);
-  if (!prev) L.push(`- ${prevNote || 'First run, baselines recorded.'}`);
-  else {
-    const ch = [];
-    if (prev.status && prev.status !== status) ch.push(`status ${prev.status} -> ${status}`);
-    const pt = prev.tools || [], ct = cur.tools || [];
-    const ta = ct.filter((t) => !pt.includes(t)), tr = pt.filter((t) => !ct.includes(t));
-    if (ta.length) ch.push(`tools added: ${ta.join(', ')}`);
-    if (tr.length) ch.push(`tools removed: ${tr.join(', ')}`);
-    for (const [p, t] of Object.entries(cur.producers || {})) {
-      const o = prev.producers?.[p];
-      if (!o) ch.push(`${p}: new producer`);
-      else if (o.run_id === t.run_id) ch.push(`${p}: no new run since last report (still run ${t.run_id})`);
-      else if (o.status !== t.status) ch.push(`${p}: ${o.status} -> ${t.status}`);
+    let detail;
+    if (l === 'gateway') detail = health ? `gateway self-check and this report's direct checks, ${et(health.generated_at)}` : 'gateway unavailable';
+    else {
+      const p = producers[layerInfo[l][0]];
+      detail = p ? `${PRODUCER_NAMES[layerInfo[l][0]]}, last run ${et(p.finished_at || p.started_at)}; ${countsText(p.counts)}${l !== 'sources' && l !== 'dashboard' ? ' (shared across ingestion, database and security)' : ''}` : 'no run reported';
     }
-    for (const [k, v] of Object.entries(cur.spot || {})) if (prev.spot && JSON.stringify(prev.spot[k]) !== JSON.stringify(v)) ch.push(`spot ${k}: ${JSON.stringify(prev.spot[k] ?? null)} -> ${JSON.stringify(v)}`);
-    for (const [k, v] of Object.entries(cur.lab_fields || {})) if (prev.lab_fields?.[k] && JSON.stringify(prev.lab_fields[k]) !== JSON.stringify(v)) ch.push(`lab fields changed: ${k}`);
-    const pf = new Set(prev.finding_ids || []), cf = new Set(cur.finding_ids);
-    const nf = [...cf].filter((x) => !pf.has(x)), rf = [...pf].filter((x) => !cf.has(x));
-    if (nf.length) ch.push(`new findings: ${nf.join(', ')}`);
-    if (rf.length) ch.push(`resolved since last run: ${rf.join(', ')}`);
-    for (const x of newlyUncheckable) ch.push(`now not checkable: ${x.id}`);
-    L.push(...(ch.length ? ch.map((c) => `- ${c}`) : ['- No changes.']));
+    return { text: `${LAYER_NAMES[l]}: ${st}`, sub: [detail + (lf.length ? `; ${plural(lf.length, 'finding')} below` : '')] };
+  });
+  sections.push({ title: 'LAYER STATUS', items: layerItems });
+
+  // FINDINGS
+  sections.push({ title: 'FINDINGS', items: findings.length ? findings.map((f) => ({
+    text: `[${f.severity}] ${LAYER_NAMES[f.layer] || f.layer}: ${f.title}`,
+    sub: [`Check: ${f.check_id}`, `Observed: ${f.observed}`, `Expected: ${f.expected}`, `Next step: ${f.next}`],
+  })) : [{ text: 'None.' }] });
+
+  // INDEPENDENT CHECKS
+  const s = obs.spot, ic = [];
+  if (obs.tools) ic.push({ text: `Tool inventory: ${obs.tools.length} tools listed; ${obs.missing.length ? `missing ${obs.missing.join(', ')}` : 'all 12 expected read-only tools present'}${obs.unexpected.length ? `; unexpected ${obs.unexpected.join(', ')}` : ', nothing unexpected'}` });
+  if (s.soil_b2) ic.push({ text: s.soil_b2.non_null ? `Soil moisture, B2, 1-8 Jul 2024: ${s.soil_b2.min}-${s.soil_b2.max}% (expected 0-100%)`
+    : `Soil moisture, B2, 1-8 Jul 2024: no values (soil is recorded estate-wide)${s.soil_estate ? `; estate-wide ${s.soil_estate.min}-${s.soil_estate.max}% across ${s.soil_estate.non_null} days, within 0-100%` : ''}` });
+  if (s.gdd_2024) ic.push({ text: `2024 growing degree days (calibrated, final): ${s.gdd_2024.value.toLocaleString('en-US')} on ${s.gdd_2024.day} (expected 3,000-4,400, about 4,058)` });
+  for (const k of Object.keys(s).filter((k) => k.startsWith('anomalies_'))) ic.push({ text: `Anomaly alerts as of ${k.slice(10)}: ${s[k].total} (expected ${s[k].want}) - ${s[k].rules.join(', ')}` });
+  if (s.vessels) ic.push({ text: `Vessels: ${s.vessels.total} total (expected 241), ${s.vessels.active} active, ${s.vessels.capacity_suspect} with placeholder capacity (baseline ${s.vessels.base_suspect})` });
+  const labNames = { get_berry_maturity: 'berry maturity', get_smoke_markers: 'smoke marker', get_wine_lab_results: 'wine lab' };
+  if (Object.keys(obs.lab).length) {
+    ic.push({ text: `Lab data: ${Object.entries(labNames).filter(([k]) => obs.lab[k]).map(([k, v]) => `${obs.lab[k].rows} ${v} rows`).join(', ')}`, sub: [
+      Object.values(obs.lab).some((x) => x.issues) ? 'Some problems found (see Findings)' : 'No out-of-range values, future dates, duplicates, empty fields or schema changes',
+      obs.lab.smoke_current != null ? (obs.lab.smoke_current ? `${obs.lab.smoke_current} smoke-marker value(s) above zero in the ${currentVintage} vintage` : `No smoke markers detected in the ${currentVintage} vintage`) : null,
+    ].filter(Boolean) });
   }
-  L.push('');
-  L.push('BASELINES-JSON: ' + JSON.stringify(cur));
-  return { subject, text: L.join('\n') };
+  if (Object.keys(obs.ops).length) ic.push({ text: `Lot analyses and labour summary: ${Object.entries(obs.ops).map(([k, ok]) => `${k.replace('get_', '').replace('_', ' ')} ${ok ? 'returned data' : 'FAILED'}`).join('; ')}` });
+  if (obs.key) ic.push({ text: `Gateway key ${obs.key.prefix}: valid until ${String(obs.key.expires_at).slice(0, 10)} (information only)` });
+  sections.push({ title: 'INDEPENDENT CHECKS', paras: ['Direct checks made by this report through the gateway, alongside the platform\'s own health checks.'], items: ic.length ? ic : [{ text: 'None could run.' }] });
+
+  // NOT CHECKED
+  sections.push({ title: 'NOT CHECKED', items: notChecked.length ? notChecked.map((x) => ({ text: `${x.short}${EXPECTED_UNCHECKABLE.has(x.id) ? ' - expected' : ''}`, sub: [x.reason] })) : [{ text: 'Nothing.' }] });
+
+  // CHANGES
+  sections.push({ title: 'CHANGES SINCE LAST RUN', paras: ["Compared with each health producer's previous run, from the platform's own run history."], items: changes.length ? changes.map((c) => ({ text: c })) : [{ text: 'No history available to compare.' }] });
+
+  const baselines = {
+    v: 2, at: now.toISOString(), status, overall, tools: obs.tools || [],
+    producers: Object.fromEntries(Object.entries(producers).map(([k, p]) => [k, { run_id: p.run_id, finished_at: p.finished_at, status: p.status, stale: p.stale }])),
+    spot: s, lab_fields: Object.fromEntries(Object.entries(obs.lab).map(([k, x]) => [k, x.fields])),
+    not_checked: notChecked.map((x) => x.id), finding_ids: [...new Set(findings.map((f) => `${f.severity}:${f.check_id}`))],
+  };
+  return { subject, status, sections, baselinesLine: 'BASELINES-JSON: ' + JSON.stringify(baselines) };
 }
 
-function baselinesObj(status) {
-  return {
-    v: 1, at: now.toISOString(), status, overall, tools: obs.tools || [],
-    producers: producerTimes, spot: obs.spot || {}, lab_fields: obs.lab_fields || {},
-    key: obs.key || null, not_checked: notChecked.map((x) => x.id), finding_ids: [...new Set(findings.map((f) => `${f.severity}:${f.check_id}`))],
-  };
+function renderText({ subject, sections, baselinesLine }) {
+  const L = [subject, ''];
+  for (const sec of sections) {
+    L.push(sec.title);
+    for (const p of sec.paras || []) L.push(p);
+    for (const it of sec.items || []) {
+      L.push(`• ${it.text}`);
+      for (const sub of it.sub || []) L.push(`    – ${sub}`);
+    }
+    L.push('');
+  }
+  L.push(baselinesLine);
+  return L.join('\n');
+}
+
+function renderHtml({ subject, status, sections, baselinesLine }) {
+  const e = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const colour = { RED: '#b42318', YELLOW: '#b54708', GREEN: '#067647' }[status];
+  const h = [`<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;color:#1f2328;max-width:760px">`,
+    `<h2 style="margin:0 0 12px;font-size:18px;color:${colour}">${e(subject)}</h2>`];
+  for (const sec of sections) {
+    h.push(`<h3 style="margin:18px 0 6px;font-size:13px;letter-spacing:.04em;color:#57606a">${e(sec.title)}</h3>`);
+    for (const p of sec.paras || []) h.push(`<p style="margin:0 0 8px">${e(p)}</p>`);
+    if (sec.items?.length) {
+      h.push('<ul style="margin:0 0 8px;padding-left:20px">');
+      for (const it of sec.items) {
+        h.push(`<li style="margin:2px 0">${e(it.text)}`);
+        if (it.sub?.length) h.push(`<ul style="padding-left:18px;color:#57606a">${it.sub.map((x) => `<li>${e(x)}</li>`).join('')}</ul>`);
+        h.push('</li>');
+      }
+      h.push('</ul>');
+    }
+  }
+  h.push(`<p style="margin-top:20px;font-family:Menlo,Consolas,monospace;font-size:10px;color:#8c959f;word-break:break-all">${e(baselinesLine)}</p></div>`);
+  return h.join('\n');
 }
 
 try { await main(); } catch (e) {
   add('HIGH', 'gateway', 'check.script', 'The check script hit an unexpected error', clip(String(e?.message || e), 200), 'a complete run', 'Re-run; if it repeats, the response format may have changed.');
 }
-const { subject, text } = build();
-if (args['subject-out']) writeFileSync(args['subject-out'], subject + '\n');
-if (args['html-out']) {
-  const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  writeFileSync(args['html-out'], `<pre style="font-family:Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap">${esc}</pre>`);
-}
-process.stdout.write(text + '\n');
+const report = build();
+if (args['subject-out']) writeFileSync(args['subject-out'], report.subject + '\n');
+if (args['html-out']) writeFileSync(args['html-out'], renderHtml(report));
+process.stdout.write(renderText(report) + '\n');

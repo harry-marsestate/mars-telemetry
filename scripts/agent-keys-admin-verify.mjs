@@ -48,10 +48,11 @@ const NO_REST = process.argv.includes("--no-rest");
 
 const ADMIN_FNS = ["admin_list_agent_keys()", "admin_issue_agent_key(uuid,text,integer)", "admin_revoke_agent_key(uuid)",
   "admin_update_agent_key_expiry(uuid,integer)", "admin_list_agent_key_calls(uuid,integer)", "admin_list_agent_key_expiry_changes(uuid)"];
-const INTERNAL_FNS = ["agent_key_list()", "agent_key_issue(uuid,text,integer,text,boolean)", "agent_key_revoke(uuid)",
-  "agent_key_set_expiry(uuid,integer,text)", "agent_key_calls(uuid,integer)", "agent_key_expiry_changes(uuid)"];
+const INTERNAL_FNS = ["agent_key_list()", "agent_key_issue(uuid,text,integer,text,boolean,text[])", "agent_key_revoke(uuid)",
+  "agent_key_set_expiry(uuid,integer,text)", "agent_key_calls(uuid,integer)", "agent_key_expiry_changes(uuid)",
+  "agent_key_set_tools(uuid,text[],text)"];
 const FN_NAMES = [...ADMIN_FNS, ...INTERNAL_FNS].map((f) => f.slice(0, f.indexOf("(")));
-const KEY_TABLES = ["agent_api_keys", "agent_api_key_calls", "agent_api_key_expiry_changes"];
+const KEY_TABLES = ["agent_api_keys", "agent_api_key_calls", "agent_api_key_expiry_changes", "agent_api_key_scope_changes", "mcp_tool_catalogue"];
 const API_ROLES = ["anon", "authenticated", "service_role", "mcp_gateway", "mcp_reader"];
 const NO_SUCH_KEY = "00000000-0000-4000-8000-000000000000";
 
@@ -382,7 +383,7 @@ await withDb(async (db) => {
 
   // ---- 5. plaintext never in statement history ------------------------------------------
   out("\n## 4b. Banned/deleted-owner predicate in the live function definitions");
-  for (const fn of ["public.mcp_authenticate(text)", "public.mcp_log_call(text,text,jsonb,boolean)", "public.agent_key_issue(uuid,text,integer,text,boolean)", "public.agent_key_list()"]) {
+  for (const fn of ["public.mcp_authenticate(text)", "public.mcp_log_call(text,text,jsonb,boolean)", "public.agent_key_issue(uuid,text,integer,text,boolean,text[])", "public.agent_key_list()"]) {
     const [{ def }] = (await db.query("select pg_get_functiondef($1::regprocedure) def", [fn])).rows;
     verdict(`${fn.split("(")[0]} checks auth.users banned_until and deleted_at`, /banned_until/.test(def) && /deleted_at/.test(def));
   }

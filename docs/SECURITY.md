@@ -7528,7 +7528,7 @@ after:
 
 **Precedence and derived data, before vs after: 402 of 402 entries
 identical.**
-- All 392 dashboard `series_bucketed` calls: 16 metrics x 4 blocks
+- All 392 dashboard `series_bucketed` calls: 14 metrics x 4 blocks
   (estate, B1, B2, B3) x (5 full-season vintages 2022-2026, a 2026 hourly
   window, and a no-vintage cross-year window).
 - All of `daily_weather` and `daily_derived`.

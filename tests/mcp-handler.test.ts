@@ -4,6 +4,7 @@
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert@1";
 import { TOOLS } from "../supabase/functions/chat/tools.ts";
 import { MCP_TOOLS } from "../supabase/functions/mcp/allowlist.ts";
+import { HEALTH_TOOLS } from "../supabase/functions/mcp/health-tools.ts";
 import { parseBearerKey, sha256Hex } from "../supabase/functions/mcp/auth.ts";
 import { createMcpHandler, type McpDeps, validateArgs } from "../supabase/functions/mcp/handler.ts";
 
@@ -34,7 +35,7 @@ function harness(overrides: Partial<McpDeps> = {}, keyTools: readonly string[] =
     },
     async runTool(_sb, name) { calls.runTool.push(name); return { content: `rows for ${name}`, isError: false }; },
     async fetchDomainReality() { return new Map(); },
-    tools: TOOLS as never,
+    tools: [...TOOLS, ...HEALTH_TOOLS] as never,
     ...overrides,
   };
   return { handler: createMcpHandler(deps), calls };

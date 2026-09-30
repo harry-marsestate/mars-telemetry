@@ -4,6 +4,7 @@ import { fetchDomainReality, runTool, TOOLS } from "../chat/tools.ts";
 import { PostgrestAdapter } from "./adapter.ts";
 import { runAsKeyOwner, type Sql } from "./gateway.ts";
 import { DATA_TOOLS, runDataTool } from "./data-tools.ts";
+import { HEALTH_TOOL_NAMES, HEALTH_TOOLS, runHealthTool } from "./health-tools.ts";
 import { createMcpHandler } from "./handler.ts";
 
 // MCP-over-HTTP for external agents, authenticated by a per-user API key
@@ -60,7 +61,7 @@ const handler = createMcpHandler({
   // exactly as before. The count queries run in the same read-only
   // mcp_reader transaction, under the key owner's RLS.
   runTool: (client, name, input, dataMode, reality) =>
-    DATA_TOOLS.includes(name)
+    HEALTH_TOOL_NAMES.includes(name) ? runHealthTool(client, name, input) : DATA_TOOLS.includes(name)
       ? runDataTool(name, input, () => runTool(client, name, input, dataMode, reality), {
         dataMode,
         reality,
@@ -68,7 +69,7 @@ const handler = createMcpHandler({
       })
       : runTool(client, name, input, dataMode, reality),
   fetchDomainReality,
-  tools: TOOLS as never,
+  tools: [...TOOLS, ...HEALTH_TOOLS] as never,
 });
 
 export default {

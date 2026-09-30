@@ -27,6 +27,11 @@ export const MCP_TOOLS: readonly string[] = [
   "get_derived_series",
   "get_anomalies",
   "get_vessels",
+  // Health tools (health-tools.ts, not chat tools): operator-owned keys only
+  // (key-scope trigger) and operator accounts only (inside each function).
+  "get_system_health",
+  "get_health_history",
+  "get_health_baselines",
 ];
 
 // Tables/views the tool code may name in from(). The standing rule is
@@ -82,6 +87,9 @@ export const RPCS: Readonly<Record<string, string>> = {
   domain_reality: "SECURITY DEFINER, caller-independent real/simulated classification; resolved exactly as chat does.",
   series_bucketed: "SECURITY INVOKER time-bucketed sensor series (get_series); caller's RLS applies.",
   anomalies_eval: "SECURITY INVOKER anomaly rule evaluation (get_anomalies); caller's RLS applies.",
+  health_system_status: "SECURITY DEFINER, operator accounts only: latest run per producer + the P4 self-check (get_system_health). EXECUTE for mcp_reader only.",
+  health_history: "SECURITY DEFINER, operator accounts only: runs in the last 1-30 days (get_health_history). EXECUTE for mcp_reader only.",
+  health_baselines: "SECURITY DEFINER, operator accounts only: every P1 baseline (get_health_baselines). EXECUTE for mcp_reader only.",
   mcp_authenticate: "SECURITY DEFINER key lookup; EXECUTE for mcp_gateway only. Returns (key_id, user_id) for an active key.",
   mcp_log_call: "SECURITY DEFINER audit append into agent_api_key_calls; EXECUTE for mcp_gateway only, gated on the key hash.",
   mcp_key_scope: "SECURITY DEFINER: an active key's allowed_tools and rate limits; EXECUTE for mcp_gateway only (tools/list).",

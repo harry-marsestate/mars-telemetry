@@ -3,7 +3,7 @@ import { withSupabase } from "@supabase/server";
 import { summarizeClimate, withIngestionLog } from "../_shared/ingestion-log.ts";
 import {
   archiveUrl, ELEVATION_M, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
-  lastElapsedHourMs, pacificYear, stampUtc,
+  harvestVintage, lastElapsedHourMs, stampUtc, vintageRanges,
   CLIMATE_SOURCES, type ClimateSource, requestedModel,
 } from "./window.ts";
 
@@ -71,7 +71,13 @@ async function sync(req: Request, ctx: any): Promise<Response> {
       // The cutoff above trims anything not yet elapsed.
       const fetchEnd = fetchWindowEnd(endStr, runAt);
 
-      const VINTAGE = 2026;
+      // Each hour's vintage follows the harvest-year rule (harvestVintage:
+      // Nov 1 Pacific starts next year's vintage). Guard, fail-loud: an hour
+      // whose vintage isn't in public.vintages is NOT written and the run
+      // reports an error naming it -- adding a vintage is a deliberate step.
+      const { data: vintageRows, error: vintageErr } = await ctx.supabaseAdmin.from("vintages").select("vintage");
+      if (vintageErr) throw new Error(`could not read public.vintages: ${vintageErr.message}`);
+      const knownVintages = new Set<number>((vintageRows ?? []).map((r: { vintage: number }) => Number(r.vintage)));
       const results: Record<string, MetricResult> = {};
 
       const weatherData = await fetchWithEndFallback(
@@ -81,9 +87,9 @@ async function sync(req: Request, ctx: any): Promise<Response> {
         results.humidity = { written: 0, nulls: 0, error: weatherData.error };
         results.precipitation = { written: 0, nulls: 0, error: weatherData.error };
       } else {
-        await upsertMetric(ctx, results, cutoffMs, "air_temp", weatherData.data!, "temperature_2m", VINTAGE, 1, CLIMATE_SOURCES.weather);
-        await upsertMetric(ctx, results, cutoffMs, "humidity", weatherData.data!, "relative_humidity_2m", VINTAGE, 1, CLIMATE_SOURCES.weather);
-        await upsertMetric(ctx, results, cutoffMs, "precipitation", weatherData.data!, "precipitation", VINTAGE, 1, CLIMATE_SOURCES.weather);
+        await upsertMetric(ctx, results, cutoffMs, "air_temp", weatherData.data!, "temperature_2m", knownVintages, 1, CLIMATE_SOURCES.weather);
+        await upsertMetric(ctx, results, cutoffMs, "humidity", weatherData.data!, "relative_humidity_2m", knownVintages, 1, CLIMATE_SOURCES.weather);
+        await upsertMetric(ctx, results, cutoffMs, "precipitation", weatherData.data!, "precipitation", knownVintages, 1, CLIMATE_SOURCES.weather);
       }
 
       const soilData = await fetchWithEndFallback(
@@ -96,19 +102,28 @@ async function sync(req: Request, ctx: any): Promise<Response> {
         // fraction; every consumer here (the mock data, soil_below_refill's
         // threshold, the "% VWC" unit) expects 0-100 -- see client.py's
         // matching comment.
-        await upsertMetric(ctx, results, cutoffMs, "soil_moisture", soilData.data!, "soil_moisture_0_to_7cm", VINTAGE, 100, CLIMATE_SOURCES.soil);
-        await upsertMetric(ctx, results, cutoffMs, "soil_temp", soilData.data!, "soil_temperature_0_to_7cm", VINTAGE, 1, CLIMATE_SOURCES.soil);
+        await upsertMetric(ctx, results, cutoffMs, "soil_moisture", soilData.data!, "soil_moisture_0_to_7cm", knownVintages, 100, CLIMATE_SOURCES.soil);
+        await upsertMetric(ctx, results, cutoffMs, "soil_temp", soilData.data!, "soil_temperature_0_to_7cm", knownVintages, 1, CLIMATE_SOURCES.soil);
       }
 
       const anyWritten = Object.values(results).some((r) => r.written > 0);
       let refreshError: string | undefined;
+      // One refresh per vintage the window touches (a window can straddle
+      // Nov 1); a vintage not in public.vintages had nothing written, so it
+      // is skipped here (its hours are already reported as an error).
+      const refreshed: { vintage: number; start: string; end: string }[] = [];
       if (anyWritten && startStr <= refreshEnd) {
-        const { error } = await ctx.supabaseAdmin.rpc("refresh_daily_weather_range", {
-          p_vintage: VINTAGE, p_start: startStr, p_end: refreshEnd,
-        });
-        if (error) {
-          console.error("ingest-climate-2026: refresh_daily_weather_range failed", error);
-          refreshError = error.message;
+        for (const r of vintageRanges(startStr, refreshEnd)) {
+          if (!knownVintages.has(r.vintage)) continue;
+          const { error } = await ctx.supabaseAdmin.rpc("refresh_daily_weather_range", {
+            p_vintage: r.vintage, p_start: r.start, p_end: r.end,
+          });
+          if (error) {
+            console.error("ingest-climate-2026: refresh_daily_weather_range failed", r, error);
+            refreshError = [refreshError, `${r.vintage}: ${error.message}`].filter(Boolean).join("; ");
+          } else {
+            refreshed.push(r);
+          }
         }
       }
 
@@ -122,6 +137,7 @@ async function sync(req: Request, ctx: any): Promise<Response> {
           start: startStr, end: endStr, stored_through: new Date(cutoffMs).toISOString(), daily_weather_through: refreshEnd,
           fetch_end: { weather: weatherData.endUsed, soil: soilData.endUsed },
           fetch_end_fallback: weatherData.fallback || soilData.fallback,
+          daily_weather_refreshed_ranges: refreshed,
         },
         results,
         // What was actually requested, read back from the URLs the ingest
@@ -175,47 +191,51 @@ async function fetchHourly(
   }
 }
 
-interface MetricResult { written: number; nulls: number; future_skipped?: number; wrong_vintage?: number; error?: string }
+interface MetricResult { written: number; nulls: number; future_skipped?: number; unknown_vintage?: number; vintages?: number[]; error?: string }
 
 async function upsertMetric(
   ctx: { supabaseAdmin: { from: (t: string) => any } },
   results: Record<string, MetricResult>,
   cutoffMs: number,
-  metricKey: string, data: OpenMeteoResponse, variable: string, vintage: number, scale: number,
+  metricKey: string, data: OpenMeteoResponse, variable: string, knownVintages: Set<number>, scale: number,
   source: ClimateSource,
 ) {
   try {
     const times = data.hourly?.time ?? [];
     const values = (data.hourly?.[variable] as (number | null)[] | undefined) ?? [];
     const rows: { metric_key: string; sensor_id: string; block_id: null; tank_id: null; recorded_at: string; value: number; source_system: string; vintage: number }[] = [];
-    let nulls = 0, futureSkipped = 0, wrongVintage = 0;
+    let nulls = 0, futureSkipped = 0, unknownVintage = 0;
+    const missing = new Set<number>(), written = new Set<number>();
     for (let i = 0; i < times.length; i++) {
       const recordedAt = stampUtc(times[i]);
       if (Date.parse(recordedAt) > cutoffMs) { futureSkipped++; continue; }
-      // VINTAGE guard: never label an hour from another year as this vintage.
-      if (pacificYear(Date.parse(recordedAt)) !== vintage) { wrongVintage++; continue; }
+      // Harvest-year vintage; refuse (loudly) a vintage public.vintages lacks.
+      const vintage = harvestVintage(Date.parse(recordedAt));
+      if (!knownVintages.has(vintage)) { unknownVintage++; missing.add(vintage); continue; }
       const v = values[i];
       if (v == null) { nulls++; continue; }
+      written.add(vintage);
       rows.push({
         metric_key: metricKey, sensor_id: source.sensor_id, block_id: null, tank_id: null,
         recorded_at: recordedAt, value: v * scale, source_system: source.source_system, vintage,
       });
     }
-    const vintageError = wrongVintage
-      ? `VINTAGE is ${vintage} but ${wrongVintage} hour(s) fall in another year and were NOT written -- update VINTAGE (docs/SECURITY.md tracked item)`
+    const vintageError = unknownVintage
+      ? `${unknownVintage} hour(s) belong to vintage ${[...missing].sort().join(", ")} (harvest-year rule), which is not in public.vintages -- NOT written; add the vintage (docs/SECURITY.md)`
       : undefined;
+    const vintages = [...written].sort();
     if (rows.length === 0) {
-      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, wrong_vintage: wrongVintage, error: vintageError };
+      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, unknown_vintage: unknownVintage, vintages, error: vintageError };
       return;
     }
     const { error } = await ctx.supabaseAdmin.from("sensor_readings")
       .upsert(rows, { onConflict: "metric_key,sensor_id,recorded_at" });
     if (error) {
       console.error(`ingest-climate-2026: upsert failed for ${metricKey}`, error);
-      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, wrong_vintage: wrongVintage, error: error.message };
+      results[metricKey] = { written: 0, nulls, future_skipped: futureSkipped, unknown_vintage: unknownVintage, vintages, error: error.message };
       return;
     }
-    results[metricKey] = { written: rows.length, nulls, future_skipped: futureSkipped, wrong_vintage: wrongVintage, error: vintageError };
+    results[metricKey] = { written: rows.length, nulls, future_skipped: futureSkipped, unknown_vintage: unknownVintage, vintages, error: vintageError };
   } catch (err) {
     console.error(`ingest-climate-2026: unexpected error upserting ${metricKey}`, err);
     results[metricKey] = { written: 0, nulls: 0, error: String(err) };

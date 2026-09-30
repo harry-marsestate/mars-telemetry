@@ -116,7 +116,7 @@ export function summarizeClimate(body: unknown): RunSummary {
     error: b.reason ? `${b.reason}${b.detail ? `: ${b.detail}` : ""}` : (errors.join("; ") || null),
     detail: {
       window: b.window ?? null,
-      per_metric: Object.fromEntries(metrics.map(([k, v]) => [k, { written: v?.written ?? 0, nulls: v?.nulls ?? 0, future_skipped: v?.future_skipped ?? 0, wrong_vintage: v?.wrong_vintage ?? 0, error: v?.error ? true : undefined }])),
+      per_metric: Object.fromEntries(metrics.map(([k, v]) => [k, { written: v?.written ?? 0, nulls: v?.nulls ?? 0, future_skipped: v?.future_skipped ?? 0, unknown_vintage: v?.unknown_vintage ?? 0, vintages: v?.vintages ?? undefined, error: v?.error ? true : undefined }])),
       daily_weather_refreshed: b.daily_weather_refreshed ?? null,
       real_as_of: b.real_as_of ?? null,
       requested_models: b.requested_models ?? null,

@@ -24,6 +24,7 @@
 //    mcp_key_scope/mcp_authorize_call are EXECUTE for mcp_gateway only.
 import { readdirSync, readFileSync } from "node:fs";
 import { MCP_TOOLS, RELATIONS, RPC_DEPENDENCIES, TABLES_AND_VIEWS, VIEW_DEPENDENCIES } from "../supabase/functions/mcp/allowlist.ts";
+import { HEALTH_TOOL_NAMES } from "../supabase/functions/mcp/health-tools.ts";
 
 const MCP_DIR = new URL("../supabase/functions/mcp/", import.meta.url);
 const TOOLS_FILE = new URL("../supabase/functions/chat/tools.ts", import.meta.url);
@@ -75,11 +76,16 @@ for (const m of toolsSrc.matchAll(/^(?:export )?(?:async )?function (\w+)\(/gm))
 }
 const dispatch = new Map([...toolsSrc.matchAll(/case "(\w+)":\s*return await (\w+)\(/g)].map((m) => [m[1], m[2]]));
 
+// Health tools are gateway-only (mcp/health-tools.ts, scanned below with the
+// rest of this directory); every other exposed tool must be a chat tool.
 const roots = MCP_TOOLS.map((tool) => {
+  if (HEALTH_TOOL_NAMES.includes(tool)) return null;
   const fn = dispatch.get(tool);
   if (!fn) failures.push(`allowlisted tool ${tool} has no runTool dispatch in chat/tools.ts`);
   return fn;
 }).filter(Boolean);
+for (const tool of HEALTH_TOOL_NAMES) if (!MCP_TOOLS.includes(tool)) failures.push(`health tool ${tool} is defined but not in MCP_TOOLS`);
+for (const tool of MCP_TOOLS) if (!HEALTH_TOOL_NAMES.includes(tool) && tool.match(/health/)) failures.push(`${tool} looks like a health tool but isn't in health-tools.ts`);
 // Functions the mcp directory imports from chat/tools.ts directly (runTool is
 // covered by its allowlisted cases above, not its whole switch).
 for (const src of Object.values(sources)) {
@@ -142,6 +148,9 @@ for (const f of readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).so
     grantSites.push(f);
   }
   if (/grant\s+(insert|update|delete|truncate|all)\b[^;]*to\s+[^;]*\bmcp_(reader|gateway)\b/i.test(sqlText)) failures.push(`${f}: a write/ALL privilege is granted to an mcp role`);
+  for (const m of sqlText.matchAll(/grant\s+execute\s+on\s+function\s+(?:public\.)?([a-z_][a-z0-9_]*)\s*\([^)]*\)\s+to\s+([^;]*?)\s*;/gi)) {
+    if (/\bmcp_reader\b/i.test(m[2]) && !(m[1] in RELATIONS)) failures.push(`${f}: EXECUTE on ${m[1]}() granted to mcp_reader but it is not an allowlisted RPC`);
+  }
   if (/on\s+all\s+tables[^;]*\bmcp_(reader|gateway)\b/i.test(sqlText)) failures.push(`${f}: blanket 'on all tables' grant to an mcp role`);
   if (/alter\s+default\s+privileges[^;]*\bmcp_(reader|gateway)\b/i.test(sqlText)) failures.push(`${f}: default privileges for an mcp role`);
 }

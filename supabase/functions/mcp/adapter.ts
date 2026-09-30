@@ -215,6 +215,13 @@ const SET_RPCS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   anomalies_eval: { p_vintage: "integer", p_as_of: "timestamptz", p_tab: "text" },
 };
 
+// Scalar (jsonb-returning) RPCs: the three gateway health functions.
+const SCALAR_RPCS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  health_system_status: {},
+  health_history: { p_days: "integer" },
+  health_baselines: {},
+};
+
 export class PostgrestAdapter {
   private readonly types = new Map<string, Promise<Map<string, string>>>();
   readonly query: Query;
@@ -249,6 +256,19 @@ export class PostgrestAdapter {
           `select coalesce(json_agg(mcp_row), '[]'::json)::text as body from (select * from public.domain_reality($1::int[]) limit ${MAX_ROWS}) mcp_row`,
           [v.map(String)],
         );
+        return { data: JSON.parse(String(rows[0].body)), error: null };
+      }
+      const scalar = SCALAR_RPCS[name];
+      if (scalar) {
+        const args: string[] = [];
+        const values: unknown[] = [];
+        for (const [param, value] of Object.entries(params)) {
+          const type = scalar[param];
+          if (!type) unsupported(`rpc ${name} argument ${param}`);
+          values.push(value == null ? null : String(value));
+          args.push(`${param} => $${values.length}::${type}`);
+        }
+        const rows = await this.query(`select public.${name}(${args.join(", ")})::text as body`, values);
         return { data: JSON.parse(String(rows[0].body)), error: null };
       }
       const signature = SET_RPCS[name];

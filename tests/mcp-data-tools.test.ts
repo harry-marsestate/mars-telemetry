@@ -4,6 +4,7 @@
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert@1";
 import { type DomainReality, TOOLS } from "../supabase/functions/chat/tools.ts";
 import { MCP_TOOLS } from "../supabase/functions/mcp/allowlist.ts";
+import { HEALTH_TOOLS } from "../supabase/functions/mcp/health-tools.ts";
 import { sha256Hex } from "../supabase/functions/mcp/auth.ts";
 import { gatewayToolDef, runDataTool, splitToolContent } from "../supabase/functions/mcp/data-tools.ts";
 import { createMcpHandler, type McpDeps, validateArgs } from "../supabase/functions/mcp/handler.ts";
@@ -125,7 +126,7 @@ Deno.test("handler: get_anomalies without as_of is rejected before any transacti
     runScoped: async (_u, _k, fn) => await fn({ rpc: async () => ({ data: "all", error: null }) }),
     runTool: async (_sb, name) => { calls.push(name); return { content: "[]\n\n[gateway] x", isError: false, structuredContent: { rows: [], total_count: 0 } }; },
     fetchDomainReality: async () => new Map(),
-    tools: TOOLS as never,
+    tools: [...TOOLS, ...HEALTH_TOOLS] as never,
   };
   const handler = createMcpHandler(deps);
   const req = (name: string, args: unknown) => new Request("http://local/mcp", {

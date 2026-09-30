@@ -7172,6 +7172,14 @@ pg_net's queue, its Authorization header is readable like the Vault key's
 - `database.integrity.climate_source_labels` (added 2026-09-30): no legacy
   `open_meteo_era5`/`OM-ERA5` label, no non-soil row labelled ERA5 or
   ERA5-Land, and no Open-Meteo soil row labelled anything but ERA5-Land.
+- `database.vintage.current_consistent` (added 2026-09-30) fails if any of
+  these is wrong:
+  - the rule's current vintage exists in `public.vintages`;
+  - `vintages.is_current` (a derived mirror) agrees;
+  - the newest P3 run's `frontend.current_vintage` and
+    `gateway.current_vintage` passed.
+
+  It warns if there has been no such P3 run in 26 hours.
 - `ingestion.climate.model_pinned` [ingestion] (added 2026-09-30): the
   newest climate ingest recorded `requested_models = {weather: ecmwf_ifs,
   soil: era5_land}`.
@@ -7247,6 +7255,10 @@ retried once on 5xx or a network error:
   login.
 - `frontend.<user>.role_visibility`: operator-only panels (`tanks`, `fruit`)
   appear for the operator and never for a customer.
+- `frontend.current_vintage` and `gateway.current_vintage` (operator, added
+  2026-09-30): the dashboard's `CURRENT`/`VINTAGES` and the gateway's
+  default `get_anomalies` vintage (`vintage_used`) equal the harvest-year
+  rule at run time.
 - `frontend.<user>.rls_boundary`: in-page through the user's own REST
   session, the blocks with 2026 soil rows equal the user's blocks, the
   vessels rows are 0 for customers, and a customer sees exactly 1
@@ -7270,6 +7282,9 @@ Operator only, panels vs the gateway (P3 key `mtk_jxk3p3fn`):
 - `gateway.p4.allowed_tools`.
 - `gateway.p4.write_capable_tools`: fails if the key allows any tool that
   isn't a catalogued read-only `get_*` tool.
+- `gateway.p4.current_vintage` (2026-09-30): the gateway's own TypeScript
+  rule equals the database's `harvest_vintage(now())`, and that vintage
+  exists in `vintages`.
 
 ### The dashboard hook P3 reads
 
@@ -7709,3 +7724,187 @@ dates) use the wine's vintage and are outside this rule.
 - **One transient 503** on the gateway's first `initialize` during a harness
   run. P3 used the gateway successfully at the same time, and the immediate
   retry passed 48/48.
+
+## API key tool scopes in the admin UI (2026-09-30)
+
+**What happened.** `admin_issue_agent_key` passed no tools to
+`agent_key_issue`, so every key issued from User Management silently got the
+five round-one tools. The owner issued `mtk_bmDX7RTv` ("Claude Code System
+Check", owned by svc-nightly-checks `3c254617`, an operator service account)
+at 15:48 UTC, and at 15:52:28 it was refused `get_system_health`
+(`rejected_scope`). The owner was confirmed first, then the key was widened
+to all 12 tools with `scripts/agent-keys.mjs set-tools`. The change is
+audited in `agent_api_key_scope_changes` (5 → 12, by agent-keys.mjs), and
+`mcp_key_scope` run as `mcp_gateway` (exactly what tools/list uses) returns
+all 12. Its plaintext exists only where the owner saved it; it expires
+2027-09-30.
+
+**Fix: the admin UI chooses tools** (migration `20260930120000`).
+- *Database*, all admin-only SECURITY DEFINER wrappers over the owner-only
+  implementations, with no new table grants:
+  - `admin_issue_agent_key(user, label, days, allowed_tools)` requires tools
+    (empty or NULL is refused). The old 3-argument signature was dropped, so
+    a stale page fails loudly instead of silently defaulting.
+  - `admin_update_agent_key_tools(id, tools)` goes through
+    `agent_key_set_tools`, so every change is audited with "… via web admin".
+  - `admin_list_agent_key_scope_changes(id)` provides the history.
+  - `admin_list_mcp_tools()` returns the catalogue, with each tool's preset
+    group taken from the database.
+
+  Health tools stay operator-only **in the database**: the
+  `agent_api_keys_scope_guard` trigger refuses them on a key whose owner
+  isn't an operator, on issue and on edit, even when an admin asks.
+- *UI:*
+  - The issue form has a required tool picker with nothing preselected:
+    "Original data tools (5)", "All data tools (9)", and "Full, including
+    health tools (12)" (only for operator owners), plus a checkbox per tool.
+    Health checkboxes are disabled for other owners, with a note that the
+    database enforces this.
+  - A new review step lists account, label, expiry and the chosen tools
+    before "Confirm and create key".
+  - The one-time reveal lists the key's tools.
+  - The key detail view has an editable picker (Save enables only on a
+    change) and a "Tool changes" history, like expiry changes.
+- *Verified:*
+  - node tests: tools required, the old signature gone, 12 tools on an
+    operator key, a customer-owned key refused health tools on issue AND
+    edit even as admin, edits audited and listed, presets 5/4/3, non-admins
+    refused everywhere;
+  - `agent-keys-admin-verify.mjs`: 85/85 live;
+  - in Chrome as the admin: the detail view of `mtk_bmDX7RTv` shows its 12
+    tools and the 5 → 12 history; the issue form preselects nothing,
+    refuses no tools, offers Full only for the svc owner, and for a customer
+    owner drops the health tools, disables their checkboxes and hides Full.
+
+  Issuing a throwaway 12-tool key from the UI needs a sign-in within the last
+  10 minutes; that is the owner's to do (see the final report).
+
+## Current vintage from the harvest-year rule; vintage 2027 (2026-09-30)
+
+"Current vintage" has one source of truth: the harvest-year rule (a vintage
+is its harvest year; each begins 1 November Pacific). It is implemented in
+three places that must agree:
+- `supabase/functions/_shared/vintage.ts`, for every Edge Function;
+- `public.harvest_vintage()` in SQL;
+- the dashboard's `harvestVintage()`.
+
+They're kept equal by `tests/vintage-rule.test.ts`, which compares the
+dashboard's and P3's copies hour by hour across both boundaries, and at run
+time by P1, P3 and P4.
+
+**Database** (migration `20260930140000`):
+- `public.vintages` gains **2027**. That is everything a new vintage needs
+  here: `sensor_readings`, `lab_samples`, `labour_actuals` and
+  `vintage_climate_calibration` reference it by foreign key. It has no
+  calibration row (neither does 2026: `coalesce(scalar, 1)`).
+  `metric_registry`, `anomaly_thresholds` and `block_innovint_map`
+  (open-ended ranges) are not per-vintage. The mock-profile columns are
+  NULL: no function reads them, and 2027 gets no simulated data.
+- `vintages.is_current` is now a derived mirror, set by
+  `sync_current_vintage()` daily at 07:05 UTC (1 November starts at 07:00
+  UTC, still PDT). No app code reads it any more.
+- `real_climate_as_of(vintage)` generalizes `real_climate_as_of_2026()`,
+  which remains as a wrapper (identical output: 2026-09-24).
+
+**Every hard-coded current-vintage 2026 changed:**
+- *web/index.html:*
+  - `CURRENT = 2026` → `harvestVintage(appNow())`;
+  - `VINTAGES = [2022..2026]` → 2022 through `CURRENT`;
+  - `NOW = new Date(2026,6,28…)` → the mock anchor only while
+    `MOCK_SEASON` is current, otherwise the real clock;
+  - `VCOLOR` literal → derived, with colours for later vintages;
+  - the 2026 label "warm, dry — in progress" → "warm, dry", with the
+    suffix added only while current;
+  - `MOCK_NOW` as the real-data anchor in `endOfReal`/`seriesEndReal` →
+    `currentRealAnchor()`;
+  - `real_climate_as_of_2026` → `real_climate_as_of(CURRENT)`;
+  - `sample()`'s fallback to 2024's profile → refusal;
+  - the chat header "Vintages 2022–2026" → rule-derived.
+- *chat/tools.ts:*
+  - `CURRENT_VINTAGE = 2026` → `currentToolVintage()`;
+  - `ALL_VINTAGES = [2022..2026]` → `allVintages()`;
+  - two literal `[2022..2026]` loops → `allVintages()`;
+  - tool descriptions citing "(2026)", "current 2026 vintage" and
+    "(2026-07-28)" → rule-neutral wording;
+  - "2026 is a partial, still-growing season" → reworded;
+  - `get_anomalies`' default as-of `MOCK_NOW` → only while `MOCK_SEASON`
+    is current, otherwise the real clock.
+- *chat/index.ts:* the system prompt gets a date + current-vintage line
+  from the rule.
+- *mcp/data-tools.ts:* `CURRENT_VINTAGE = 2026` → `currentToolVintage()`,
+  and `get_anomalies` reports `vintage_used`.
+- *insights-scan:* `is_current = false` → `vintage < currentVintage()`.
+- *ingest-innovint:* "UTC year + 1" → `currentVintage()`.
+- *ingest-climate-2026:* now uses the shared `harvestVintage`.
+
+**Remaining 2026 literals** are facts about data, not "current":
+- `MOCK_SEASON` and `MOCK_NOW` (the seeded mock narrative);
+- the 2026 colour and simulated profile;
+- `REAL_LABOUR_VINTAGES` and the "Mars Invoice Backup" labour-source label;
+- data-coverage facts in the chat tool descriptions;
+- comments.
+
+**Off-season behaviour (1 November to 31 March).** The dashboard opens on
+2027 as current.
+- A vintage with no simulated profile is never shown mock data: `sample()`
+  refuses it, and the season gate never even asks. Before its season starts,
+  every vintage panel shows "2027 season begins April 1. 2026 is the latest
+  complete season — choose it under Vintage".
+- The overview says the same, and the cellar tile says there is no 2027
+  cellar data (its sensors are simulated).
+- The dropdown shows "2027 · current · season begins April 1" and
+  "2026 · warm, dry"; 2026 is fully selectable.
+- From 1 April, panels with real 2027 data render. The rest say "No 2027 data
+  for this panel yet: it has no real data source for 2027".
+- The block map and the vessel inventory (not vintage data) always render.
+
+**No panel needs mock data to work.** Wind, solar/UV, cellar temperature
+and humidity, the fermentation-anomaly insights and (until real records
+exist) irrigation and fruit have no real source. For 2027 they show the
+honest state and never simulate.
+
+**Verified.**
+- A localhost-only test clock (`?test_now=`) was used as the P3 operator on
+  2026-11-01, 2026-12-15 and 2027-04-02:
+  - `CURRENT` 2027 and `VINTAGES` through 2027;
+  - 0 mock requests (`__mockRefused` 0);
+  - 0 panel errors;
+  - choosing 2026 renders every vineyard panel.
+- Today, unchanged: 23/23 panels.
+- On the production host, `?test_now=` is ignored (`TEST_NOW` null, real
+  clock, 0 console errors).
+- P3 run 26: 18/18, including both current-vintage checks.
+- P1 run 27: `database.vintage.current_consistent` passes.
+- Live P4: `gateway.p4.current_vintage` passes (2026 = 2026).
+- Live chat: "2026 is the current vintage … growing season is in progress".
+- Unit tests pin the chat and gateway defaults at the simulated dates.
+
+## authenticated: REFERENCES/TRIGGER/TRUNCATE/MAINTAIN revoked (2026-09-30)
+
+Migration `20260930130000` revoked all four on every table and view in
+`public`, and postgres's default privileges in `public` no longer re-grant
+them.
+- SELECT/INSERT/UPDATE/DELETE were not touched: the 39 grant rows are
+  byte-identical before and after.
+- `security.anon.no_table_privileges` now also fails on any of the four for
+  `authenticated`, on relations or postgres's defaults.
+- The `security.structure.daily_derived` baseline was re-baselined; the only
+  change was authenticated's REFERENCES/TRIGGER/TRUNCATE.
+- Verified: P1 run 23 all pass, P3 16/16, and the gateway harness 48/48.
+- `supabase_admin`'s own defaults still grant `authenticated` everything on
+  tables it creates. postgres can't alter them, and the P1 check catches
+  them.
+
+## Anthropic key replaced; P3 backup trigger tested end to end (2026-09-30)
+
+- The owner replaced `ANTHROPIC_API_KEY`: its digest changed, and it was set
+  19:18 UTC.
+  - P2 run 25, through its cron command: 6/6 pass, including
+    `source.anthropic.model`.
+  - A live chat question as the synthetic operator: HTTP 200 in 10 s, with
+    the correct answer (2024: 4,058.0 calibrated GDD).
+- The GitHub token is in Vault as `github_p3_dispatch_token`, a fine-grained
+  PAT that can read the P3 workflow and is refused repository contents.
+  `p3_backup_dispatch()` was run as if on the next day with no P3 run:
+  pg_net → GitHub answered 204, workflow run 36741272277 started, and the
+  test's `p3_backup` record was deleted.

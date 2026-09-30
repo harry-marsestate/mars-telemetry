@@ -1,12 +1,13 @@
 # P3 of the nightly health checks (docs/SECURITY.md, "Nightly health checks"):
 # the dashboard as three synthetic users, in a real Chrome, compared with the
-# MCP gateway; results recorded as health_writer. 12:20 UTC, after P1 (12:00)
-# and P2 (12:10), finished well before the 12:40 prune.
+# MCP gateway; results recorded as health_writer. 12:17 UTC, after P1 (12:00)
+# and P2 (12:10), finished well before the 12:40 prune. 12:17, off the busy
+# :00/:20 slots; a pg_cron job dispatches it at 12:35 if GitHub skipped it.
 name: nightly-health-p3
 
 on:
   schedule:
-    - cron: "20 12 * * *"
+    - cron: "17 12 * * *"
   workflow_dispatch: {}
 
 permissions:

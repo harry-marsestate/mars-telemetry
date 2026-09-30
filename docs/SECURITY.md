@@ -7050,3 +7050,49 @@ over stdin. The parity replay signs them in with an admin-generated magic link
 instead: nothing is emailed and no password is used. The three
 account-confirmation notifications the admin received on 2026-09-30 came from
 creating these users.
+
+## series_bucketed blended mock into real when no vintage was passed (2026-09-30)
+
+Found while surveying production for the P1 "no mock/real coexistence" check.
+Fixed under the autonomy grant's "small and in scope: fix, then report" rule.
+Migration `20260930045000`.
+
+**What.** For five metrics in 2026 (air_temp, humidity, precipitation,
+soil_moisture, soil_temp), real ERA5 rows (`open_meteo_era5`) and mock rows
+(`weather_station`, `soil_probe`) coexist for the same dates, up to the mock
+generator's 2026-07-28 end. That coexistence is by design: `series_bucketed()`,
+`daily_weather.sql` and `refresh_daily_weather_range()` each let real rows
+supersede mock ones *within a vintage*. But `series_bucketed()` tested
+`r2.vintage = p_vintage`, which is never true when `p_vintage` is NULL, so
+with no vintage every mock row was averaged in. Measured live:
+- air_temp, 2026-07-01 06:00Z, 6h bucket: 62.47 blended vs 54.80 real;
+- soil_moisture for B2: returned mock `soil_probe` values where the
+  vintage-scoped call returns none.
+
+**Who reached it.** The dashboard always passes a vintage (`p_vintage:
+vintage || null`), so it was unaffected. Chat's `get_series` makes vintage
+optional, and its real-only gate checks the years the range touches (2026
+air_temp *is* real), so a real_only account could get the blend labelled as
+real. Since step g, the MCP gateway's `get_series` could too.
+
+**Fix.** When a vintage is passed, the original test runs byte for byte. When
+none is passed, a mock row is kept only if its own vintage has no real rows
+for that metric and block. The real vintages are collected once per call into
+a constant array. Measured live:
+- vintage passed: 90 calls (10 metrics x 3 blocks x 3 vintages, full
+  seasons) identical to the previous definition;
+- no vintage: equal to the explicit-vintage result for single-vintage
+  windows; across a 2025-2026 window, all 396 buckets equal their own year's
+  explicit call;
+- timing on a year-long no-vintage window: about 1.15x the old time. A
+  correlated EXISTS was 12x slower and a hashed NOT IN 10x (the planner
+  switched to a materialised nested loop).
+
+`tests/series-bucketed-precedence.test.mjs` passes against the new definition
+and fails against the old one.
+
+The precedence rule itself is unchanged, so `daily_weather.sql` and
+`refresh_daily_weather_range()`, which always scope by vintage, need no
+change. The P1 check `database.integrity.mock_real_precedence` now asserts
+that a no-vintage series equals the explicit-vintage series in every
+coexisting (metric, vintage).

@@ -885,6 +885,11 @@ async function getSeries({ metric, scope, vintage, range, end, agg }) {
     console.error('getSeries error:', error);
     return { metric, points: [], stale: true, lastReading: null };
   }
+  try{
+    window.__seriesCalls.push({metric, block:(scope === 'estate' || scope === 'cellar') ? null : scope, vintage: vintage || null,
+      start: startDate.toISOString(), end: endDate.toISOString(), bucket: bucket.interval, agg: agg || 'avg', points: data});
+    if(window.__seriesCalls.length > 300) window.__seriesCalls.shift();
+  }catch(_){}
 
   return {
     metric,
@@ -1641,7 +1646,32 @@ function showTip(x,y,html,opts={}){
 const hideTip=()=>TIP.classList.remove('on');
 
 /* Line chart — multi-series, null-aware (gaps), optional reference band */
+/* Nightly-health P3 hook (docs/SECURITY.md, "Nightly health checks"): the
+   GitHub Action's Playwright run reads what each panel actually rendered from
+   window.__panelData[panelId] = {status, charts:[...]} and the dashboard's
+   own series_bucketed calls from window.__seriesCalls, and compares them with
+   the gateway. Read-only bookkeeping: references to data already fetched for
+   this user, never a new query; any failure here is swallowed so rendering
+   can't be affected. */
+window.__panelData = window.__panelData || {};
+window.__seriesCalls = window.__seriesCalls || [];
+function panelHook(box, entry){
+  try{
+    const id = box?.closest?.('[data-panel-id]')?.dataset.panelId;
+    if(!id) return;
+    const d = window.__panelData[id] || (window.__panelData[id] = {status:'rendering', charts:[]});
+    (d.charts || (d.charts = [])).push(entry);
+  }catch(_){}
+}
+function panelStatus(id, status, extra){
+  try{
+    const prev = window.__panelData[id];
+    window.__panelData[id] = {...(status==='rendering' ? {} : prev), charts: status==='rendering' ? [] : (prev?.charts || []), status, at: Date.now(), ...(extra||{})};
+  }catch(_){}
+}
+
 function lineChart(box, sets, opts={}){
+  panelHook(box, {kind:'line', sets: sets.map(s=>({name:s.name, pts:s.pts}))});
   const W=Math.max(300, Math.round(box.clientWidth)||700), H=opts.h||186, P={t:14,r:12,b:26,l:50};
   const n=sets[0]?.pts.length||0;
   if(!n){box.appendChild(el('div','empty','No data for this selection')); return;}
@@ -1726,6 +1756,7 @@ function lineChart(box, sets, opts={}){
 }
 
 function barChart(box, pts, opts={}){
+  panelHook(box, {kind:'bar', pts});
   const W=Math.max(300, Math.round(box.clientWidth)||700), H=opts.h||170, P={t:14,r:12,b:26,l:50};
   const n=pts.length; if(!n){box.appendChild(el('div','empty','No data')); return;}
   let hi=Math.max(...pts.map(p=>p.v||0), opts.floor||.01)*1.18;
@@ -1785,6 +1816,7 @@ function groupedBars(box, groups, seriesNames, colors, opts={}){
 }
 
 function table(box, cols, rows, foot){
+  panelHook(box, {kind:'table', cols: cols.map(c=>c.h), rows});
   const t=el('table','tbl');
   t.innerHTML=`<thead><tr>${cols.map(c=>`<th class="${c.num?'num':''}">${c.h}</th>`).join('')}</tr></thead>
   <tbody>${rows.map(r=>`<tr>${r.map((c,i)=>`<td class="${cols[i].num?'num':''} ${cols[i].dim?'dim':''}">${c}</td>`).join('')}</tr>`).join('')}</tbody>
@@ -1792,6 +1824,7 @@ function table(box, cols, rows, foot){
   box.appendChild(t);
 }
 function strip(box, items){
+  panelHook(box, {kind:'strip', items: items.map(i=>({l:i.l, v:i.v, u:i.u}))});
   const s=el('div','strip');
   items.forEach(i=>s.innerHTML+=`<div><div class="strip-l">${i.l}</div><div class="strip-v">${i.v}${i.u?`<span class="u">${i.u}</span>`:''}</div></div>`);
   box.appendChild(s);
@@ -4137,6 +4170,7 @@ function unsubscribeOverviewRealtime(){
 /* Panel construction */
 function makePanel(p, c){
   const panel=el('div','panel '+(p.span||'s4'));
+  panel.dataset.panelId=p.id;
   const hd=el('div','p-hd');
   const subText = typeof p.sub==='function' ? p.sub(c) : p.sub;
   const unitText = typeof p.unit==='function' ? p.unit(c) : p.unit;
@@ -4255,10 +4289,12 @@ function makePanel(p, c){
     if(domain && realOnlyBlocked(domain, c.vintages)){
       body.innerHTML='';
       body.appendChild(realOnlyEmptyState(p.title));
+      panelStatus(p.id, 'blocked');
       return;
     }
-    try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); }
-    catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); }
+    panelStatus(p.id, 'rendering', {tab:c.tab, vintage:c.primary, range:state.range[p.id]||'5D'});
+    try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); panelStatus(p.id, 'ok'); }
+    catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); panelStatus(p.id, 'error', {error:String(err?.message||err).slice(0,200)}); }
   }};
 }
 
@@ -4534,10 +4570,12 @@ function refreshPanelRun(p, c){
     if(domain && realOnlyBlocked(domain, c.vintages)){
       body.innerHTML='';
       body.appendChild(realOnlyEmptyState(p.title));
+      panelStatus(p.id, 'blocked');
       return;
     }
-    try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); }
-    catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); }
+    panelStatus(p.id, 'rendering', {tab:c.tab, vintage:c.primary, range:state.range[p.id]||'5D'});
+    try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); panelStatus(p.id, 'ok'); }
+    catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); panelStatus(p.id, 'error', {error:String(err?.message||err).slice(0,200)}); }
   };
   return true;
 }

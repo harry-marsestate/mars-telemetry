@@ -3,7 +3,7 @@
 // with the same credential production uses, and turns the answer into a
 // health result. Nothing a probe records contains a secret or a response
 // body: status codes, timings, counts and a few named fields only.
-import { addDays, archiveUrl, lastCompletePacificDay } from "../ingest-climate-2026/window.ts";
+import { addDays, archiveUrl, CLIMATE_SOURCES, lastCompletePacificDay } from "../ingest-climate-2026/window.ts";
 
 // Pinned to the values chat uses (tests/health-probe.test.ts reads chat's
 // source and fails if they drift).
@@ -72,14 +72,16 @@ export async function probeInnovint(env: Env, fetchFn: Fetch): Promise<ProbeResu
     detail: r.status === 401 || r.status === 403 ? "InnoVint rejected the token" : r.status === null ? "no response from InnoVint" : "unexpected InnoVint response" };
 }
 
-// The archive request exactly as ingest-climate-2026 builds it, for the last
-// complete Pacific day (the day the next ingest will store).
-export async function probeOpenMeteo(now: Date, fetchFn: Fetch, variant: "era5" | "era5_land"): Promise<ProbeResult> {
-  const id = variant === "era5" ? "source.open_meteo.archive" : "source.open_meteo.archive_era5_land";
+// The archive request exactly as ingest-climate-2026 builds it -- same pinned
+// model per group (CLIMATE_SOURCES) -- for the last complete Pacific day (the
+// day the next ingest will store).
+export async function probeOpenMeteo(now: Date, fetchFn: Fetch, group: "weather" | "soil"): Promise<ProbeResult> {
+  const src = CLIMATE_SOURCES[group];
+  const id = `source.open_meteo.${src.model}`;
   const day = lastCompletePacificDay(now);
-  const vars = variant === "era5" ? ["temperature_2m", "relative_humidity_2m", "precipitation"] : ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"];
+  const vars = [...src.vars];
   // The ingest's window runs Pacific midnight to midnight in UTC hours, so it asks for [day, day+1].
-  const r = await request(fetchFn, archiveUrl(day, addDays(day, 1), vars, variant === "era5_land" ? "era5_land" : undefined));
+  const r = await request(fetchFn, archiveUrl(day, addDays(day, 1), vars, src.model));
   // deno-lint-ignore no-explicit-any
   const body = r.body as any;
   const times: string[] = Array.isArray(body?.hourly?.time) ? body.hourly.time : [];
@@ -88,13 +90,13 @@ export async function probeOpenMeteo(now: Date, fetchFn: Fetch, variant: "era5" 
   const startIdx = times.indexOf(`${day}T${String(pacificMidnightUtcHour(day)).padStart(2, "0")}:00`);
   const dayValues = startIdx >= 0 ? first.slice(startIdx, startIdx + 24) : [];
   const nonNull = dayValues.filter((v) => v !== null && v !== undefined).length;
-  const observed = { ...base(r), day, hours: times.length, non_null_hours: nonNull, utc_offset_seconds: body?.utc_offset_seconds ?? null };
-  const expected = { http_status: 200, utc_offset_seconds: 0, hours: 48, non_null_hours: variant === "era5" ? ">= 24" : "informational (ERA5-Land lags ~5 days)" };
+  const observed = { ...base(r), model: src.model, day, hours: times.length, non_null_hours: nonNull, utc_offset_seconds: body?.utc_offset_seconds ?? null };
+  const expected = { http_status: 200, model: src.model, utc_offset_seconds: 0, hours: 48, non_null_hours: group === "weather" ? ">= 24" : "informational (ERA5-Land lags ~5 days)" };
   if (r.status !== 200 || !times.length) {
     return { check_id: id, status: "fail", observed, expected, detail: r.status === null ? "no response from Open-Meteo" : "Open-Meteo archive request failed" };
   }
   if (body.utc_offset_seconds !== 0) return { check_id: id, status: "fail", observed, expected, detail: "response not in UTC: the ingest would refuse it" };
-  if (variant === "era5" && nonNull < 24) return { check_id: id, status: "warn", observed, expected, detail: "fewer than 24 hours of data for the last complete Pacific day" };
+  if (group === "weather" && nonNull < 24) return { check_id: id, status: "warn", observed, expected, detail: "fewer than 24 hours of data for the last complete Pacific day" };
   return { check_id: id, status: "pass", observed, expected };
 }
 
@@ -162,8 +164,8 @@ export async function probeResend(env: Env, fetchFn: Fetch): Promise<ProbeResult
 export async function runProbes(env: Env, fetchFn: Fetch, now = new Date()): Promise<ProbeResult[]> {
   const probes: [string, () => Promise<ProbeResult>][] = [
     ["source.innovint.api", () => probeInnovint(env, fetchFn)],
-    ["source.open_meteo.archive", () => probeOpenMeteo(now, fetchFn, "era5")],
-    ["source.open_meteo.archive_era5_land", () => probeOpenMeteo(now, fetchFn, "era5_land")],
+    ["source.open_meteo.ecmwf_ifs", () => probeOpenMeteo(now, fetchFn, "weather")],
+    ["source.open_meteo.era5_land", () => probeOpenMeteo(now, fetchFn, "soil")],
     ["source.anthropic.model", () => probeAnthropic(env, fetchFn)],
     ["source.fireworks.model", () => probeFireworks(env, fetchFn)],
     ["source.resend.api", () => probeResend(env, fetchFn)],

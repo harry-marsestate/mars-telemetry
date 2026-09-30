@@ -1875,7 +1875,7 @@ const SECTIONS = [
      instrumentation or a new integration, not a data-source flip. Solar
      was PREVIOUSLY believed to have flipped real for 2022-2025 (its
      "Measured" shortwave_radiation line) -- corrected in the real-only-
-     data-mode project, 2026-09-13: real ERA5 shortwave_radiation rows do
+     data-mode project, 2026-09-13: real ECMWF IFS shortwave_radiation rows do
      exist in sensor_readings for those vintages, but renderSolar() has
      never read them, for any vintage, so the actual displayed data was
      always 100% mock regardless of what the label claimed. UV stays mock
@@ -1921,7 +1921,7 @@ const DATA_SOURCES = {
 // ingest-climate-2026's own daily runs already show air_temp/humidity/
 // precipitation and soil_moisture/soil_temp landing through different
 // real-as-of dates for 2026 -- ERA5-Land's soil variables publish with a
-// longer lag than plain ERA5 surface variables). Mirrors insights-scan's
+// longer lag (~5 days) than the ECMWF IFS atmospheric variables, which have none). Mirrors insights-scan's
 // realVintagesByMetric() (supabase/functions/insights-scan/metrics.ts):
 // same real_metric_vintage_counts() RPC and metric_derivation table, so
 // there is one server-side source of truth for "which vintages are real
@@ -2012,7 +2012,7 @@ const CALIBRATED_GDD_VINTAGES = new Set([2022,2023,2024,2025]);
 // client-side sample()/clearSky() mock, confirmed in this session's
 // real/mock audit and independently by domain_reality()'s own solar
 // override, which answers false for every vintage on purpose despite
-// real open_meteo_era5 shortwave_radiation rows existing in
+// real open_meteo_ecmwf_ifs shortwave_radiation rows existing in
 // sensor_readings for 2022-2025 -- see that migration's comment).
 // getDataSourceLabel('solar', ...) now always falls through to
 // DATA_SOURCES.solar's plain 'procedural' kind below, same as every
@@ -2290,13 +2290,19 @@ async function refreshInnovintSyncStatus(){
   }
 }
 
+/* What the real atmospheric climate data actually is: Open-Meteo's archive
+   of the ECMWF IFS (HRES, 9 km) model -- NOT ERA5, which these labels
+   claimed until 2026-09-30 (docs/SECURITY.md, "Climate rows were labelled
+   ERA5 but came from ECMWF IFS"). Soil is genuinely ERA5-Land. */
+const OPEN_METEO_IFS_LABEL = 'Open-Meteo · ECMWF IFS model';
+
 function getDataSourceLabel(metricKey, vintage){
   const s = DATA_SOURCES[metricKey];
   if(!s) return '';
   if((metricKey==='air_temp' || metricKey==='humidity' || metricKey==='precipitation') && isRealClimateVintage(metricKey, vintage))
-    return 'Open-Meteo (ERA5)';
+    return OPEN_METEO_IFS_LABEL;
   if((metricKey==='soil_moisture' || metricKey==='soil_temp') && isRealClimateVintage(metricKey, vintage))
-    return 'Open-Meteo (ERA5-Land), surface 0-7cm';
+    return 'Open-Meteo · ERA5-Land reanalysis, surface 0-7cm';
   // GDD and DTR were one branch, both claiming Grapegrowers calibration.
   // Only GDD actually reads a calibrated column, so the shared claim was
   // false for DTR -- split rather than left overclaiming for one metric.
@@ -2309,8 +2315,8 @@ function getDataSourceLabel(metricKey, vintage){
   // docs/SECURITY.md's GDD/DTR calibration entry).
   if(metricKey==='gdd_cumulative_calibrated' && isRealClimateVintage(metricKey, vintage)){
     return CALIBRATED_GDD_VINTAGES.has(vintage)
-      ? 'Open-Meteo (ERA5), calibrated to Napa Valley Grapegrowers regional reports'
-      : 'Open-Meteo (ERA5), uncalibrated — no Napa Valley Grapegrowers report yet';
+      ? `${OPEN_METEO_IFS_LABEL}, calibrated to Napa Valley Grapegrowers regional reports`
+      : `${OPEN_METEO_IFS_LABEL}, uncalibrated — no Napa Valley Grapegrowers report yet`;
   }
   // dtr_f is the RAW column and says so. daily_derived.dtr_f_calibrated
   // exists but is NOT displayed: the scalar behind it was solved against
@@ -2318,13 +2324,13 @@ function getDataSourceLabel(metricKey, vintage){
   // anchor it, so unlike GDD it has no independent validation. The live
   // dtr_low threshold (21°F) is also tuned to this raw distribution
   // (real p10 = 20.8). See docs/SECURITY.md.
-  if(metricKey==='dtr_f' && isRealClimateVintage(metricKey, vintage)) return 'Open-Meteo (ERA5), uncalibrated daily max − min';
+  if(metricKey==='dtr_f' && isRealClimateVintage(metricKey, vintage)) return `${OPEN_METEO_IFS_LABEL}, uncalibrated daily max − min`;
   // "daily average" wasn't said anywhere before this, which was a real
   // gap independent of the (now-removed) peak chart panel -- a user had
   // no way to know this line under-represents afternoon stress. This
   // wording stands on its own, unrelated to the vpdpeak panel removal --
   // see docs/SECURITY.md.
-  if(metricKey==='vpd_kpa' && isRealClimateVintage(metricKey, vintage)) return 'Derived metric · from Open-Meteo (ERA5) air temperature and humidity, daily average';
+  if(metricKey==='vpd_kpa' && isRealClimateVintage(metricKey, vintage)) return 'Derived metric · from Open-Meteo ECMWF IFS model air temperature and humidity, daily average';
   // No solar branch here (real-only-data-mode project, 2026-09-13,
   // corrected a stale claim that 2022-2025 had real "Measured" solar
   // data -- see SOLAR_LABEL_REAL_VINTAGES's removal comment above).
@@ -2405,7 +2411,7 @@ const PANELS = [
    // vintages. (The previous comment here claimed "2022 reaches 4155.2";
    // that figure was 2022's RAW gdd_cumulative read on 2026-08-23, one day
    // before commit 7ece953 simultaneously replaced the underlying data with
-   // the real ERA5 backfill, fixed daily_weather's UTC-vs-Pacific
+   // the real Open-Meteo backfill (ECMWF IFS, then mislabelled ERA5), fixed daily_weather's UTC-vs-Pacific
    // date_trunc bucketing bug, and added these calibrated columns. It
    // matches no column at any vintage today -- raw 2022 is now 3211.2 and
    // calibrated 2022 is 3812.3.) lineChart only auto-expands its domain to

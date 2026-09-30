@@ -4,6 +4,7 @@ import { summarizeClimate, withIngestionLog } from "../_shared/ingestion-log.ts"
 import {
   archiveUrl, ELEVATION_M, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
   lastElapsedHourMs, pacificYear, stampUtc,
+  CLIMATE_SOURCES, type ClimateSource, requestedModel,
 } from "./window.ts";
 
 // Daily real-2026-climate ingestion. Ports ingestion/open_meteo/client.py +
@@ -39,15 +40,17 @@ async function sync(req: Request, ctx: any): Promise<Response> {
 
       // Rolling window, anchored to the REAL wall-clock date the job
       // actually runs on -- deliberately NOT MOCK_NOW (the frontend's
-      // fixed "2026-07-28" demo anchor). ERA5's real publication lag is
-      // relative to true present, not this app's frozen season-in-progress
+      // fixed "2026-07-28" demo anchor). The models' real publication lag
+      // (ECMWF IFS: none; ERA5-Land, the soil source: ~5 days) is relative
+      // to true present, not this app's frozen season-in-progress
       // narrative; and the whole point of this design (see the "as of"
       // function below) is that the displayed real-data date is allowed to
-      // land wherever ERA5 actually has coverage, not wherever the rest of
-      // the app pretends "now" is. Default 14 days back -- a safe window
-      // that self-heals: any day ERA5 hasn't published yet on one run
-      // simply comes back null (skipped, not written) and gets picked up
-      // on a later run while it's still inside the trailing window.
+      // land wherever the data actually has coverage, not wherever the rest
+      // of the app pretends "now" is. Default 14 days back -- a safe window
+      // that self-heals: any hour not published yet on one run simply
+      // comes back null (skipped, not written) and gets picked up on a
+      // later run while it's still inside the trailing window; the same
+      // refetch picks up IFS's own revisions of its newest hours.
       const end = end_date ? new Date(`${end_date}T00:00:00Z`) : new Date();
       const start = start_date
         ? new Date(`${start_date}T00:00:00Z`)
@@ -72,19 +75,19 @@ async function sync(req: Request, ctx: any): Promise<Response> {
       const results: Record<string, MetricResult> = {};
 
       const weatherData = await fetchWithEndFallback(
-        (e) => fetchHourly(startStr, e, ["temperature_2m", "relative_humidity_2m", "precipitation"]), fetchEnd, endStr);
+        (e) => fetchHourly(startStr, e, [...CLIMATE_SOURCES.weather.vars], CLIMATE_SOURCES.weather.model), fetchEnd, endStr);
       if (weatherData.error) {
         results.air_temp = { written: 0, nulls: 0, error: weatherData.error };
         results.humidity = { written: 0, nulls: 0, error: weatherData.error };
         results.precipitation = { written: 0, nulls: 0, error: weatherData.error };
       } else {
-        await upsertMetric(ctx, results, cutoffMs, "air_temp", weatherData.data!, "temperature_2m", VINTAGE, 1);
-        await upsertMetric(ctx, results, cutoffMs, "humidity", weatherData.data!, "relative_humidity_2m", VINTAGE, 1);
-        await upsertMetric(ctx, results, cutoffMs, "precipitation", weatherData.data!, "precipitation", VINTAGE, 1);
+        await upsertMetric(ctx, results, cutoffMs, "air_temp", weatherData.data!, "temperature_2m", VINTAGE, 1, CLIMATE_SOURCES.weather);
+        await upsertMetric(ctx, results, cutoffMs, "humidity", weatherData.data!, "relative_humidity_2m", VINTAGE, 1, CLIMATE_SOURCES.weather);
+        await upsertMetric(ctx, results, cutoffMs, "precipitation", weatherData.data!, "precipitation", VINTAGE, 1, CLIMATE_SOURCES.weather);
       }
 
       const soilData = await fetchWithEndFallback(
-        (e) => fetchHourly(startStr, e, ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"], "era5_land"), fetchEnd, endStr);
+        (e) => fetchHourly(startStr, e, [...CLIMATE_SOURCES.soil.vars], CLIMATE_SOURCES.soil.model), fetchEnd, endStr);
       if (soilData.error) {
         results.soil_moisture = { written: 0, nulls: 0, error: soilData.error };
         results.soil_temp = { written: 0, nulls: 0, error: soilData.error };
@@ -93,8 +96,8 @@ async function sync(req: Request, ctx: any): Promise<Response> {
         // fraction; every consumer here (the mock data, soil_below_refill's
         // threshold, the "% VWC" unit) expects 0-100 -- see client.py's
         // matching comment.
-        await upsertMetric(ctx, results, cutoffMs, "soil_moisture", soilData.data!, "soil_moisture_0_to_7cm", VINTAGE, 100);
-        await upsertMetric(ctx, results, cutoffMs, "soil_temp", soilData.data!, "soil_temperature_0_to_7cm", VINTAGE, 1);
+        await upsertMetric(ctx, results, cutoffMs, "soil_moisture", soilData.data!, "soil_moisture_0_to_7cm", VINTAGE, 100, CLIMATE_SOURCES.soil);
+        await upsertMetric(ctx, results, cutoffMs, "soil_temp", soilData.data!, "soil_temperature_0_to_7cm", VINTAGE, 1, CLIMATE_SOURCES.soil);
       }
 
       const anyWritten = Object.values(results).some((r) => r.written > 0);
@@ -121,6 +124,13 @@ async function sync(req: Request, ctx: any): Promise<Response> {
           fetch_end_fallback: weatherData.fallback || soilData.fallback,
         },
         results,
+        // What was actually requested, read back from the URLs the ingest
+        // builds -- P1's ingestion.climate.model_pinned fails if either is
+        // missing (best_match) or isn't the pinned model.
+        requested_models: {
+          weather: requestedModel(archiveUrl(startStr, fetchEnd, [...CLIMATE_SOURCES.weather.vars], CLIMATE_SOURCES.weather.model)),
+          soil: requestedModel(archiveUrl(startStr, fetchEnd, [...CLIMATE_SOURCES.soil.vars], CLIMATE_SOURCES.soil.model)),
+        },
         daily_weather_refreshed: anyWritten && !refreshError,
         refresh_error: refreshError ?? null,
         real_as_of: asOf ?? null,
@@ -136,8 +146,6 @@ async function sync(req: Request, ctx: any): Promise<Response> {
     }
 }
 
-const SOURCE_SYSTEM = "open_meteo_era5";
-const SENSOR_ID = "OM-ERA5";
 
 interface OpenMeteoResponse {
   elevation?: number;
@@ -174,6 +182,7 @@ async function upsertMetric(
   results: Record<string, MetricResult>,
   cutoffMs: number,
   metricKey: string, data: OpenMeteoResponse, variable: string, vintage: number, scale: number,
+  source: ClimateSource,
 ) {
   try {
     const times = data.hourly?.time ?? [];
@@ -188,8 +197,8 @@ async function upsertMetric(
       const v = values[i];
       if (v == null) { nulls++; continue; }
       rows.push({
-        metric_key: metricKey, sensor_id: SENSOR_ID, block_id: null, tank_id: null,
-        recorded_at: recordedAt, value: v * scale, source_system: SOURCE_SYSTEM, vintage,
+        metric_key: metricKey, sensor_id: source.sensor_id, block_id: null, tank_id: null,
+        recorded_at: recordedAt, value: v * scale, source_system: source.source_system, vintage,
       });
     }
     const vintageError = wrongVintage

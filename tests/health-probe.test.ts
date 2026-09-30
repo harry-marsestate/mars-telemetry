@@ -56,17 +56,18 @@ Deno.test("Open-Meteo: the ingest's own URL for the last complete Pacific day; c
   const times = Array.from({ length: 48 }, (_, i) => `2026-09-${i < 24 ? "29" : "30"}T${String(i % 24).padStart(2, "0")}:00`);
   let url = "";
   const temps = times.map((_, i) => (i >= 7 && i < 31 ? 60 : null));
-  const r = await probeOpenMeteo(now, (u) => { url = u; return Promise.resolve(json(200, { utc_offset_seconds: 0, hourly: { time: times, temperature_2m: temps } })); }, "era5");
-  assertMatch(url, /^https:\/\/archive-api\.open-meteo\.com\/v1\/archive\?.*start_date=2026-09-29&end_date=2026-09-30&hourly=temperature_2m%2Crelative_humidity_2m%2Cprecipitation&temperature_unit=fahrenheit&timezone=UTC/);
+  const r = await probeOpenMeteo(now, (u) => { url = u; return Promise.resolve(json(200, { utc_offset_seconds: 0, hourly: { time: times, temperature_2m: temps } })); }, "weather");
+  assertMatch(url, /^https:\/\/archive-api\.open-meteo\.com\/v1\/archive\?.*start_date=2026-09-29&end_date=2026-09-30&hourly=temperature_2m%2Crelative_humidity_2m%2Cprecipitation&temperature_unit=fahrenheit&timezone=UTC.*&models=ecmwf_ifs$/);
+  assertEquals(r.check_id, "source.open_meteo.ecmwf_ifs");
   assertEquals([r.status, r.observed.non_null_hours, r.observed.hours], ["pass", 24, 48]);
-  const partial = await probeOpenMeteo(now, () => Promise.resolve(json(200, { utc_offset_seconds: 0, hourly: { time: times, temperature_2m: temps.map((v, i) => (i > 20 ? null : v)) } })), "era5");
+  const partial = await probeOpenMeteo(now, () => Promise.resolve(json(200, { utc_offset_seconds: 0, hourly: { time: times, temperature_2m: temps.map((v, i) => (i > 20 ? null : v)) } })), "weather");
   assertEquals(partial.status, "warn");
-  const notUtc = await probeOpenMeteo(now, () => Promise.resolve(json(200, { utc_offset_seconds: -25200, hourly: { time: times, temperature_2m: temps } })), "era5");
+  const notUtc = await probeOpenMeteo(now, () => Promise.resolve(json(200, { utc_offset_seconds: -25200, hourly: { time: times, temperature_2m: temps } })), "weather");
   assertEquals(notUtc.status, "fail");
-  const land = await probeOpenMeteo(now, (u) => { url = u; return Promise.resolve(json(200, { utc_offset_seconds: 0, hourly: { time: times, soil_moisture_0_to_7cm: times.map(() => null) } })); }, "era5_land");
+  const land = await probeOpenMeteo(now, (u) => { url = u; return Promise.resolve(json(200, { utc_offset_seconds: 0, hourly: { time: times, soil_moisture_0_to_7cm: times.map(() => null) } })); }, "soil");
   assertEquals(land.status, "pass", "ERA5-Land lag is informational");
   assertMatch(url, /models=era5_land/);
-  assertEquals((await probeOpenMeteo(now, () => Promise.resolve(json(400, { error: true, reason: "end_date out of range" })), "era5")).status, "fail");
+  assertEquals((await probeOpenMeteo(now, () => Promise.resolve(json(400, { error: true, reason: "end_date out of range" })), "weather")).status, "fail");
 });
 
 Deno.test("Anthropic: GET the chat model; 404 (retired model) and 401 fail", async () => {
@@ -106,7 +107,7 @@ Deno.test("runProbes: six results, sequential, a crashing probe becomes 'error' 
     return json(200, {});
   };
   const results = await runProbes(env(), f as never, new Date("2026-09-30T12:10:00Z"));
-  assertEquals(results.map((r) => r.check_id), ["source.innovint.api", "source.open_meteo.archive", "source.open_meteo.archive_era5_land", "source.anthropic.model", "source.fireworks.model", "source.resend.api"]);
+  assertEquals(results.map((r) => r.check_id), ["source.innovint.api", "source.open_meteo.ecmwf_ifs", "source.open_meteo.era5_land", "source.anthropic.model", "source.fireworks.model", "source.resend.api"]);
   assertEquals(maxInFlight, 1);
   noSecrets(results);
 });

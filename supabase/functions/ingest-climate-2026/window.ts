@@ -3,7 +3,7 @@
 //
 // Open-Meteo's archive endpoint returns values for every hour of end_date,
 // including hours that haven't happened yet (confirmed 2026-09-29: the 06:17
-// PDT run stored 07:00-23:00 PDT forecast values under open_meteo_era5).
+// PDT run stored 07:00-23:00 PDT forecast values under the real-data label).
 // Forecasts are not observations, so nothing later than the last fully
 // elapsed hour is stored, and daily_weather is refreshed only through the
 // last complete America/Los_Angeles day (a partial day would aggregate a
@@ -69,6 +69,34 @@ export function archiveUrl(startDate: string, endDate: string, hourlyVars: strin
   });
   if (models) params.set("models", models);
   return `${ARCHIVE_URL}?${params.toString()}`;
+}
+
+// Which Open-Meteo archive model each metric group comes from, and the labels
+// its rows carry. PINNED: never the default best_match, whose choice of model
+// is Open-Meteo's to change. Verified 2026-09-30 against every stored hour
+// (docs/SECURITY.md, "Climate rows were labelled ERA5 but came from ECMWF
+// IFS"): best_match at this site served ECMWF IFS for the atmospheric
+// variables (all 95,259 rows, 2022-2026) and ERA5-Land only where asked.
+// Keeping ecmwf_ifs keeps the series continuous and the GDD calibration valid.
+export const CLIMATE_SOURCES = {
+  weather: {
+    model: "ecmwf_ifs",
+    source_system: "open_meteo_ecmwf_ifs",
+    sensor_id: "OM-IFS",
+    vars: ["temperature_2m", "relative_humidity_2m", "precipitation"],
+  },
+  soil: {
+    model: "era5_land",
+    source_system: "open_meteo_era5_land",
+    sensor_id: "OM-ERA5-LAND",
+    vars: ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"],
+  },
+} as const;
+export type ClimateSource = (typeof CLIMATE_SOURCES)[keyof typeof CLIMATE_SOURCES];
+
+// The model a built archive URL actually requests (null = best_match).
+export function requestedModel(url: string): string | null {
+  return new URL(url).searchParams.get("models");
 }
 
 export interface FetchOutcome<T> { data?: T; error?: string; outOfRange?: boolean }

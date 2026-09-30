@@ -40,15 +40,20 @@ with hourly_raw as (
 -- one metric where block_id has mattered -- so unlike series_bucketed()
 -- this scoping needs no block-level fallback; vintage+metric_key alone is
 -- and stays correct here regardless of any future per-block real source.
+-- The real source for every metric read here (air_temp, humidity, solar,
+-- wind_speed) is Open-Meteo's ECMWF IFS, labelled open_meteo_ecmwf_ifs since
+-- 2026-09-30 (it was mislabelled open_meteo_era5 before -- docs/SECURITY.md,
+-- "Climate rows were labelled ERA5 but came from ECMWF IFS"). Keep this in
+-- step with refresh_daily_weather_range().
 real_scope as (
   select distinct vintage, metric_key
-  from hourly_raw where source_system = 'open_meteo_era5'
+  from hourly_raw where source_system = 'open_meteo_ecmwf_ifs'
 ),
 hourly as (
   select h.vintage, h.day, h.metric_key, h.value
   from hourly_raw h
   left join real_scope rs on rs.vintage = h.vintage and rs.metric_key = h.metric_key
-  where rs.vintage is null or h.source_system = 'open_meteo_era5'
+  where rs.vintage is null or h.source_system = 'open_meteo_ecmwf_ifs'
 ),
 
 -- Hour-level (NOT day-truncated) air_temp+humidity, needed to pair
@@ -71,7 +76,7 @@ hourly_ts as (
   select h.vintage, h.recorded_at, h.metric_key, h.value
   from hourly_raw_ts h
   left join real_scope rs on rs.vintage = h.vintage and rs.metric_key = h.metric_key
-  where rs.vintage is null or h.source_system = 'open_meteo_era5'
+  where rs.vintage is null or h.source_system = 'open_meteo_ecmwf_ifs'
 ),
 -- Same Tetens formula as daily_derived.vpd_kpa (see
 -- 20260824000001_restore_daily_derived_post_refresh.sql), applied per HOUR

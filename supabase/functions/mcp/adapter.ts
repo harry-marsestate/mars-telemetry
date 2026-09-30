@@ -13,6 +13,9 @@
 //     matching PostgREST's untyped-literal coercion (e.g. gte('recorded_at',
 //     '2026-01-01') compares as timestamptz, not text).
 //   - `ilike` treats `*` as `%`, as PostgREST does.
+//   - The row alias is `mcp_row`, never a short name: json_agg(<alias>)
+//     resolves to a same-named COLUMN first (series_bucketed returns a
+//     column `t`, which turned every row into its timestamp string).
 //   - Every read is capped at MAX_ROWS, PostgREST's db-max-rows: an explicit
 //     .limit() can lower it, never raise it.
 //   - maybeSingle(): 0 rows -> null, 1 -> the row, >1 -> PGRST116 error, as
@@ -178,7 +181,7 @@ class SelectBuilder implements PromiseLike<PgrstResult> {
         (where.length ? ` where ${where.join(" and ")}` : "") +
         (order ? ` order by ${order}` : "") +
         ` limit ${limit}`;
-      const rows = await this.adapter.query(`select coalesce(json_agg(t), '[]'::json)::text as body from (${inner}) t`, params);
+      const rows = await this.adapter.query(`select coalesce(json_agg(mcp_row), '[]'::json)::text as body from (${inner}) mcp_row`, params);
       const data = JSON.parse(String(rows[0].body)) as unknown[];
 
       if (this.single) {
@@ -202,6 +205,15 @@ class SelectBuilder implements PromiseLike<PgrstResult> {
     }
   }
 }
+
+// Set-returning RPCs the nightly-health data tools call, with the argument
+// types of their live signatures (checked 2026-09-30). Called with named
+// notation, as PostgREST calls them, so an omitted argument takes the
+// function's own default; any other argument name throws.
+const SET_RPCS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  series_bucketed: { p_metric: "text", p_block: "text", p_vintage: "integer", p_start: "timestamptz", p_end: "timestamptz", p_bucket: "interval", p_agg: "text" },
+  anomalies_eval: { p_vintage: "integer", p_as_of: "timestamptz", p_tab: "text" },
+};
 
 export class PostgrestAdapter {
   private readonly types = new Map<string, Promise<Map<string, string>>>();
@@ -234,8 +246,24 @@ export class PostgrestAdapter {
         const v = params.p_vintages;
         if (!Array.isArray(v) || !v.every(Number.isInteger) || Object.keys(params).length !== 1) unsupported("domain_reality params");
         const rows = await this.query(
-          `select coalesce(json_agg(t), '[]'::json)::text as body from (select * from public.domain_reality($1::int[]) limit ${MAX_ROWS}) t`,
+          `select coalesce(json_agg(mcp_row), '[]'::json)::text as body from (select * from public.domain_reality($1::int[]) limit ${MAX_ROWS}) mcp_row`,
           [v.map(String)],
+        );
+        return { data: JSON.parse(String(rows[0].body)), error: null };
+      }
+      const signature = SET_RPCS[name];
+      if (signature) {
+        const args: string[] = [];
+        const values: unknown[] = [];
+        for (const [param, value] of Object.entries(params)) {
+          const type = signature[param];
+          if (!type) unsupported(`rpc ${name} argument ${param}`);
+          values.push(value == null ? null : String(value));
+          args.push(`${param} => $${values.length}::${type}`);
+        }
+        const rows = await this.query(
+          `select coalesce(json_agg(mcp_row), '[]'::json)::text as body from (select * from public.${name}(${args.join(", ")}) limit ${MAX_ROWS}) mcp_row`,
+          values,
         );
         return { data: JSON.parse(String(rows[0].body)), error: null };
       }

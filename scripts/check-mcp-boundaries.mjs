@@ -13,14 +13,17 @@
 //    (allowlist.ts), not a bare "no base tables" pattern, so the named
 //    exceptions (lot_analyses, lot_canonical_map) are visible, and no
 //    VIEW_DEPENDENCIES table is ever named directly.
-// 4. mcp_reader's SELECT grants in the roles migration equal
-//    TABLES_AND_VIEWS + VIEW_DEPENDENCIES exactly -- no more, no less.
+// 4. mcp_reader's SELECT grants, across every migration and including
+//    column-level grants, equal TABLES_AND_VIEWS + VIEW_DEPENDENCIES +
+//    RPC_DEPENDENCIES exactly -- no more, no less; RPC_DEPENDENCIES are
+//    column-level only; no write, blanket or default-privilege grant to an mcp
+//    role anywhere. 4b: data-tools.ts's RULE_METRIC_DOMAIN == chat's.
 // 5. Per-key scoping is wired: every exposed tool is in the database's
 //    mcp_tool_catalogue; the handler routes tools/list through deps.scope()
 //    and tools/call through deps.authorize() before the transport runs; and
 //    mcp_key_scope/mcp_authorize_call are EXECUTE for mcp_gateway only.
 import { readdirSync, readFileSync } from "node:fs";
-import { MCP_TOOLS, RELATIONS, TABLES_AND_VIEWS, VIEW_DEPENDENCIES } from "../supabase/functions/mcp/allowlist.ts";
+import { MCP_TOOLS, RELATIONS, RPC_DEPENDENCIES, TABLES_AND_VIEWS, VIEW_DEPENDENCIES } from "../supabase/functions/mcp/allowlist.ts";
 
 const MCP_DIR = new URL("../supabase/functions/mcp/", import.meta.url);
 const TOOLS_FILE = new URL("../supabase/functions/chat/tools.ts", import.meta.url);
@@ -108,8 +111,8 @@ for (const [file, src] of Object.entries(sources)) {
   if (file.endsWith(".json")) continue;
   for (const m of src.matchAll(/\bpublic\.([a-z_][a-z0-9_]*)\b/g)) note(m[1], `mcp/${file} SQL`);
 }
-for (const rel of Object.keys(VIEW_DEPENDENCIES)) {
-  if (found.has(rel)) failures.push(`view-dependency table "${rel}" is named directly (${found.get(rel).join("; ")}) -- tool code must go through its view`);
+for (const rel of [...Object.keys(VIEW_DEPENDENCIES), ...Object.keys(RPC_DEPENDENCIES)]) {
+  if (found.has(rel)) failures.push(`dependency table "${rel}" is named directly (${found.get(rel).join("; ")}) -- tool code must go through its view/function`);
 }
 
 console.log(`[3] Reachable chat/tools.ts functions: ${[...reachable].join(", ")}`);
@@ -121,23 +124,52 @@ for (const [rel, where] of [...found].sort()) {
 for (const rel of Object.keys(RELATIONS)) if (!found.has(rel)) console.log(`    (allowlisted but not referenced: ${rel})`);
 
 // --- 4. mcp_reader grants == allowlist ---------------------------------------
-const rolesMigration = readdirSync(new URL("../supabase/migrations/", import.meta.url)).find((f) => f.endsWith("_mcp_gateway_roles.sql"));
-if (!rolesMigration) {
-  failures.push("roles migration (*_mcp_gateway_roles.sql) not found");
-} else {
-  const sqlText = readFileSync(new URL(`../supabase/migrations/${rolesMigration}`, import.meta.url), "utf8").replace(/--[^\n]*/g, "");
-  const granted = new Set();
-  for (const m of sqlText.matchAll(/grant\s+select\s+on\s+([\s\S]*?)\s+to\s+mcp_reader\s*;/gi)) {
-    for (const rel of m[1].split(",")) granted.add(rel.trim().replace(/^public\./, ""));
+// Every migration, table-wide AND column-level grants. RPC_DEPENDENCIES (read
+// only inside the SECURITY INVOKER functions / RLS policies) must be
+// column-level: no table-wide SELECT on sensor_readings & co.
+const MIGRATIONS_DIR = new URL("../supabase/migrations/", import.meta.url);
+const granted = new Map(); // relation -> Set of "*" or column names
+const grantSites = [];
+for (const f of readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort()) {
+  const sqlText = readFileSync(new URL(f, MIGRATIONS_DIR), "utf8").replace(/--[^\n]*/g, "");
+  for (const m of sqlText.matchAll(/grant\s+select\s*(\(([^)]*)\))?\s+on\s+(?:table\s+)?([\s\S]*?)\s+to\s+([^;]*?)\s*;/gi)) {
+    if (!/\bmcp_reader\b/i.test(m[4])) continue;
+    const cols = m[2] ? m[2].split(",").map((c) => c.trim()) : ["*"];
+    for (const rel of m[3].split(",")) {
+      const name = rel.trim().replace(/^public\./, "");
+      granted.set(name, new Set([...(granted.get(name) ?? []), ...cols]));
+    }
+    grantSites.push(f);
   }
-  const expected = new Set([...Object.keys(TABLES_AND_VIEWS), ...Object.keys(VIEW_DEPENDENCIES)]);
-  const extra = [...granted].filter((r) => !expected.has(r));
+  if (/grant\s+(insert|update|delete|truncate|all)\b[^;]*to\s+[^;]*\bmcp_(reader|gateway)\b/i.test(sqlText)) failures.push(`${f}: a write/ALL privilege is granted to an mcp role`);
+  if (/on\s+all\s+tables[^;]*\bmcp_(reader|gateway)\b/i.test(sqlText)) failures.push(`${f}: blanket 'on all tables' grant to an mcp role`);
+  if (/alter\s+default\s+privileges[^;]*\bmcp_(reader|gateway)\b/i.test(sqlText)) failures.push(`${f}: default privileges for an mcp role`);
+}
+{
+  const expected = new Set([...Object.keys(TABLES_AND_VIEWS), ...Object.keys(VIEW_DEPENDENCIES), ...Object.keys(RPC_DEPENDENCIES)]);
+  const extra = [...granted.keys()].filter((r) => !expected.has(r));
   const missing = [...expected].filter((r) => !granted.has(r));
   if (extra.length) failures.push(`mcp_reader is granted SELECT on relations outside the allowlist: ${extra.join(", ")}`);
   if (missing.length) failures.push(`allowlisted relations missing from mcp_reader's grants: ${missing.join(", ")}`);
-  if (/grant\s+(insert|update|delete|truncate|all)\b[^;]*to\s+mcp_(reader|gateway)/i.test(sqlText)) failures.push("a write/ALL privilege is granted to an mcp role");
-  if (/on\s+all\s+tables/i.test(sqlText)) failures.push("blanket 'on all tables' grant in the roles migration");
-  console.log(`[4] ${rolesMigration}: mcp_reader SELECT on ${granted.size} relations (${[...granted].sort().join(", ")}); expected ${expected.size}`);
+  for (const rel of Object.keys(RPC_DEPENDENCIES)) {
+    if (granted.get(rel)?.has("*")) failures.push(`RPC dependency "${rel}" has a table-wide SELECT grant to mcp_reader -- column-level only`);
+  }
+  console.log(`[4] mcp_reader SELECT grants across ${new Set(grantSites).size} migration(s): ${granted.size} relations; expected ${expected.size}`);
+  for (const [rel, cols] of [...granted].sort()) console.log(`    ${rel}: ${cols.has("*") ? "table-wide" : `columns (${[...cols].join(", ")})`}`);
+}
+
+// --- 4b. data-tool wrapper mirrors chat's RULE_METRIC_DOMAIN -----------------
+{
+  const parse = (src, where) => {
+    const m = src.match(/RULE_METRIC_DOMAIN[^=]*=\s*\{([\s\S]*?)\};/);
+    if (!m) { failures.push(`RULE_METRIC_DOMAIN not found in ${where}`); return {}; }
+    return Object.fromEntries([...m[1].matchAll(/(\w+):\s*"([^"]+)"/g)].map((x) => [x[1], x[2]]));
+  };
+  const chat = parse(toolsSrc, "chat/tools.ts");
+  const gw = parse(sources["data-tools.ts"] ?? "", "mcp/data-tools.ts");
+  const same = JSON.stringify(Object.entries(chat).sort()) === JSON.stringify(Object.entries(gw).sort());
+  if (!same || !Object.keys(chat).length) failures.push("mcp/data-tools.ts RULE_METRIC_DOMAIN differs from chat/tools.ts's");
+  console.log(`[4b] RULE_METRIC_DOMAIN: gateway copy ${same ? "==" : "!="} chat (${Object.keys(chat).length} entries)`);
 }
 
 // --- 5. per-key scoping ---------------------------------------------------------

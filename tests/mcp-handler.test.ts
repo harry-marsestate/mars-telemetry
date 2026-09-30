@@ -156,8 +156,14 @@ Deno.test("JSON-RPC batches are refused (so none can slip past per-call authoriz
 
 Deno.test("allowlisted call: one scoped transaction per call, as the key's owner", async () => {
   const { handler, calls } = harness();
+  // Minimal valid arguments for the tools with required ones.
+  const ARGS: Record<string, unknown> = {
+    get_series: { metric: "air_temp", start: "2024-07-01T00:00:00Z", end: "2024-07-02T00:00:00Z", bucket_hours: 1 },
+    get_derived_series: { vintage: 2024 },
+    get_anomalies: { vintage: 2024, as_of: "2024-07-06T02:00:00Z" },
+  };
   for (const name of MCP_TOOLS) {
-    const body = await (await handler(call(name))).json();
+    const body = await (await handler(call(name, ARGS[name] ?? {}))).json();
     assertEquals(body.result.content[0].text, `rows for ${name}`);
   }
   assertEquals(calls.runTool, [...MCP_TOOLS]);

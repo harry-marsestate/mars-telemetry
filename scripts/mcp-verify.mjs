@@ -79,7 +79,9 @@ async function mcp(authHeader, method, params) {
   const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18" };
   if (authHeader !== null) headers.Authorization = authHeader;
   const t0 = Date.now();
-  const res = await fetch(FN_URL, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }) });
+  // 60s cap: a response lost in transit (seen twice on 2026-09-30 for a call
+  // the server had completed and audited) must fail a check, not hang the run.
+  const res = await fetch(FN_URL, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }), signal: AbortSignal.timeout(60_000) });
   const text = await res.text();
   let body = null;
   try { body = JSON.parse(text); } catch { /* non-JSON */ }

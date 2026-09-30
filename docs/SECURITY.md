@@ -7096,3 +7096,268 @@ The precedence rule itself is unchanged, so `daily_weather.sql` and
 change. The P1 check `database.integrity.mock_real_precedence` now asserts
 that a no-vintage series equals the explicit-vintage series in every
 coexisting (metric, vintage).
+
+## Nightly health checks: the checks, schedule, secrets and operations (2026-09-30)
+
+This continues "Nightly health checks" above, the storage, scopes and data
+tools, with everything that runs each night.
+
+### Schedule (UTC) and where each producer runs
+
+| Time  | Producer | Runs where | Writes as |
+|-------|----------|------------|-----------|
+| 12:00 | P1 `p1_database` | pg_cron job `health-p1-database`: `system_health.run_p1_checks()` (SECURITY INVOKER, postgres) | postgres, through `record_run`/`record_result` |
+| 12:10 | P2 `p2_probes` | pg_cron job `health-p2-probes`: `net.http_post` to Edge Function `health-probe`, key read from Vault (`edge_functions_secret_key`) at call time | `health_writer` (`HEALTH_WRITER_DB_URL` Supabase secret) |
+| 12:20 | P3 `p3_frontend` | GitHub Actions `.github/workflows/nightly-health-p3.yml`, Playwright in the runner's Chrome | `health_writer` (`HEALTH_WRITER_DB_URL` GitHub secret) |
+| on call | P4 | computed inside `get_system_health` on every call | nothing is stored |
+| 12:40 | prune | pg_cron job `health-prune`: `system_health.prune(90)`; baselines are kept | postgres |
+
+P1 takes about 3-6 s, P2 about 2 s, and P3 about 2-3 minutes, so all of it
+finishes well before 12:45. A producer counts as **stale** in
+`get_system_health` when it has no run or its latest run is more than 26
+hours old.
+
+### Every check_id
+
+**P1, database (layer in brackets):**
+- `ingestion.climate.last_run`, `ingestion.innovint.last_run` [ingestion]:
+  the newest `ingestion_runs` row. Fail if it is not `success` or is more
+  than 26 hours old. Warn if it wrote 0 rows.
+- `ingestion.climate.freshness` [ingestion]: the newest real ERA5 hour must
+  be at most 26 hours old.
+- `ingestion.climate.daily_weather_through` [ingestion]: `daily_weather` for
+  the current vintage must reach at least Pacific today minus 2 days.
+- `ingestion.climate.current_vintage` [ingestion]: the newest real climate
+  vintage must equal the current Pacific year. This is the tracked VINTAGE
+  item: it fails from the first night of 2027 until `VINTAGE` is updated.
+- `database.integrity.soil_moisture_range`: every soil reading between 0 and
+  100.
+- `database.integrity.gdd_calibrated_2022_2025`: each closed vintage's final
+  calibrated GDD between 3000 and 4400.
+- `database.integrity.mock_real_precedence`: for every (metric, vintage)
+  holding both real and mock rows, estate-wide and per mock block, the
+  no-vintage `series_bucketed` equals the vintage-scoped one. Fail on any
+  mismatched bucket. Warn if the set of coexisting pairs differs from the
+  baseline.
+- `database.integrity.daily_weather_pacific_days`: every day is stored at
+  00:00 UTC, and the newest day's `tmax_f` **and** `tavg_f` equal the
+  Pacific-bucketed hourly ERA5 values. tavg is the check that tells Pacific
+  from UTC bucketing apart; see the follow-up migration `20260930050100`.
+- `database.integrity.no_b1_2024_irrigation`: no B1 irrigation rows in 2024.
+- `database.integrity.sensor_readings_unique`: `UNIQUE (metric_key,
+  sensor_id, recorded_at)` is present.
+- `database.integrity.no_future_real_rows`: no real reading is timestamped in
+  the future (the forecast-hours incident).
+- `database.checksum.sensor_readings_closed_vintages`,
+  `database.checksum.daily_weather_closed_vintages`: 2022-2025 row count
+  plus the sum of 64-bit row hashes, compared with the baseline. Any change
+  fails.
+- `database.checksum.winery_closed_vintages`: the same for
+  `harvest_receipts`, `lab_samples` and `labour_actuals`, excluding ids and
+  sync/ingest timestamps. A change only warns, because upstream corrections
+  happen.
+- `database.anomalies.anchor_2024_07_06` (3 hits) and
+  `database.anomalies.anchor_2024_04_06` (2 hits): `anomalies_eval` run
+  **as svc-nightly-checks through RLS**. The function switches to
+  `authenticated` with that account's claims, then back.
+- `database.vessels.counts`: fail if there are 0 active vessels. Warn if
+  `capacity_suspect` exceeds the baseline (63), or if the active count moves
+  more than 25% from the baseline (72).
+- `security.structure.daily_derived` [security]: still `security_invoker`,
+  with its columns, grants and mcp_reader columns equal to the baseline.
+- `security.rls.enabled_on_every_table` [security]: RLS is on for every
+  table in `public` and `system_health`.
+- `security.anon.no_data_privileges` [security]: anon has no
+  SELECT/INSERT/UPDATE/DELETE on any relation (fail).
+  `security.anon.residual_privileges`: anon's full grant set compared with
+  the baseline (warn); see the finding below.
+- `security.policies.baseline` [security]: a fingerprint of every RLS policy.
+  The result names what was added, removed or changed.
+- `security.functions.required_present` [security]: 17 functions the system
+  depends on still exist with the same signatures.
+- `security.definer.search_path_pinned` [security]: every SECURITY DEFINER
+  function in `public`/`system_health` pins its `search_path`.
+- `security.mcp_reader.grants` [security]: mcp_reader's live table and column
+  privileges equal the baseline. `check-mcp-boundaries.mjs` checks the
+  migrations; this checks the catalog.
+- `security.health_writer.privileges` [security]: health_writer can execute
+  exactly `record_run` and `record_result`, holds no table grants, and is not
+  BYPASSRLS or superuser.
+- `security.no_embedded_keys` [security]: no `sb_secret_…` or JWT-shaped
+  string in any trigger argument, function body, view, cron command or role
+  setting. It records object names only.
+- `security.pg_net.queue_not_stale` [security]: warns if a queued pg_net
+  request has waited over 10 minutes while later requests got responses (the
+  accepted residual risk above).
+
+**P2, sources**, each one zero-cost GET with the credential production uses,
+retried once on 5xx or a network error:
+- `source.innovint.api`: `vessels?limit=1`.
+- `source.open_meteo.archive` and `source.open_meteo.archive_era5_land`: the
+  ingest's own `archiveUrl()` for the last complete Pacific day. The ERA5
+  check warns if there are fewer than 24 non-null hours. The ERA5-Land
+  non-null count is informational, because it lags about 5 days.
+- `source.anthropic.model`: `GET /v1/models/claude-sonnet-5`, the chat model,
+  pinned by test to chat's code.
+- `source.fireworks.model`: the Kimi model is listed. This provider is
+  optional, and the check fails only if `CHAT_MODEL_PROVIDER=kimi` and no
+  key is set.
+- `source.resend.api`: `GET /domains`. A send-only key's
+  `restricted_api_key` answer counts as valid.
+
+**P3, frontend** (`operator`, `customer`, `customer_b2`):
+- `frontend.<user>.login`: the real sign-in form.
+- `frontend.<user>.panels`: every panel on both tabs is `ok` or `blocked`.
+  Fail on `error` or a panel still rendering. Warn on console errors after
+  login.
+- `frontend.<user>.role_visibility`: operator-only panels (`tanks`, `fruit`)
+  appear for the operator and never for a customer.
+- `frontend.<user>.rls_boundary`: in-page through the user's own REST
+  session, the blocks with 2026 soil rows equal the user's blocks, the
+  vessels rows are 0 for customers, and a customer sees exactly 1
+  `user_profiles` row.
+
+Operator only, panels vs the gateway (P3 key `mtk_jxk3p3fn`):
+- `frontend.fidelity.gdd`: the GDD panel's newest value equals
+  `get_derived_series`.
+- `frontend.fidelity.air_temp_series`: the air-temperature panel's own
+  `series_bucketed` call, replayed through `get_series`, is identical to
+  2 dp.
+- `gateway.tools.vessels_vs_rest`: `get_vessels.total_count` equals the
+  REST count.
+- `gateway.tools.anomaly_anchor_vs_rest`: `get_anomalies` at the
+  2024-07-06 anchor returns the same 3 rules as REST.
+
+**P4, the gateway itself** (inside `get_system_health`):
+- `gateway.p4.database_reachable`.
+- `gateway.p4.key_expiry`: the calling key's expiry. Warns at 14 days or
+  fewer.
+- `gateway.p4.allowed_tools`.
+- `gateway.p4.write_capable_tools`: fails if the key allows any tool that
+  isn't a catalogued read-only `get_*` tool.
+
+### The dashboard hook P3 reads
+
+`web/index.html` keeps `window.__panelData[panelId] = {status, tab, vintage,
+range, charts: [...]}`:
+- `makePanel`/`refreshPanelRun` set the status (`rendering`, `ok`, `blocked`
+  or `error`);
+- `lineChart`/`barChart`/`table`/`strip` append what they drew.
+
+`window.__seriesCalls` records the `series_bucketed` parameters and rows of
+the last 300 calls. The hook holds references to data already fetched for the
+signed-in user. It never makes a query, and a failure inside it is swallowed.
+
+### Secrets (names only; values never printed, logged or put on a command line)
+
+- **Supabase Edge Function secrets:** `HEALTH_WRITER_DB_URL` (health-probe),
+  plus the existing `INNOVINT_TOKEN`, `ANTHROPIC_API_KEY`, `KIMI_API_KEY`
+  and `RESEND_API_KEY`, which the probes use.
+- **Vault:** `edge_functions_secret_key` (every pg_cron job).
+- **GitHub Actions:** `HEALTH_WRITER_DB_URL`, `P3_OPERATOR_PASSWORD`,
+  `P3_CUSTOMER_PASSWORD`, `P3_CUSTOMER_B2_PASSWORD`, `P3_MCP_KEY`.
+
+To rotate:
+- `health_writer`: `node scripts/rotate-health-writer-password.mjs`, which
+  updates both copies of `HEALTH_WRITER_DB_URL`.
+- P3 key: issue a replacement with `node scripts/agent-keys.mjs issue --user
+  3c254617-caf0-4498-8e1e-a9dfff9800b8 --label "P3 nightly frontend check
+  (GitHub Actions)" --tools get_series,get_derived_series,get_anomalies,get_vessels
+  --gh-secret P3_MCP_KEY --no-print`, then revoke the old one.
+- A synthetic user's password: reset it through the Auth Admin API, piping
+  the new value to its GitHub secret.
+
+### Re-baselining (after a deliberate change)
+
+P1 compares nine checks against `system_health.health_baselines`:
+- the three checksums;
+- `mock_real_precedence`'s coexisting pairs;
+- `vessels.counts`;
+- `structure.daily_derived`;
+- `anon.residual_privileges`;
+- `policies.baseline`;
+- `mcp_reader.grants`.
+
+A new migration that deliberately changes, say, a policy will fail
+`security.policies.baseline` the next night, and that failure is the point.
+Once the change is confirmed intended, run (as postgres):
+
+    -- either delete the row and let the next P1 run take the current value:
+    delete from system_health.health_baselines where check_id = 'security.policies.baseline';
+    -- or set it explicitly:
+    select system_health.set_baseline('<check_id>', '<json>'::jsonb, '<who, why>');
+
+`get_health_baselines` shows every stored value, when it was set and by whom.
+
+### How it was verified (2026-09-30)
+
+- P1 in the shadow database: each check family detects an induced failure.
+  The induced failures were:
+  - a future row;
+  - soil at 150;
+  - B1 2024 irrigation;
+  - an edited closed-vintage row;
+  - a key-shaped string in a function body;
+  - RLS turned off;
+  - an anon SELECT grant;
+  - an edited policy;
+  - `security_invoker` turned off;
+  - vessel drift;
+  - an extra health_writer grant;
+  - an extra mcp_reader column;
+  - the old blending `series_bucketed`.
+- P1 in production: 29/29 pass (runs 2 and 3; run 2 initialised the
+  baselines).
+- P2 in production: triggered through the cron job's own command, run 4.
+  Five pass, and Anthropic fails for a real reason (below).
+- P3 in production: GitHub Actions run `36672081888`, run 5, 16/16 with real
+  password logins.
+- Step l, one induced failure per layer:
+  - ingestion (a failed ingest run), database (a future-dated real reading),
+    security (a key-shaped string in a function body) and staleness (P3's
+    last run aged 27 h): each done in a production transaction that was
+    rolled back. P1 ran inside it, and `health_system_status()` was read as
+    mcp_reader with svc-nightly-checks' claims. Each surfaced as exactly the
+    expected check, and nothing survived: 0 induced rows, the function gone,
+    and 0 extra runs.
+  - frontend: a local copy of the page whose GDD panel throws. P3 failed
+    `panels` for all three users and errored the GDD fidelity check.
+  - gateway: P4 warned `key_expiry` for a 1-day throwaway key, live over
+    HTTP.
+  - source: the real Anthropic failure appears in `get_system_health` live.
+
+### Findings recorded by this work
+
+- **The production `ANTHROPIC_API_KEY` is rejected by Anthropic** (401
+  `authentication_error`, "API key is invalid"). It returns the same answer
+  for `GET /v1/models`, `GET /v1/models/claude-sonnet-5` and the free
+  `count_tokens`. Its SHA-256 equals the local `.env` copy, and the Supabase
+  secret was last set on 2026-09-07. `CHAT_MODEL_PROVIDER` isn't set, so the
+  in-app chat defaults to Anthropic and is presumably failing for everyone
+  until the key is replaced. The fix needs the Anthropic console, so it's for
+  the owner. P2 fails `source.anthropic.model` every night until it is fixed.
+- **anon holds REFERENCES/TRIGGER/TRUNCATE on every public table and view**
+  (117 grant rows, no SELECT/INSERT/UPDATE/DELETE anywhere). None of it is
+  reachable: anon can't log in and PostgREST exposes no TRUNCATE. But
+  TRUNCATE ignores RLS, and these grants serve no purpose. Recommendation:
+  `revoke truncate, trigger, references on all tables in schema public from
+  anon, authenticated;` (the same set exists for `authenticated`; check the
+  app first). Left unchanged here, and tracked by
+  `security.anon.residual_privileges`.
+- **The dashboard prefetches anomaly thresholds before sign-in**, as anon.
+  That fails with 42501, and `THRESHOLDS` stays null for a fresh sign-in, so
+  panel info texts use their built-in fallback thresholds (e.g. 92 °F).
+  Panels themselves re-fetch after login and are unaffected. P3 counts
+  console errors only after login for this reason.
+- **Two harness runs of `scripts/mcp-verify.mjs` hung** on a `tools/call`
+  that the server had completed and audited (10:49:17Z). The response never
+  arrived. Eight direct replays of the same sequence did not reproduce it.
+  The harness now caps each request at 60 s. P3 already caps at 30 s, so a
+  lost response fails a check instead of hanging the run.
+- **Open-Meteo archive `end_date` may be at most the current UTC date**, not
+  the Pacific date (checked 2026-09-30 04:05 UTC, while Pacific was still
+  09-29). The ingest's `fetchWindowEnd()` caps to it, and P2 requests
+  `[day, day+1]` for the last complete Pacific day, which never passes it.
+- **Rate-limit counting rule** (restated): scope refusals count toward a
+  key's limits and are audited `rejected_scope`; throttled calls are audited
+  `throttled` and don't count.

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mars Telemetry — Mars Estate, Howell Mountain</title>
+<link rel="icon" href="data:,"><!-- no favicon file exists; this stops the browser requesting /favicon.ico (a 404 in every console) -->
 <!-- supabase-js pinned to an exact version and file, with SRI (was "@2", which
      jsDelivr resolves at request time -- a new release would have reached
      production unreviewed). The pinned file is byte-identical to what "@2"
@@ -3052,25 +3053,26 @@ async function fetchThresholds(){
 let thresholdsPromise = null;
 function getThresholds(){
   if(!thresholdsPromise){
-    // A failed attempt must NOT be memoized permanently -- fetchThresholds()
-    // fires eagerly at parse time (below), before Supabase JS is guaranteed
-    // to have restored the session from localStorage. Losing that race once
-    // (observed live: request goes out as anon, which correctly lacks
-    // SELECT, producing "permission denied for table anomaly_thresholds")
-    // must not poison every later caller for the rest of the page's life --
-    // clear the memo on failure so the next call retries fresh instead of
-    // requiring a hard reload.
+    // A failed attempt must NOT be memoized permanently -- clear the memo
+    // on failure so the next call retries fresh instead of requiring a
+    // hard reload.
     thresholdsPromise = fetchThresholds().catch(err => { thresholdsPromise = null; throw err; });
   }
   return thresholdsPromise;
 }
 // Synchronous mirror for call sites that can't await (info-tooltip hover
-// handlers, updateVineyardTile's live-poll redraw). Kicked off immediately
-// at parse time so it's warm well before a user can hover anything or a
-// realtime tick fires. Every reader below treats THRESHOLDS as possibly
-// still null and falls back to the pre-consolidation literal.
+// handlers, updateVineyardTile's live-poll redraw). Filled by
+// refreshThresholds() in runSessionGate(), i.e. only once an approved
+// session exists -- it used to be fetched at parse time, before sign-in, as
+// anon (no SELECT: a 401 in the console, and THRESHOLDS stayed null after a
+// fresh sign-in). Every reader below still treats THRESHOLDS as possibly null
+// and falls back to the pre-consolidation literal.
 let THRESHOLDS = null;
-getThresholds().then(t => { THRESHOLDS = t; }).catch(e => console.error('getThresholds failed:', e));
+async function refreshThresholds(){
+  thresholdsPromise = null; // fresh per session: re-fetched on every sign-in
+  try{ THRESHOLDS = await getThresholds(); }
+  catch(e){ console.error('getThresholds failed:', e); }
+}
 
 // Resolves {threshold}/{threshold_low}/{threshold_high} tokens per the
 // convention documented in the Step 1 migration: lt-row supplies _low,
@@ -5335,7 +5337,7 @@ function showFinishProfileOnly(prefill){
 
 async function runSessionGate(){
   const { data: { session } } = await sb.auth.getSession();
-  if(!session){ chatUserId=null; showAuthOnly(); return; }
+  if(!session){ chatUserId=null; THRESHOLDS=null; thresholdsPromise=null; showAuthOnly(); return; }
   _userRolePromise=null; /* always re-check fresh, not a stale cached role from a prior session */
 
   // Gated for EVERY role/status/provider, checked every login, ahead of
@@ -5383,7 +5385,10 @@ async function runSessionGate(){
   // joins the same batch for the same reason: buildVintageMeta() reads
   // innovintSyncStatus on every Harvest-strip rebuild (full renderTab AND
   // rerenderHarvestVintage's scoped path).
-  await Promise.all([refreshRealClimateVintages(), refreshDataMode(), refreshInnovintSyncStatus()]);
+  // refreshThresholds() joins too: panel info texts read THRESHOLDS
+  // synchronously, and this is the first point a signed-in, approved
+  // session exists (it replaces the old parse-time, pre-sign-in fetch).
+  await Promise.all([refreshRealClimateVintages(), refreshDataMode(), refreshInnovintSyncStatus(), refreshThresholds()]);
   showDashboard();
   resumeAgentKeyReauth(session);
 }

@@ -6857,3 +6857,196 @@ minutes (the only situation in which the window is long).
 RULE: never put a key in a trigger argument, function body, view or cron
 command -- read it from Vault at call time. A nightly health check fails if
 any trigger, function or view embeds `sb_secret_` or a JWT.
+
+## Nightly health checks (2026-09-30)
+
+A nightly, end-to-end check of sources -> ingestion -> database -> gateway ->
+dashboard. Results land in the `system_health` schema and are read through the
+MCP gateway by the external agent `svc-nightly-checks` (key `mtk_xfXm7Os6`,
+owner `3c254617`, an operator service account). Producers: P1 database checks
+(pg_cron 12:00 UTC), P2 upstream probes (Edge Function `health-probe`, 12:10),
+P3 frontend checks (GitHub Action with Playwright, 12:20), P4 the gateway's own
+self-check (computed on every `get_system_health` call); prune at 12:40. Every
+producer finishes before 12:45 UTC. Branch `feat/nightly-health`, merged to
+main piece by piece.
+
+### Storage and the writer role (migration `20260930020000`)
+
+- `system_health.health_runs` / `health_results` / `health_baselines` /
+  `ingestion_runs`: RLS on, zero policies, every privilege revoked from every
+  API role. Nothing reaches them through PostgREST.
+- Writes go through two SECURITY DEFINER functions only:
+  `system_health.record_run(producer)` and `record_result(run, layer,
+  check_id, status, observed, expected, detail)`. They validate the producer,
+  layer, `check_id` shape (`^[a-z0-9_.]{3,100}$`) and status. A run is closed
+  to new results 3 hours after it starts. Payloads are capped at 64 KB and
+  `detail` at 2000 chars. The run's status is always the worst of its results.
+- `health_writer`: NOLOGIN until its password was set, then LOGIN, NOINHERIT,
+  NOBYPASSRLS, connection limit 5, `statement_timeout` 15s. It has EXECUTE on
+  exactly those two functions and nothing else: no table privilege, no other
+  function. Its password was generated in memory by
+  `scripts/rotate-health-writer-password.mjs` (SCRAM verifier, login proven
+  through the pooler). The full connection string went straight into Supabase
+  secret `HEALTH_WRITER_DB_URL` (Management API request body) and GitHub
+  Actions secret `HEALTH_WRITER_DB_URL` (`gh secret set`, stdin). It was never
+  printed, written to disk or put on a command line.
+- `public.log_ingestion_run(...)`: service_role only. Both ingest functions
+  call it from `withIngestionLog()` in a `finally`, so every run is recorded
+  (status, HTTP status, rows written, error), including a run that throws. A
+  logging failure goes to the console and never fails the ingest.
+
+### Per-key tool scopes and rate limits (migration `20260930030000`)
+
+- `agent_api_keys.allowed_tools text[]`: every key names its tools. Existing
+  keys were backfilled with the five round-one tools, so nothing changed for
+  them. `public.mcp_tool_catalogue` lists every tool the gateway may ever
+  expose (12: nine data, three health). A trigger rejects unknown or duplicate
+  tools, and rejects a health tool on a key whose owner isn't an operator.
+  Every change is audited in `agent_api_key_scope_changes`.
+- `tools/list` shows only the key's tools. Each `tools/call` goes first through
+  `mcp_authorize_call(key_hash, tool)`, which is SECURITY DEFINER, holds a
+  per-key advisory lock, and has EXECUTE for `mcp_gateway` only:
+  - An out-of-scope call gets JSON-RPC -32602 "Tool not permitted for this
+    key". It is audited (`outcome = rejected_scope`) and counts toward the
+    rate limit.
+  - Over the limit, the call gets HTTP 429 with `Retry-After`. It is audited
+    (`outcome = throttled`) but does not count, so a throttled client isn't
+    locked out longer.
+  - If the check itself fails, the call fails closed with HTTP 500.
+  - JSON-RPC batches get 400, so no call can skip per-call authorization.
+- Limits: 60/minute and 2000/day per key, the defaults. Real usage before the
+  change (every key, full audit history) peaked at 10 calls/minute and 36/day,
+  so the defaults don't throttle anything real. Change them per key with
+  `rate_per_minute` / `rate_per_day`.
+- The key detail view in User Management shows the key's allowed tools and
+  limits, and the audit table labels refused calls "not permitted" or
+  "throttled".
+- `scripts/agent-keys.mjs issue --tools a,b,c` and `set-tools --id --tools`
+  manage scopes. `check-mcp-boundaries.mjs` section 5 fails if an exposed tool
+  isn't in the catalogue, or if the handler stops routing list/call through
+  scope/authorize.
+
+### Round-one deferral reversed: four more data tools through the gateway (migration `20260930040000`)
+
+Round one deferred `get_series`, `get_derived_series`, `get_anomalies`
+(simulated-history risk) and `get_vessels`. The owner reversed that for the
+nightly checks, on condition of these guardrails. Each one is implemented and
+verified:
+
+1. **Per-key scope.** Only keys granted these tools can call them. The five
+   pre-existing keys still have exactly the round-one five.
+   `svc-nightly-checks` has all nine data tools plus the three health tools.
+2. **Real vs simulated is always visible.** `supabase/functions/mcp/data-tools.ts`
+   wraps chat's `runTool()` without changing it. It tags every row with
+   `data_status`: `real`, `mock`, or `unknown`. The tag comes from
+   `domain_reality()`, the same server-side classification chat and the
+   dashboard use:
+   - `get_series`: by the metric and the vintage, or the bucket's year when no
+     vintage is given.
+   - `get_derived_series`: all five derived fields must be real for the vintage.
+   - `get_anomalies`: by each hit's rule metric (a copy of chat's
+     `RULE_METRIC_DOMAIN`, kept identical by the boundary check).
+   - `get_vessels`: by the `vessels` domain.
+
+   `unknown` means `domain_reality()` had no answer for that domain. Chat
+   treats that as real (it fails open); the gateway reports it instead of
+   guessing.
+
+   **Enforcement choice (the owner left it to me):** tags for everyone, plus
+   exclusion for real_only owners. Chat's own real-only gate still withholds a
+   simulated domain or vintage whole. On top of that, the gateway refuses the
+   whole response (fails closed) if any row bound for a real_only owner isn't
+   `real`. I didn't use row-level filtering by `source_system` because
+   `series_bucketed` and `daily_derived` return aggregates that have no
+   per-row source.
+3. **`get_anomalies` needs an explicit `as_of`** through the gateway. The
+   exposed schema requires it, and the wrapper rejects a missing or
+   unparseable one before any query runs. Chat's default is a frozen demo
+   date. The in-app chat schema is unchanged.
+4. **Column-level grants only.** mcp_reader gets exactly the columns the tools
+   read, directly or through the objects they call:
+   - through `series_bucketed()` / `anomalies_eval()`, both SECURITY INVOKER:
+     `sensor_readings`, `real_data_sources`, `anomaly_thresholds`;
+   - through sensor_readings' RLS policy: `metric_registry`;
+   - through the security_invoker view `daily_derived`: `daily_weather` and
+     `vintage_climate_calibration`;
+   - `vessels` (not `capacity_suspect`, `current_lot_id`, the timestamps or
+     `source_system`).
+
+   Every policy on these tables is `to public`, so RLS applies to the key
+   owner's own identity.
+5. **Row counts.** Each result also carries `total_count`, `returned_count`
+   and `truncated`. `total_count` is computed by a count query with the tool's
+   own filters, under the same RLS identity, in the same read-only
+   transaction. The text output is `runTool()`'s output byte for byte, plus
+   one appended `[gateway]` line. The tags and counts are also in MCP
+   `structuredContent`.
+6. **Parity.** `scripts/mcp-parity.mjs` now covers these tools (26 tool calls
+   in total). It compares the adapter under mcp_reader against the live REST
+   API through the real supabase-js 2.117.2, signed in as the synthetic
+   users:
+   - operator: 55 of 57 queries byte-identical, plus the 2 long-standing
+     count-only matches (unordered and capped);
+   - HEALTH-CUST-B2: 47 of 47 byte-identical;
+   - runTool outputs, mcp_reader vs authenticated: 26 of 26 identical for both
+     users.
+7. **RLS still decides every row.** Checked on a local shadow database built
+   from the production schema, running the real handler -> gateway -> adapter
+   path as mcp_reader:
+   - before the migration, every data tool fails with permission denied;
+   - after it, the B2-only customer sees 3 anomaly hits to the operator's 5,
+     B2 soil only, and 0 vessels (the `vessels_read` policy is operator-only);
+   - the real_only operator gets chat's block for simulated soil, and a gateway
+     refusal whenever a row isn't real.
+8. **Static checks.** `check-mcp-boundaries.mjs` now:
+   - parses mcp_reader's grants across every migration, including column
+     grants, and requires them to equal allowlist + view dependencies + RPC
+     dependencies;
+   - requires RPC dependencies to be column-level only and never named by
+     tool code;
+   - requires the `RULE_METRIC_DOMAIN` copy to equal chat's;
+   - fails on any write, blanket or default-privilege grant to an mcp role.
+
+   Four deliberate mutations were each caught.
+
+**Bug caught by the shadow run:** the adapter built `json_agg(t) ... ) t`, and
+`series_bucketed` returns a column named `t`. Postgres resolves the name to
+the column first, so every row came back as its timestamp string. The alias
+is now `mcp_row`.
+
+**Live (2026-09-30 04:36 UTC)**, after applying the migration and deploying
+`mcp` from main `d6c8099` (downloaded source byte-identical to main), with a
+throwaway key for the synthetic operator (revoked, Keychain entry deleted):
+- `tools/list` showed exactly the key's 5 tools, with `as_of` required;
+- `get_anomalies` without `as_of` was rejected;
+- the anchors returned 3 hits (2024-07-06T02:00Z) and 2 hits
+  (2024-04-06T14:00Z);
+- the series, derived and vessel calls returned correct counts
+  (e.g. 72 active / 241 total vessels);
+- an out-of-scope call was refused and audited `rejected_scope`.
+
+### Synthetic users: an approved exception to "no test accounts"
+
+`docs/SECURITY.md` elsewhere forbids creating accounts to manufacture a
+verification case. The owner approved three synthetic users for the P3 checks
+as an explicit exception. None of them is, or may ever be made, an admin.
+- `harry.c+health-operator@marscap.investments`: operator, `68599107`.
+- `harry.c+health-customer@marscap.investments`: customer, account
+  `HEALTH-CUST`, blocks B1, B2, B3 (all blocks, as every real customer has).
+- `harry.c+health-customer-b2@marscap.investments`: customer, account
+  `HEALTH-CUST-B2`, block B2 only (the RLS boundary case).
+
+`scripts/health-test-users.mjs` created them through the Auth Admin API. It
+then approved them the way the User Management Approve form does: as
+`authenticated`, with the approving admin's claims, so RLS decided. That
+needed one fix, migration `20260930035000`: an admin could not insert
+`customer_block_access` rows through RLS, so the Approve form's block
+assignment could never have worked for a real customer either. The fix is an
+admin-only insert policy.
+
+Passwords were generated in memory and written only to GitHub secrets
+`P3_OPERATOR_PASSWORD`, `P3_CUSTOMER_PASSWORD` and `P3_CUSTOMER_B2_PASSWORD`,
+over stdin. The parity replay signs them in with an admin-generated magic link
+instead: nothing is emailed and no password is used. The three
+account-confirmation notifications the admin received on 2026-09-30 came from
+creating these users.

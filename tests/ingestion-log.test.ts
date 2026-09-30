@@ -111,7 +111,7 @@ Deno.test("summarizeClimate: rows, per-metric detail, errors incl. refresh", () 
   const s = summarizeClimate(CLIMATE_OK);
   assertEquals([s.rows_written, s.error], [1509, null]);
   // deno-lint-ignore no-explicit-any
-  assertEquals((s.detail as any).per_metric.soil_moisture, { written: 216, nulls: 143, future_skipped: 1, wrong_vintage: 0, error: undefined });
+  assertEquals((s.detail as any).per_metric.soil_moisture, { written: 216, nulls: 143, future_skipped: 1, unknown_vintage: 0, vintages: undefined, error: undefined });
   const bad = summarizeClimate({ ...CLIMATE_OK, ok: false, results: { ...CLIMATE_OK.results, soil_temp: { written: 0, nulls: 0, error: "Open-Meteo 400" } }, refresh_error: "timeout" });
   assertEquals(bad.error, "soil_temp: Open-Meteo 400; daily_weather refresh: timeout");
 });

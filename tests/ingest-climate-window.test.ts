@@ -2,7 +2,7 @@
 //   npx deno test --no-lock tests/ingest-climate-window.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
-  addDays, archiveUrl, CLIMATE_SOURCES, requestedModel, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
+  addDays, archiveUrl, CLIMATE_SOURCES, harvestVintage, requestedModel, vintageOfPacificDate, vintageRanges, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
   lastElapsedHourMs, pacificYear, stampUtc,
 } from "../supabase/functions/ingest-climate-2026/window.ts";
 
@@ -152,7 +152,43 @@ Deno.test("ingest source: every archive fetch passes a pinned model, and rows ca
   const calls = [...src.matchAll(/fetchHourly\(startStr, e, ([^)]*)\)/g)].map((m) => m[1]);
   assertEquals(calls, ["[...CLIMATE_SOURCES.weather.vars], CLIMATE_SOURCES.weather.model", "[...CLIMATE_SOURCES.soil.vars], CLIMATE_SOURCES.soil.model"]);
   assert(!/open_meteo_era5"|"OM-ERA5"/.test(src), "no hard-coded legacy label");
+  assert(!/const VINTAGE\s*=/.test(src), "no hard-coded vintage: harvestVintage() per hour");
   assert(src.includes("sensor_id: source.sensor_id") && src.includes("source_system: source.source_system"));
-  assertEquals((src.match(/upsertMetric\(ctx, results, cutoffMs, "[a-z_]+", weatherData\.data!, "[a-z_0-9]+", VINTAGE, \d+, CLIMATE_SOURCES\.weather\)/g) ?? []).length, 3);
-  assertEquals((src.match(/upsertMetric\(ctx, results, cutoffMs, "[a-z_]+", soilData\.data!, "[a-z_0-9]+", VINTAGE, \d+, CLIMATE_SOURCES\.soil\)/g) ?? []).length, 2);
+  assertEquals((src.match(/upsertMetric\(ctx, results, cutoffMs, "[a-z_]+", weatherData\.data!, "[a-z_0-9]+", knownVintages, \d+, CLIMATE_SOURCES\.weather\)/g) ?? []).length, 3);
+  assertEquals((src.match(/upsertMetric\(ctx, results, cutoffMs, "[a-z_]+", soilData\.data!, "[a-z_0-9]+", knownVintages, \d+, CLIMATE_SOURCES\.soil\)/g) ?? []).length, 2);
+});
+
+Deno.test("harvest-year vintage: Nov 1 Pacific starts next year's vintage (incl. the 2026 DST change night)", () => {
+  const v = (iso: string) => harvestVintage(Date.parse(iso));
+  // 2026-10-31 -> 2026-11-01: clocks fall back at 02:00 PDT on Nov 1 (09:00 UTC)
+  assertEquals(v("2026-11-01T06:59:59Z"), 2026, "Oct 31 23:59:59 PDT");
+  assertEquals(v("2026-11-01T07:00:00Z"), 2027, "Nov 1 00:00 PDT");
+  assertEquals(v("2026-11-01T08:30:00Z"), 2027, "01:30 PDT (first 01:30)");
+  assertEquals(v("2026-11-01T09:30:00Z"), 2027, "01:30 PST (repeated hour)");
+  // 2026-12-31 -> 2027-01-01 (PST, UTC-8)
+  assertEquals(v("2027-01-01T07:59:59Z"), 2027, "Dec 31 23:59:59 PST");
+  assertEquals(v("2027-01-01T08:00:00Z"), 2027, "Jan 1 00:00 PST");
+  // ordinary season, the next boundary, and what exists today
+  assertEquals(v("2026-09-30T13:00:00Z"), 2026);
+  assertEquals(v("2027-10-31T12:00:00Z"), 2027);
+  assertEquals(v("2027-11-01T07:00:00Z"), 2028);
+  assertEquals(v("2022-04-01T07:00:00Z"), 2022);
+  assertEquals([vintageOfPacificDate("2026-10-31"), vintageOfPacificDate("2026-11-01"), vintageOfPacificDate("2026-12-31"), vintageOfPacificDate("2027-01-01")], [2026, 2027, 2027, 2027]);
+});
+
+Deno.test("vintageRanges splits a refresh window at Oct 31 / Nov 1, never at Jan 1", () => {
+  assertEquals(vintageRanges("2026-10-25", "2026-11-08"), [{ vintage: 2026, start: "2026-10-25", end: "2026-10-31" }, { vintage: 2027, start: "2026-11-01", end: "2026-11-08" }]);
+  assertEquals(vintageRanges("2026-12-25", "2027-01-08"), [{ vintage: 2027, start: "2026-12-25", end: "2027-01-08" }]);
+  assertEquals(vintageRanges("2026-09-16", "2026-09-29"), [{ vintage: 2026, start: "2026-09-16", end: "2026-09-29" }]);
+  assertEquals(vintageRanges("2026-10-31", "2026-10-31"), [{ vintage: 2026, start: "2026-10-31", end: "2026-10-31" }]);
+});
+
+Deno.test("every hour across both boundaries gets exactly one vintage, the rule's", () => {
+  for (const [from, to] of [["2026-10-30T00:00:00Z", "2026-11-03T00:00:00Z"], ["2026-12-30T00:00:00Z", "2027-01-03T00:00:00Z"]]) {
+    for (let t = Date.parse(from); t < Date.parse(to); t += 3600_000) {
+      const pac = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit" }).formatToParts(new Date(t));
+      const y = Number(pac.find((p) => p.type === "year")!.value), m = Number(pac.find((p) => p.type === "month")!.value);
+      assertEquals(harvestVintage(t), m >= 11 ? y + 1 : y, new Date(t).toISOString());
+    }
+  }
 });

@@ -75,6 +75,7 @@ before(async () => {
   await db.exec(migration("20260926180000_service_accounts.sql"));
   await db.exec(migration("20260926190000_service_account_type_sync.sql"));
   await db.exec(migration("20260930030000_agent_key_scopes_and_rate_limits.sql"));
+  await db.exec(migration("20260930120000_admin_key_tool_selection.sql"));
   await db.exec(`
     insert into auth.users values
       ('${ADMIN}', '${ADMIN_EMAIL}'), ('${OPERATOR}', 'op@example.test'), ('${CUSTOMER}', 'cust@example.test'),
@@ -239,7 +240,8 @@ test("grants: gateway functions for mcp_gateway only; scope setter and catalogue
   for (const fn of ["public.agent_key_set_tools(uuid,text[],text)", "public.agent_key_issue(uuid,text,integer,text,boolean,text[])", "public.agent_key_list()", "public.agent_key_calls(uuid,integer)"]) {
     for (const r of ["anon", "authenticated", "service_role", "mcp_gateway", "mcp_reader"]) assert.equal(await exec(r, fn), false, `${r} ${fn}`);
   }
-  for (const fn of ["public.admin_list_agent_keys()", "public.admin_list_agent_key_calls(uuid,integer)", "public.admin_issue_agent_key(uuid,text,integer)"]) {
+  for (const fn of ["public.admin_list_agent_keys()", "public.admin_list_agent_key_calls(uuid,integer)", "public.admin_issue_agent_key(uuid,text,integer,text[])",
+                    "public.admin_update_agent_key_tools(uuid,text[])", "public.admin_list_agent_key_scope_changes(uuid)", "public.admin_list_mcp_tools()"]) {
     assert.equal(await exec("authenticated", fn), true, fn);
     for (const r of ["anon", "service_role", "mcp_gateway"]) assert.equal(await exec(r, fn), false, `${r} ${fn}`);
   }
@@ -251,11 +253,84 @@ test("grants: gateway functions for mcp_gateway only; scope setter and catalogue
   }
 });
 
-test("the admin wrappers still work through the new functions (list shows scopes; issue gives round-one tools)", async () => {
+test("the admin wrappers still work through the new functions (list shows scopes; issue takes the chosen tools)", async () => {
   const listed = await as("authenticated", adminClaims(), (q) => q("select key_prefix, allowed_tools, rate_per_minute from public.admin_list_agent_keys()"));
   assert.ok(Array.isArray(listed));
-  const issued = await as("authenticated", adminClaims(), (q) => q("select * from public.admin_issue_agent_key($1, 'via web', 30)", [OPERATOR]));
+  const issued = await as("authenticated", adminClaims(), (q) => q("select * from public.admin_issue_agent_key($1, 'via web', 30, $2)", [OPERATOR, ["get_vessels"]]));
   assert.match(issued[0].key, /^mtk_/);
+  assert.deepEqual(issued[0].allowed_tools, ["get_vessels"]);
   const calls = await as("authenticated", adminClaims(), (q) => q("select * from public.admin_list_agent_key_calls($1, 10)", ["00000000-0000-4000-8000-000000000000"]));
   assert.deepEqual(calls, []);
+});
+
+// ---- admin UI tool selection (20260930120000) ---------------------------------
+const ORIGINAL5 = ["get_berry_maturity", "get_smoke_markers", "get_wine_lab_results", "get_lot_analyses", "get_labour_summary"];
+const DATA9 = [...ORIGINAL5, "get_series", "get_derived_series", "get_anomalies", "get_vessels"];
+const FULL12 = [...DATA9, "get_system_health", "get_health_history", "get_health_baselines"];
+const NON_ADMIN = { sub: OPERATOR, role: "authenticated", email: "op@example.test", amr: pwAmr(30) };
+
+test("admin issue: tools are required (no silent default); the old 3-argument signature is gone", async () => {
+  for (const tools of [null, []]) {
+    const e = await errorAs("authenticated", adminClaims(), "select * from public.admin_issue_agent_key($1, 'x', 30, $2)", [OPERATOR, tools]);
+    assert.match(e ?? "", /choose at least one tool/);
+  }
+  const { rows: [{ n }] } = await db.query("select count(*)::int n from pg_proc where proname = 'admin_issue_agent_key'");
+  assert.equal(n, 1);
+  assert.equal((await db.query("select to_regprocedure('public.admin_issue_agent_key(uuid,text,integer)') r")).rows[0].r, null);
+});
+
+test("admin issue: the chosen tools are stored and returned; 12 for an operator-owned key", async () => {
+  const [k] = await as("authenticated", adminClaims(), (q) => q("select * from public.admin_issue_agent_key($1, 'svc full', 30, $2)", [OPERATOR, FULL12]));
+  assert.deepEqual(k.allowed_tools, FULL12);
+  const listed = await as("authenticated", adminClaims(), async (q) => {
+    const [k2] = await q("select * from public.admin_issue_agent_key($1, 'svc full 2', 30, $2)", [OPERATOR, FULL12]);
+    return q("select allowed_tools from public.admin_list_agent_keys() where id = $1", [k2.id]);
+  });
+  assert.deepEqual(listed[0].allowed_tools, FULL12, "stored, as the admin list shows it");
+});
+
+test("a customer-owned key can never get a health tool, even from an admin (issue and edit)", async () => {
+  const e1 = await errorAs("authenticated", adminClaims(), "select * from public.admin_issue_agent_key($1, 'c', 30, $2)", [CUSTOMER, [...DATA9, "get_system_health"]]);
+  assert.match(e1 ?? "", /only be granted to a key whose owner is an operator/);
+  const e2 = await as("authenticated", adminClaims(), async (q) => {
+    const [k] = await q("select * from public.admin_issue_agent_key($1, 'c', 30, $2)", [CUSTOMER, DATA9]);
+    try { await q("savepoint s"); await q("select * from public.admin_update_agent_key_tools($1, $2)", [k.id, FULL12]); return null; }
+    catch (err) { await q("rollback to savepoint s"); return err.message; }
+  });
+  assert.match(e2 ?? "", /only be granted to a key whose owner is an operator/);
+});
+
+test("admin edit: changes tools through agent_key_set_tools, audited and listed in the history", async () => {
+  const out = await as("authenticated", adminClaims(), async (q) => {
+    const [k] = await q("select * from public.admin_issue_agent_key($1, 'widen me', 30, $2)", [OPERATOR, ORIGINAL5]);
+    const [u] = await q("select * from public.admin_update_agent_key_tools($1, $2)", [k.id, FULL12]);
+    const hist = await q("select * from public.admin_list_agent_key_scope_changes($1)", [k.id]);
+    return { u, hist };
+  });
+  assert.deepEqual(out.u.allowed_tools, FULL12);
+  assert.equal(out.hist.length, 1);
+  assert.deepEqual([out.hist[0].old_tools, out.hist[0].new_tools], [ORIGINAL5, FULL12]);
+  assert.match(out.hist[0].changed_by, /via web admin$/);
+  const empty = await errorAs("authenticated", adminClaims(), "select * from public.admin_update_agent_key_tools($1, $2)", ["00000000-0000-4000-8000-000000000000", []]);
+  assert.match(empty ?? "", /choose at least one tool/);
+});
+
+test("catalogue for the picker: 5 original, 4 more data, 3 health (operator only)", async () => {
+  const rows = await as("authenticated", adminClaims(), (q) => q("select tool, preset, requires_operator from public.admin_list_mcp_tools()"));
+  const by = (p) => rows.filter((r) => r.preset === p).map((r) => r.tool).sort();
+  assert.deepEqual(by("original"), [...ORIGINAL5].sort());
+  assert.deepEqual(by("data"), ["get_anomalies", "get_derived_series", "get_series", "get_vessels"]);
+  assert.deepEqual(by("health"), ["get_health_baselines", "get_health_history", "get_system_health"]);
+  assert.ok(rows.filter((r) => r.preset === "health").every((r) => r.requires_operator));
+});
+
+test("every new admin function refuses non-admins", async () => {
+  for (const [sql, params] of [
+    ["select * from public.admin_issue_agent_key($1, 'x', 30, $2)", [OPERATOR, ORIGINAL5]],
+    ["select * from public.admin_update_agent_key_tools($1, $2)", ["00000000-0000-4000-8000-000000000000", ORIGINAL5]],
+    ["select * from public.admin_list_agent_key_scope_changes($1)", ["00000000-0000-4000-8000-000000000000"]],
+    ["select * from public.admin_list_mcp_tools()", []],
+  ]) {
+    assert.match(await errorAs("authenticated", NON_ADMIN, sql, params) ?? "", /forbidden/, sql);
+  }
 });

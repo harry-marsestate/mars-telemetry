@@ -39,6 +39,19 @@ const handler = createMcpHandler({
     // stored args as a JSON *string* ("{\"vintage\":2026,...}"), not an object.
     await unsafe("select public.mcp_log_call($1, $2, $3::jsonb, $4)", [keyHash, tool, args ?? null, isError]);
   },
+  async scope(keyHash) {
+    const [row] = await unsafe("select allowed_tools from public.mcp_key_scope($1)", [keyHash]);
+    return row ? (row.allowed_tools as string[]) : null;
+  },
+  async authorize(keyHash, tool) {
+    const [row] = await unsafe("select allowed, http_status, reason, retry_after_seconds from public.mcp_authorize_call($1, $2)", [keyHash, tool]);
+    return {
+      allowed: row?.allowed === true,
+      httpStatus: Number(row?.http_status ?? 500),
+      reason: String(row?.reason ?? "no decision"),
+      retryAfterSeconds: row?.retry_after_seconds == null ? null : Number(row.retry_after_seconds),
+    };
+  },
   runScoped: (userId, keyId, fn) =>
     runAsKeyOwner(pg as unknown as Sql, userId, keyId, (query) => fn(new PostgrestAdapter(query))),
   runTool,

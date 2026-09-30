@@ -15,6 +15,10 @@
 //    VIEW_DEPENDENCIES table is ever named directly.
 // 4. mcp_reader's SELECT grants in the roles migration equal
 //    TABLES_AND_VIEWS + VIEW_DEPENDENCIES exactly -- no more, no less.
+// 5. Per-key scoping is wired: every exposed tool is in the database's
+//    mcp_tool_catalogue; the handler routes tools/list through deps.scope()
+//    and tools/call through deps.authorize() before the transport runs; and
+//    mcp_key_scope/mcp_authorize_call are EXECUTE for mcp_gateway only.
 import { readdirSync, readFileSync } from "node:fs";
 import { MCP_TOOLS, RELATIONS, TABLES_AND_VIEWS, VIEW_DEPENDENCIES } from "../supabase/functions/mcp/allowlist.ts";
 
@@ -134,6 +138,31 @@ if (!rolesMigration) {
   if (/grant\s+(insert|update|delete|truncate|all)\b[^;]*to\s+mcp_(reader|gateway)/i.test(sqlText)) failures.push("a write/ALL privilege is granted to an mcp role");
   if (/on\s+all\s+tables/i.test(sqlText)) failures.push("blanket 'on all tables' grant in the roles migration");
   console.log(`[4] ${rolesMigration}: mcp_reader SELECT on ${granted.size} relations (${[...granted].sort().join(", ")}); expected ${expected.size}`);
+}
+
+// --- 5. per-key scoping ---------------------------------------------------------
+{
+  const migDir = new URL("../supabase/migrations/", import.meta.url);
+  const migs = readdirSync(migDir).filter((f) => f.endsWith(".sql")).sort();
+  const allSql = migs.map((f) => readFileSync(new URL(f, migDir), "utf8").replace(/--[^\n]*/g, "")).join("\n");
+  const catalogue = new Set();
+  for (const m of allSql.matchAll(/insert\s+into\s+public\.mcp_tool_catalogue[\s\S]*?values([\s\S]*?\));/gi)) {
+    for (const t of m[1].matchAll(/\(\s*'(get_[a-z_]+)'/g)) catalogue.add(t[1]);
+  }
+  const notCatalogued = MCP_TOOLS.filter((t) => !catalogue.has(t));
+  if (!catalogue.size) failures.push("no mcp_tool_catalogue inserts found in migrations");
+  if (notCatalogued.length) failures.push(`exposed tools missing from mcp_tool_catalogue: ${notCatalogued.join(", ")}`);
+  const handler = sources["handler.ts"] ?? "";
+  if (!/ListToolsRequestSchema[\s\S]{0,200}deps\.scope\(keyHash\)/.test(handler)) failures.push("handler.ts: tools/list is not filtered by deps.scope(keyHash)");
+  const authIdx = handler.indexOf("deps.authorize(keyHash");
+  const transportIdx = handler.indexOf("transport.handleRequest(req)");
+  if (authIdx < 0 || transportIdx < 0 || authIdx > transportIdx) failures.push("handler.ts: tools/call is not authorized (deps.authorize) before the transport handles the request");
+  for (const fn of ["mcp_key_scope", "mcp_authorize_call"]) {
+    const grants = [...allSql.matchAll(new RegExp(`grant\\s+execute\\s+on\\s+function\\s+([^;]*?\\b${fn}\\b[^;]*?)\\s+to\\s+([a-z_, ]+);`, "gi"))].map((m) => m[2].split(",").map((r) => r.trim()));
+    const roles = new Set(grants.flat());
+    if (roles.size !== 1 || !roles.has("mcp_gateway")) failures.push(`${fn} must be EXECUTE for mcp_gateway only (granted to: ${[...roles].join(", ") || "none"})`);
+  }
+  console.log(`[5] Per-key scoping: ${MCP_TOOLS.length} exposed tools all in mcp_tool_catalogue (${catalogue.size} catalogued); tools/list via deps.scope; tools/call via deps.authorize before the transport; scope/authorize functions mcp_gateway-only`);
 }
 
 if (failures.length) {

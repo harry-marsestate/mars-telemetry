@@ -190,9 +190,34 @@ async function runUser(browser, u) {
     record("frontend", `frontend.${u.key}.rls_boundary`, "error", {}, {}, err.message);
   }
 
-  if (u.role === "operator") await fidelity(page);
+  if (u.role === "operator") { await fidelity(page); await currentVintageChecks(page); }
   await context.close();
   return snapshot;
+}
+
+// ---- current vintage: the rule, and what the apps say --------------------------
+// Vintage = harvest year from Nov 1 Pacific (same rule as _shared/vintage.ts,
+// public.harvest_vintage and the dashboard; tests/vintage-rule.test.ts keeps
+// this copy equal).
+function harvestVintage(d) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit" }).formatToParts(d);
+  const y = Number(parts.find((x) => x.type === "year").value), m = Number(parts.find((x) => x.type === "month").value);
+  return m >= 11 ? y + 1 : y;
+}
+async function currentVintageChecks(page) {
+  const rule = harvestVintage(new Date());
+  try {
+    const dash = await page.evaluate(() => ({ current: CURRENT, vintages: VINTAGES }));
+    const ok = dash.current === rule && dash.vintages[dash.vintages.length - 1] === rule;
+    record("frontend", "frontend.current_vintage", ok ? "pass" : "fail", { dashboard: dash.current, dashboard_vintages: dash.vintages, rule }, { dashboard: rule },
+      ok ? null : "the dashboard's current vintage disagrees with the harvest-year rule");
+  } catch (err) { record("frontend", "frontend.current_vintage", "error", {}, {}, err.message); }
+  try {
+    const g = await gateway("get_anomalies", { as_of: new Date().toISOString() });
+    const ok = g.vintage_used === rule;
+    record("gateway", "gateway.current_vintage", ok ? "pass" : "fail", { gateway: g.vintage_used, rule }, { gateway: rule },
+      ok ? null : "the gateway's default (current) vintage disagrees with the harvest-year rule");
+  } catch (err) { record("gateway", "gateway.current_vintage", "error", {}, {}, err.message); }
 }
 
 // ---- operator: panels vs the gateway --------------------------------------------

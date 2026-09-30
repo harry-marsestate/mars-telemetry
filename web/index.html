@@ -1843,7 +1843,10 @@ function legendFor(panel, sets){
    is one object; the grid and section headings follow.  */
 
 const SECTIONS = [
-  {tab:'vineyard', id:'climate', label:'Climate',      note:'Estate weather station'},
+  // Not a weather station: the real climate data is Open-Meteo's ECMWF IFS
+  // model (docs/SECURITY.md, "Climate rows were labelled ERA5 but came from
+  // ECMWF IFS"); wind, solar and UV have no real source and stay simulated.
+  {tab:'vineyard', id:'climate', label:'Climate',      note:'Open-Meteo ECMWF IFS model · wind, solar & UV simulated'},
   {tab:'vineyard', id:'soil',    label:'Soil & water', note:'Vineyard sensors'},
   // Function-valued like harvest's note above -- reality now varies by
   // vintage (real for 2023/2024/2026, absent for 2022/2025), so a single

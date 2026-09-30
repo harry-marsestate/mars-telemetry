@@ -3,6 +3,7 @@ import postgres from "postgres";
 import { fetchDomainReality, runTool, TOOLS } from "../chat/tools.ts";
 import { PostgrestAdapter } from "./adapter.ts";
 import { runAsKeyOwner, type Sql } from "./gateway.ts";
+import { DATA_TOOLS, runDataTool } from "./data-tools.ts";
 import { createMcpHandler } from "./handler.ts";
 
 // MCP-over-HTTP for external agents, authenticated by a per-user API key
@@ -54,7 +55,18 @@ const handler = createMcpHandler({
   },
   runScoped: (userId, keyId, fn) =>
     runAsKeyOwner(pg as unknown as Sql, userId, keyId, (query) => fn(new PostgrestAdapter(query))),
-  runTool,
+  // The four nightly-health data tools go through the gateway wrapper
+  // (as_of guard, data_status, total_count); every other tool is runTool()
+  // exactly as before. The count queries run in the same read-only
+  // mcp_reader transaction, under the key owner's RLS.
+  runTool: (client, name, input, dataMode, reality) =>
+    DATA_TOOLS.includes(name)
+      ? runDataTool(name, input, () => runTool(client, name, input, dataMode, reality), {
+        dataMode,
+        reality,
+        count: async (sql, params) => Number((await (client as PostgrestAdapter).query(sql, params))[0]?.n ?? 0),
+      })
+      : runTool(client, name, input, dataMode, reality),
   fetchDomainReality,
   tools: TOOLS as never,
 });

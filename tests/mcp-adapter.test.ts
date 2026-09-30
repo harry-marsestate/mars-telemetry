@@ -38,7 +38,7 @@ Deno.test("builds the same select PostgREST would, with typed parameters and the
   const [q] = db.main();
   assertEquals(
     q.text,
-    `select coalesce(json_agg(t), '[]'::json)::text as body from (select "lot_name", "lot_code", "value", "recorded_at" from public."lot_analyses" where "lot_code" = $1::text and "recorded_at" >= $2::timestamp with time zone and "vintage" <= $3::integer order by "recorded_at" desc limit 50) t`,
+    `select coalesce(json_agg(mcp_row), '[]'::json)::text as body from (select "lot_name", "lot_code", "value", "recorded_at" from public."lot_analyses" where "lot_code" = $1::text and "recorded_at" >= $2::timestamp with time zone and "vintage" <= $3::integer order by "recorded_at" desc limit 50) mcp_row`,
   );
   assertEquals(q.params, ["MA23CSV3", "2023-01-01", "2024"]);
 });
@@ -49,7 +49,7 @@ Deno.test("no limit -> MAX_ROWS; a limit above MAX_ROWS is capped, never raised"
     let q = db.adapter.from("lot_analyses").select("lot_code");
     if (lim !== undefined) q = q.limit(lim);
     await q;
-    assertMatch(db.main()[0].text, new RegExp(` limit ${want}\\) t$`));
+    assertMatch(db.main()[0].text, new RegExp(` limit ${want}\\) mcp_row$`));
   }
   assertEquals(MAX_ROWS, 1000);
 });
@@ -83,7 +83,7 @@ Deno.test("maybeSingle: 0 -> null, 1 -> row, >1 -> PGRST116 (as postgrest-js)", 
 
 Deno.test("refuses relations outside the allowlist, view dependencies included", () => {
   const { adapter } = fakeDb();
-  for (const rel of ["vessels", "user_profiles", "lab_samples", "labour_actuals", "agent_api_keys", "daily_derived", 'lot_analyses"; drop table x; --']) {
+  for (const rel of ["sensor_readings", "user_profiles", "lab_samples", "labour_actuals", "agent_api_keys", "daily_weather", "real_data_sources", "vessel_snapshots", 'lot_analyses"; drop table x; --']) {
     assertThrows(() => adapter.from(rel), Error, "not in the MCP allowlist");
   }
 });
@@ -93,7 +93,8 @@ Deno.test("refuses unsupported builder usage loudly instead of mis-translating",
   assertThrows(() => adapter.from("lot_analyses").select("*"), Error, "unsupported");
   assertThrows(() => adapter.from("lot_analyses").select("lot_code").not("lot_code", "eq", "x"), Error, "unsupported");
   assertThrows(() => adapter.from("lot_analyses").select("lot_code").order("lot_code", { nullsFirst: true }), Error, "unsupported");
-  await assertRejects(() => adapter.rpc("series_bucketed", {}), Error, "not callable");
+  await assertRejects(() => adapter.rpc("accessible_blocks", {}), Error, "not callable");
+  await assertRejects(() => adapter.rpc("mcp_key_scope", {}), Error, "not callable");
   await assertRejects(() => adapter.rpc("mcp_authenticate", {}), Error, "not callable");
 });
 
@@ -110,7 +111,22 @@ Deno.test("rpc: current_data_mode scalar and domain_reality rows, capped", async
   const r = await db2.adapter.rpc("domain_reality", { p_vintages: [2025, 2026] });
   assertEquals(r.data, [{ domain: "air_temp", vintage: 2026, is_real: true }]);
   assertEquals(db2.main()[0].params, [["2025", "2026"]]);
-  assertMatch(db2.main()[0].text, / limit 1000\) t$/);
+  assertMatch(db2.main()[0].text, / limit 1000\) mcp_row$/);
+});
+
+Deno.test("rpc: series_bucketed / anomalies_eval use named, typed arguments; omitted ones take the function default", async () => {
+  const db = fakeDb([{ t: "2024-07-01T00:00:00+00:00", v: 1.5 }]);
+  const r = await db.adapter.rpc("series_bucketed", { p_metric: "air_temp", p_block: null, p_vintage: 2024, p_start: "2024-07-01", p_end: "2024-07-02", p_bucket: "1 hours", p_agg: "avg" });
+  assertEquals(r, { data: [{ t: "2024-07-01T00:00:00+00:00", v: 1.5 }], error: null });
+  assertEquals(db.main()[0].text,
+    "select coalesce(json_agg(mcp_row), '[]'::json)::text as body from (select * from public.series_bucketed(p_metric => $1::text, p_block => $2::text, p_vintage => $3::integer, p_start => $4::timestamptz, p_end => $5::timestamptz, p_bucket => $6::interval, p_agg => $7::text) limit 1000) mcp_row");
+  assertEquals(db.main()[0].params, ["air_temp", null, "2024", "2024-07-01", "2024-07-02", "1 hours", "avg"]);
+
+  const db2 = fakeDb([]);
+  await db2.adapter.rpc("anomalies_eval", { p_vintage: 2024, p_as_of: "2024-07-06T02:00:00Z" });
+  assertMatch(db2.main()[0].text, /public\.anomalies_eval\(p_vintage => \$1::integer, p_as_of => \$2::timestamptz\) limit 1000\) mcp_row$/);
+  await assertRejects(() => db2.adapter.rpc("anomalies_eval", { p_vintage: 2024, "p_as_of) ; drop": 1 }), Error, "unsupported");
+  await assertRejects(() => db2.adapter.rpc("mcp_authorize_call", {}), Error, "not callable");
 });
 
 Deno.test("runAsKeyOwner: read-only, claims, role switch, then asserts before running the tool", async () => {

@@ -18,6 +18,15 @@ export const MCP_TOOLS: readonly string[] = [
   "get_wine_lab_results",
   "get_lot_analyses",
   "get_labour_summary",
+  // Nightly-health round (docs/SECURITY.md, "Nightly health checks"): the
+  // round-one deferral reversed on purpose, with guardrails -- per-key scopes,
+  // data_status tags, explicit as_of for get_anomalies, column-level grants,
+  // rate limits, total_count, parity tests. A key must be granted these
+  // explicitly (agent_api_keys.allowed_tools); no existing key has them.
+  "get_series",
+  "get_derived_series",
+  "get_anomalies",
+  "get_vessels",
 ];
 
 // Tables/views the tool code may name in from(). The standing rule is
@@ -38,6 +47,8 @@ export const TABLES_AND_VIEWS: Readonly<Record<string, string>> = {
     "Base table, exception: InnoVint lab rows have no reissue/superseded concept, so there is no *_current view to prefer; operator-only RLS. Duplicate lot objects are handled via lot_canonical_map instead (docs/SECURITY.md, 'get_lot_analyses duplicate-lot bug').",
   lot_canonical_map:
     "Base table, exception: the dedup map itself (duplicate_lot_code -> canonical_lot_code) that get_lot_analyses uses to exclude superseded InnoVint duplicates; no *_current counterpart by construction.",
+  daily_derived: "security_invoker view (get_derived_series, and the gateway's total_count); column-level grant only (20260930040000).",
+  vessels: "Base table, operator-only RLS (get_vessels, and the gateway's total_count); column-level grant only, no capacity_suspect/current_lot_id.",
 };
 
 // SELECT-granted to mcp_reader ONLY because the security_invoker views above
@@ -50,6 +61,18 @@ export const VIEW_DEPENDENCIES: Readonly<Record<string, string>> = {
   labour_actuals: "Beneath labour_actuals_by_category, labour_actuals_by_month, labour_vintage_coverage.",
   ets_lot_bridge: "Beneath ets_lot_analyses_reconciliation.",
   ets_analyte_bridge: "Beneath ets_lot_analyses_reconciliation.",
+  daily_weather: "Beneath daily_derived (all its columns are read by the view's first CTE); column-level grant.",
+  vintage_climate_calibration: "Beneath daily_derived (vintage, scalar only).",
+};
+
+// Read by the SECURITY INVOKER functions the data tools call (series_bucketed,
+// anomalies_eval) or by the RLS policy on one of those tables -- never named by
+// tool code. Column-level grants only (20260930040000).
+export const RPC_DEPENDENCIES: Readonly<Record<string, string>> = {
+  sensor_readings: "Read by series_bucketed() and anomalies_eval(); RLS (sensor_read) applies under the key owner's identity.",
+  real_data_sources: "Read by series_bucketed()'s real-over-mock precedence.",
+  metric_registry: "Read by sensor_readings' RLS policy (metric_key, min_role).",
+  anomaly_thresholds: "Read by anomalies_eval().",
 };
 
 // Functions the tool path calls through the adapter's rpc() (as mcp_reader),
@@ -57,6 +80,8 @@ export const VIEW_DEPENDENCIES: Readonly<Record<string, string>> = {
 export const RPCS: Readonly<Record<string, string>> = {
   current_data_mode: "SECURITY DEFINER, keyed off auth.uid(): the key owner's own data_mode, resolved exactly as chat does.",
   domain_reality: "SECURITY DEFINER, caller-independent real/simulated classification; resolved exactly as chat does.",
+  series_bucketed: "SECURITY INVOKER time-bucketed sensor series (get_series); caller's RLS applies.",
+  anomalies_eval: "SECURITY INVOKER anomaly rule evaluation (get_anomalies); caller's RLS applies.",
   mcp_authenticate: "SECURITY DEFINER key lookup; EXECUTE for mcp_gateway only. Returns (key_id, user_id) for an active key.",
   mcp_log_call: "SECURITY DEFINER audit append into agent_api_key_calls; EXECUTE for mcp_gateway only, gated on the key hash.",
   mcp_key_scope: "SECURITY DEFINER: an active key's allowed_tools and rate limits; EXECUTE for mcp_gateway only (tools/list).",

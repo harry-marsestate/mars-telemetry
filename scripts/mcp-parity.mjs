@@ -24,6 +24,13 @@
 //   node scripts/mcp-parity.mjs record  --user <uuid> --role authenticated|mcp_reader --out <file>
 //   node scripts/mcp-parity.mjs snippet --in <file> > replay.js
 //   node scripts/mcp-parity.mjs compare --in <file> --browser <browser-results.json>
+//   node scripts/mcp-parity.mjs replay  --in <file> --email <synthetic user email> --out <results.json>
+//       Same replay as `snippet`, from Node instead of a browser tab: the real
+//       supabase-js (the version web/index.html pins; `npm i --no-save
+//       @supabase/supabase-js@2.117.2` in scripts/ first) against the live REST
+//       API, signed in as one of the SYNTHETIC health-check users only, via an
+//       admin-generated magic link verified on the spot (nothing is emailed, no
+//       password is used; the session is signed out at the end).
 //   node scripts/mcp-parity.mjs outputs --a <record file> --b <record file>   (runTool output equality)
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -55,6 +62,19 @@ const INPUTS = [
   ["get_labour_summary", { vintage: 2026, period_month: "2026-08" }],
   ["get_labour_summary", { period_month: "2026-01" }],
   ["get_labour_summary", { job_category: "Canopy" }],
+  // The four nightly-health data tools (step g): both RPC paths, the view,
+  // the RLS-scoped vessels table, and real + simulated vintages.
+  ["get_series", { metric: "air_temp", start: "2024-07-05T00:00:00Z", end: "2024-07-07T00:00:00Z", bucket_hours: 6 }],
+  ["get_series", { metric: "soil_moisture", block: "B2", vintage: 2024, start: "2024-07-01T00:00:00Z", end: "2024-07-08T00:00:00Z", bucket_hours: 24 }],
+  ["get_series", { metric: "air_temp", vintage: 2026, start: "2026-09-27T00:00:00Z", end: "2026-09-29T00:00:00Z", bucket_hours: 1, agg: "avg" }],
+  ["get_derived_series", { vintage: 2024 }],
+  ["get_derived_series", { vintage: 2026, start_date: "2026-08-01", end_date: "2026-09-15" }],
+  ["get_anomalies", { vintage: 2024, as_of: "2024-07-06T02:00:00Z" }],
+  ["get_anomalies", { vintage: 2024, as_of: "2024-04-06T14:00:00Z" }],
+  ["get_anomalies", { vintage: 2026, as_of: "2026-09-29T12:00:00Z" }],
+  ["get_vessels", {}],
+  ["get_vessels", { include_archived: true }],
+  ["get_vessels", { vessel_type: "barrel", current_lot_name: "Cab" }],
 ];
 // Direct max-rows probes: lot_analyses has more rows than MAX_ROWS.
 const PROBES = [
@@ -112,6 +132,7 @@ function note(spec, r) {
 async function inScope(db, role, user, fn) {
   await db.query("begin");
   try {
+    await db.query("set local statement_timeout = '15s'");
     if (role === "mcp_reader") await db.query("grant mcp_reader to postgres with inherit false, set true"); // transaction-local: rolled back below
     await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: user, role })]);
     await db.query(`set local role ${role === "mcp_reader" ? "mcp_reader" : "authenticated"}`);
@@ -217,6 +238,41 @@ function outputs() {
   if (same !== a.outputs.length) process.exitCode = 1;
 }
 
-const cmd = { record, snippet, compare, outputs }[process.argv[2]];
+async function replay() {
+  const rec = JSON.parse(readFileSync(arg("in"), "utf8"));
+  const email = arg("email"), out = arg("out");
+  if (!/^harry\.c\+health-[a-z0-9-]+@marscap\.investments$/.test(email ?? "") || !out) throw new Error("replay --in <file> --email <synthetic health-check user> --out <file>");
+  const { createClient } = await import("@supabase/supabase-js");
+  const url = new URL(env.SUPABASE_URL).origin, service = env.SUPABASE_SERVICE_ROLE_KEY, anonKey = env.SUPABASE_ANON_KEY ?? env.SUPABASE_PUBLISHABLE_KEY;
+  if (!anonKey) throw new Error("no publishable/anon key in .env");
+  const link = await fetch(`${url}/auth/v1/admin/generate_link`, {
+    method: "POST",
+    headers: { apikey: service, Authorization: `Bearer ${service}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "magiclink", email }),
+  });
+  const lj = await link.json().catch(() => ({}));
+  const tokenHash = lj.hashed_token ?? lj.properties?.hashed_token;
+  if (!link.ok || !tokenHash) throw new Error(`generate_link failed: HTTP ${link.status}`);
+  const sb = createClient(url, anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const { error: vErr } = await sb.auth.verifyOtp({ token_hash: tokenHash, type: "magiclink" });
+  if (vErr) throw new Error(`verifyOtp failed: ${vErr.message}`);
+  try {
+    const user = (await sb.auth.getUser()).data.user?.id ?? null;
+    const results = [];
+    for (const s of rec.specs) {
+      let q = s.kind === "rpc" ? sb.rpc(s.name, s.params) : sb.from(s.rel);
+      if (s.kind === "from") for (const [m, a] of s.calls) q = q[m](...a);
+      const { data, error } = await q;
+      const ordered = s.kind === "from" && s.calls.some(([m]) => m === "order" || m === "maybeSingle");
+      results.push({ count: Array.isArray(data) ? data.length : data == null ? 0 : 1, hash: error ? null : sha(canonical(data, ordered)), error: error ? error.message : null });
+    }
+    writeFileSync(out, JSON.stringify({ user, results }));
+    console.log(`replayed ${results.length} queries through supabase-js as ${user} -> ${out}`);
+  } finally {
+    await sb.auth.signOut();
+  }
+}
+
+const cmd = { record, snippet, compare, outputs, replay }[process.argv[2]];
 if (!cmd) { console.error("usage: see header"); process.exit(2); }
 Promise.resolve(cmd()).catch((e) => { console.error(`error: ${e.message}`); process.exit(1); });

@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { type CallToolRequest, CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { DomainReality, ToolResult } from "../chat/tools.ts";
 import { MCP_TOOLS } from "./allowlist.ts";
+import { gatewayToolDef, type GatewayResult } from "./data-tools.ts";
 import { parseBearerKey, sha256Hex } from "./auth.ts";
 
 // The request flow (docs/SECURITY.md, MCP entries -- revised auth, Option B'):
@@ -45,7 +46,7 @@ export interface McpDeps {
   // deno-lint-ignore no-explicit-any
   runScoped<T>(userId: string, keyId: string, fn: (client: any) => Promise<T>): Promise<T>;
   // deno-lint-ignore no-explicit-any
-  runTool(supabase: any, name: string, input: Record<string, unknown>, dataMode: string, domainReality: DomainReality): Promise<ToolResult>;
+  runTool(supabase: any, name: string, input: Record<string, unknown>, dataMode: string, domainReality: DomainReality): Promise<ToolResult | GatewayResult>;
   // deno-lint-ignore no-explicit-any
   fetchDomainReality(supabase: any): Promise<DomainReality>;
   tools: ToolDef[];
@@ -103,7 +104,9 @@ export function validateArgs(tool: ToolDef, args: unknown): string | null {
 }
 
 export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Response> {
-  const exposed = deps.tools.filter((t) => MCP_TOOLS.includes(t.name));
+  // gatewayToolDef: identical to chat's schema except get_anomalies' as_of is
+  // required through the gateway (data-tools.ts).
+  const exposed = deps.tools.filter((t) => MCP_TOOLS.includes(t.name)).map(gatewayToolDef);
   // Fail at startup, not per request, if chat/tools.ts ever renames or drops
   // a tool this server promises to expose.
   if (exposed.length !== MCP_TOOLS.length) {
@@ -204,7 +207,7 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
         return { content: [{ type: "text", text: `Invalid arguments: ${invalid}` }], isError: true };
       }
 
-      let result: ToolResult;
+      let result: ToolResult | GatewayResult;
       try {
         result = await deps.runScoped(userId, keyId, async (client) => {
           // Same per-request resolution chat/index.ts does, through the same
@@ -221,7 +224,8 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
         result = { content: "Tool execution failed unexpectedly.", isError: true };
       }
       await log(result.isError);
-      return { content: [{ type: "text", text: result.content }], isError: result.isError };
+      const structured = "structuredContent" in result ? result.structuredContent : undefined;
+      return { content: [{ type: "text", text: result.content }], isError: result.isError, ...(structured ? { structuredContent: structured } : {}) };
     });
 
     const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

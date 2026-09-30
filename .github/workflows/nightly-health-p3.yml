@@ -1,0 +1,39 @@
+# P3 of the nightly health checks (docs/SECURITY.md, "Nightly health checks"):
+# the dashboard as three synthetic users, in a real Chrome, compared with the
+# MCP gateway; results recorded as health_writer. 12:20 UTC, after P1 (12:00)
+# and P2 (12:10), finished well before the 12:40 prune.
+name: nightly-health-p3
+
+on:
+  schedule:
+    - cron: "20 12 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-health-p3
+  cancel-in-progress: false
+
+jobs:
+  p3-frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - name: Install script dependencies (lockfile only)
+        run: npm ci --prefix scripts --ignore-scripts --no-audit --no-fund
+      - name: Run P3 against the live dashboard
+        env:
+          P3_OPERATOR_PASSWORD: ${{ secrets.P3_OPERATOR_PASSWORD }}
+          P3_CUSTOMER_PASSWORD: ${{ secrets.P3_CUSTOMER_PASSWORD }}
+          P3_CUSTOMER_B2_PASSWORD: ${{ secrets.P3_CUSTOMER_B2_PASSWORD }}
+          P3_MCP_KEY: ${{ secrets.P3_MCP_KEY }}
+          HEALTH_WRITER_DB_URL: ${{ secrets.HEALTH_WRITER_DB_URL }}
+        run: node scripts/p3-frontend.mjs --chrome /usr/bin/google-chrome

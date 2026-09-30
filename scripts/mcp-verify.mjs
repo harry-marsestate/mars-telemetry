@@ -31,7 +31,9 @@ const env = Object.fromEntries(
 const FN_URL = `${new URL(env.SUPABASE_URL).origin}/functions/v1/mcp`;
 const COLIN_A = "87b9d9a0-9f1f-4609-8950-c92906c5029c";
 const COLIN_B = "03b52829-645c-4b40-9842-ecbf81e4338d";
-const CUSTOMER = "9782853b-f6be-40a9-83cd-47407b3de7f1";
+// The synthetic HEALTH-CUST-B2 customer (docs/SECURITY.md, "Synthetic users").
+// It replaced 9782853b (ACCT-TEST), which was removed on 2026-09-30.
+const CUSTOMER = "30d45c71-d173-4391-b572-607481c8367f";
 const PENDING = "749d26a6-068a-43ed-ac23-c9ecefeab5fa";
 
 const args = process.argv.slice(2);

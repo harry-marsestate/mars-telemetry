@@ -50,3 +50,9 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/mcp/deno.json"
 entrypoint = "./functions/mcp/index.ts"
+
+[functions.health-probe]
+enabled = true
+verify_jwt = false
+import_map = "./functions/health-probe/deno.json"
+entrypoint = "./functions/health-probe/index.ts"

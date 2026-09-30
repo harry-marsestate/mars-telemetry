@@ -28,6 +28,11 @@ Deno.test("runHealthTool calls exactly one function each; errors are generic unl
   await runHealthTool(client, "get_health_history", { days: 30 });
   await runHealthTool(client, "get_health_baselines", {});
   assertEquals(calls, [["health_system_status", undefined], ["health_history", { p_days: 7 }], ["health_history", { p_days: 30 }], ["health_baselines", undefined]]);
+  for (const days of [0, 31, 2.5, "7"]) {
+    const bad = await runHealthTool(client, "get_health_history", { days });
+    assertEquals([bad.isError, bad.content], [true, "days must be an integer between 1 and 30"]);
+  }
+  assertEquals(calls.length, 4, "out-of-range days never reach SQL");
   const deny = await runHealthTool({ rpc: () => Promise.resolve({ data: null, error: { message: "health tools are available to operator accounts only" } }) }, "get_system_health", {});
   assertEquals([deny.isError, deny.content], [true, "health tools are available to operator accounts only"]);
   const leak = await runHealthTool({ rpc: () => Promise.resolve({ data: null, error: { message: 'relation "system_health.x" secret detail' } }) }, "get_system_health", {});

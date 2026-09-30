@@ -54,6 +54,7 @@ def run() -> None:
                 vintage,
                 ["relative_humidity_2m", "shortwave_radiation", "precipitation"],
                 precipitation_unit="inch",
+                models=db.WEATHER_MODEL,
             )
 
             humidity_rows, humidity_nulls = _rows_from_series(

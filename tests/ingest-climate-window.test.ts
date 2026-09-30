@@ -1,8 +1,8 @@
 // ingest-climate-2026's upsert/refresh window (window.ts).
 //   npx deno test --no-lock tests/ingest-climate-window.test.ts
-import { assertEquals } from "jsr:@std/assert@1";
+import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
-  addDays, archiveUrl, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
+  addDays, archiveUrl, CLIMATE_SOURCES, requestedModel, fetchWindowEnd, fetchWithEndFallback, isEndDateOutOfRange, lastCompletePacificDay,
   lastElapsedHourMs, pacificYear, stampUtc,
 } from "../supabase/functions/ingest-climate-2026/window.ts";
 
@@ -135,4 +135,24 @@ Deno.test("pacificYear decides the vintage at the Pacific New Year, not UTC's", 
   assertEquals(pacificYear(Date.parse("2027-01-01T07:30:00Z")), 2026); // 23:30 PST Dec 31
   assertEquals(pacificYear(Date.parse("2027-01-01T08:30:00Z")), 2027); // 00:30 PST Jan 1
   assertEquals(pacificYear(Date.parse(stampUtc("2026-09-30T13:00"))), 2026);
+});
+
+Deno.test("climate sources are pinned: ecmwf_ifs for weather, era5_land for soil, with matching labels", () => {
+  assertEquals([CLIMATE_SOURCES.weather.model, CLIMATE_SOURCES.weather.source_system, CLIMATE_SOURCES.weather.sensor_id], ["ecmwf_ifs", "open_meteo_ecmwf_ifs", "OM-IFS"]);
+  assertEquals([CLIMATE_SOURCES.soil.model, CLIMATE_SOURCES.soil.source_system, CLIMATE_SOURCES.soil.sensor_id], ["era5_land", "open_meteo_era5_land", "OM-ERA5-LAND"]);
+  for (const g of Object.values(CLIMATE_SOURCES)) {
+    assertEquals(requestedModel(archiveUrl("2026-09-16", "2026-09-30", [...g.vars], g.model)), g.model);
+    assert(!/era5/i.test(g.source_system) || g.model.startsWith("era5"), "an ERA5 label only for an ERA5 model");
+  }
+  assertEquals(requestedModel(archiveUrl("2026-09-16", "2026-09-30", ["temperature_2m"])), null, "no models param = best_match");
+});
+
+Deno.test("ingest source: every archive fetch passes a pinned model, and rows carry the source's labels", async () => {
+  const src = await Deno.readTextFile(new URL("../supabase/functions/ingest-climate-2026/index.ts", import.meta.url));
+  const calls = [...src.matchAll(/fetchHourly\(startStr, e, ([^)]*)\)/g)].map((m) => m[1]);
+  assertEquals(calls, ["[...CLIMATE_SOURCES.weather.vars], CLIMATE_SOURCES.weather.model", "[...CLIMATE_SOURCES.soil.vars], CLIMATE_SOURCES.soil.model"]);
+  assert(!/open_meteo_era5"|"OM-ERA5"/.test(src), "no hard-coded legacy label");
+  assert(src.includes("sensor_id: source.sensor_id") && src.includes("source_system: source.source_system"));
+  assertEquals((src.match(/upsertMetric\(ctx, results, cutoffMs, "[a-z_]+", weatherData\.data!, "[a-z_0-9]+", VINTAGE, \d+, CLIMATE_SOURCES\.weather\)/g) ?? []).length, 3);
+  assertEquals((src.match(/upsertMetric\(ctx, results, cutoffMs, "[a-z_]+", soilData\.data!, "[a-z_0-9]+", VINTAGE, \d+, CLIMATE_SOURCES\.soil\)/g) ?? []).length, 2);
 });

@@ -14,8 +14,25 @@ import os
 import psycopg2
 import psycopg2.extras
 
-SOURCE_SYSTEM = "open_meteo_era5"
-SENSOR_ID = "OM-ERA5"
+# Labels by the Open-Meteo model each metric is requested from -- the same
+# pinning as supabase/functions/ingest-climate-2026/window.ts
+# CLIMATE_SOURCES. Until 2026-09-30 every row here was labelled
+# open_meteo_era5 / OM-ERA5, but the atmospheric variables came from
+# best_match, i.e. ECMWF IFS (docs/SECURITY.md, "Climate rows were labelled
+# ERA5 but came from ECMWF IFS"). Callers must fetch with the matching
+# models= value (WEATHER_MODEL / SOIL_MODEL).
+WEATHER_MODEL = "ecmwf_ifs"
+SOIL_MODEL = "era5_land"
+SOIL_METRICS = {"soil_moisture", "soil_temp"}
+LABELS = {
+    WEATHER_MODEL: ("open_meteo_ecmwf_ifs", "OM-IFS"),
+    SOIL_MODEL: ("open_meteo_era5_land", "OM-ERA5-LAND"),
+}
+
+
+def labels_for(metric_key: str) -> tuple[str, str]:
+    """(source_system, sensor_id) for a metric's pinned model."""
+    return LABELS[SOIL_MODEL if metric_key in SOIL_METRICS else WEATHER_MODEL]
 
 
 def get_connection():
@@ -34,8 +51,8 @@ def upsert_sensor_readings(conn, rows: list[dict]) -> int:
     tank_id is always None (none of these metrics are fermentation data).
 
     ON CONFLICT target matches the table's real unique constraint
-    (metric_key, sensor_id, recorded_at) -- reusing SENSOR_ID/SOURCE_SYSTEM
-    for every row in this backfill makes this upsert naturally idempotent
+    (metric_key, sensor_id, recorded_at) -- one fixed (source_system,
+    sensor_id) per metric (labels_for) makes this upsert naturally idempotent
     on rerun, the same property the InnoVint upserts rely on.
     """
     if not rows:
@@ -55,12 +72,12 @@ def upsert_sensor_readings(conn, rows: list[dict]) -> int:
             [
                 (
                     r["metric_key"],
-                    SENSOR_ID,
+                    labels_for(r["metric_key"])[1],
                     None,
                     None,
                     r["recorded_at"],
                     r["value"],
-                    SOURCE_SYSTEM,
+                    labels_for(r["metric_key"])[0],
                     r["vintage"],
                 )
                 for r in rows

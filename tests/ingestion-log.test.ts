@@ -101,6 +101,12 @@ Deno.test("non-JSON response body still yields a row", async () => {
   assertEquals([calls[0].p_status, calls[0].p_http_status, calls[0].p_error], ["error", 504, "no JSON response body"]);
 });
 
+Deno.test("summarizeClimate keeps the models the ingest actually requested", () => {
+  const s = summarizeClimate({ ...CLIMATE_OK, requested_models: { weather: "ecmwf_ifs", soil: "era5_land" } });
+  assertEquals((s.detail as Record<string, unknown>).requested_models, { weather: "ecmwf_ifs", soil: "era5_land" });
+  assertEquals((summarizeClimate(CLIMATE_OK).detail as Record<string, unknown>).requested_models, null);
+});
+
 Deno.test("summarizeClimate: rows, per-metric detail, errors incl. refresh", () => {
   const s = summarizeClimate(CLIMATE_OK);
   assertEquals([s.rows_written, s.error], [1509, null]);

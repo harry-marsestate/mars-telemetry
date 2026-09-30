@@ -48,8 +48,13 @@ def fetch_hourly(
     our confirmed site elevation. `models=era5_land` is required for
     non-null soil_moisture_*/soil_temperature_* coverage at this location
     -- confirmed directly (the default blended archive endpoint does not
-    reliably return ERA5-Land soil variables here); air_temp does not
-    need it.
+    reliably return ERA5-Land soil variables here). `models` is REQUIRED
+    for every call since 2026-09-30: the default best_match served ECMWF
+    IFS for the atmospheric variables here, and which model it serves is
+    Open-Meteo's to change, so every request pins db.WEATHER_MODEL
+    ("ecmwf_ifs") or db.SOIL_MODEL ("era5_land") -- see db.LABELS and
+    docs/SECURITY.md, "Climate rows were labelled ERA5 but came from
+    ECMWF IFS".
 
     `precipitation_unit="inch"` matches the app's existing convention
     (mock precipitation is stored in inches) -- Open-Meteo defaults to mm
@@ -67,8 +72,9 @@ def fetch_hourly(
         "temperature_unit": "fahrenheit",
         "timezone": "America/Los_Angeles",
     }
-    if models:
-        params["models"] = models
+    if not models:
+        raise ValueError("fetch_hourly: pass models= (ecmwf_ifs or era5_land); best_match is not allowed")
+    params["models"] = models
     if precipitation_unit:
         params["precipitation_unit"] = precipitation_unit
 

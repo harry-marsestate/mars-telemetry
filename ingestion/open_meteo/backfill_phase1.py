@@ -86,7 +86,9 @@ def run() -> None:
         for vintage in VINTAGES:
             print(f"=== {vintage} ===")
 
-            temp_data = client.fetch_hourly(run_stamp, vintage, ["temperature_2m"])
+            temp_data = client.fetch_hourly(
+                run_stamp, vintage, ["temperature_2m"], models=db.WEATHER_MODEL
+            )
             temp_rows, temp_nulls = _rows_from_series(
                 temp_data, "temperature_2m", "air_temp", vintage
             )
@@ -100,7 +102,7 @@ def run() -> None:
                 run_stamp,
                 vintage,
                 ["soil_moisture_0_to_7cm", "soil_temperature_0_to_7cm"],
-                models="era5_land",
+                models=db.SOIL_MODEL,
             )
             moist_rows, moist_nulls = _rows_from_series(
                 soil_data, "soil_moisture_0_to_7cm", "soil_moisture", vintage, scale=100

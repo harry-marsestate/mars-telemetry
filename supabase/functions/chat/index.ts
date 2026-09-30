@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { DomainReality, fetchDomainReality, runTool, TOOLS } from "./tools.ts";
 import { callerProfile, resolveDisplayName } from "./profile.ts";
 import { callKimi, KIMI_MODEL } from "./kimi.ts";
+import { vintageContext } from "../_shared/vintage.ts";
 
 // RAG chat for Mars Estate/Mars Telemetry. ctx.supabase is RLS-scoped to the
 // caller's own JWT for every tool call -- deliberately never ctx.supabaseAdmin,
@@ -623,5 +624,8 @@ You only ever know what your tools return. If a tool returns no data for a quest
     ? `\n\nThis account is set to real-data-only mode. Any tool result containing "real_only_mode_blocked": true means the data exists but is simulated, not real, and has been withheld because of this account's setting -- read its "message" field and explain that plainly (e.g. "cellar humidity is simulated data, and this account is set to show only real data, so I can't report a figure there"). Never describe that as "no data exists" or as an error -- it's neither. Note get_labour_summary, get_berry_maturity, get_smoke_markers, and get_wine_lab_results never return this shape: none of these four have any simulated data left (or ever existing) to withhold, so a vintage with no rows (e.g. 2022 for labour; 2022 for berry maturity/smoke markers) is a genuine, real absence -- describe it the normal "no data" way, not as real-only-mode withholding.`
     : "";
 
-  return `${shared}\n\n${toneBlock}${accessNote}${realOnlyNote}`;
+  // The date and current vintage come from the harvest-year rule at request
+  // time (_shared/vintage.ts), so "which vintage is current" is never a year
+  // written into this prompt.
+  return `${shared}\n\n${vintageContext()}\n\n${toneBlock}${accessNote}${realOnlyNote}`;
 }

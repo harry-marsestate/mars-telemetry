@@ -690,7 +690,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
     <div class="chat">
       <div class="chat-hd">
         <div class="chat-ttl">Ask the estate</div>
-        <div class="chat-sub">Vineyard and winery telemetry &middot; Blocks 1&ndash;3 &middot; Vintages 2022&ndash;2026</div>
+        <div class="chat-sub" id="chat-sub">Vineyard and winery telemetry &middot; Blocks 1&ndash;3</div>
         <!-- Operator-only, hidden by default; shown from initChat() only when
              role==='operator'. Cosmetic gate ONLY -- the real enforcement is
              server-side in supabase/functions/chat/index.ts, since a customer
@@ -996,15 +996,52 @@ const ALL_IDS = BLOCKS.map(b=>b.id);
 const B = id => BLOCKS.find(b=>b.id===id);
 const acresOf = ids => +ids.reduce((s,i)=>s+B(i).acres,0).toFixed(2);
 
-const VINTAGES = [2022,2023,2024,2025,2026];
-const CURRENT  = 2026;
-const NOW      = new Date(2026,6,28,14,20,0);
-const VCOLOR   = {2022:'#C9603F',2023:'#7FA3D4',2024:'#6E9B72',2025:'#BE9C6A',2026:'#C6A961'};
+/* Clock and "current vintage" (docs/SECURITY.md, "Current vintage from the
+   harvest-year rule"). appNow() is the real clock. A TEST-ONLY override
+   (?test_now=<ISO instant>) is honoured only when this page is served from
+   localhost / 127.0.0.1 / [::1] -- the production host ignores it, so it
+   can't be activated there. The clock then runs on from that instant. */
+const TEST_NOW = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)
+  ? new URLSearchParams(location.search).get('test_now') : null;
+const TEST_OFFSET_MS = TEST_NOW && !isNaN(Date.parse(TEST_NOW)) ? Date.parse(TEST_NOW) - Date.now() : 0;
+function appNow(){ return new Date(Date.now() + TEST_OFFSET_MS); }
+function pacificYearMonth(d){
+  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Los_Angeles',year:'numeric',month:'2-digit'}).formatToParts(d);
+  return [Number(parts.find(x=>x.type==='year').value), Number(parts.find(x=>x.type==='month').value)];
+}
+// Vintage = harvest year; each begins November 1 Pacific. Same rule as
+// _shared/vintage.ts and public.harvest_vintage() (kept equal by tests/P3).
+function harvestVintage(d){ const [y,m]=pacificYearMonth(d); return m>=11 ? y+1 : y; }
+// A vintage's growing season runs Apr 1 - Oct 31 of its own year.
+function seasonStarted(v, d=appNow()){ const [y,m]=pacificYearMonth(d); return y>v || (y===v && m>=4); }
+const FIRST_VINTAGE = 2022;
+const CURRENT  = harvestVintage(appNow());
+const VINTAGES = Array.from({length: CURRENT-FIRST_VINTAGE+1}, (_,i)=>FIRST_VINTAGE+i);
+// A fact about the seeded MOCK data, not "the current vintage": the mock
+// generator narrates MOCK_SEASON's in-progress season, frozen at MOCK_NOW.
+// While MOCK_SEASON is current the live-ticking NOW starts there (unchanged
+// behaviour); any later current vintage runs on the real clock.
+const MOCK_SEASON = 2026;
+const NOW      = CURRENT===MOCK_SEASON ? new Date(MOCK_SEASON,6,28,14,20,0) : appNow();
+// "Now" for REAL-data queries of the current vintage (was MOCK_NOW always).
+function currentRealAnchor(){ return CURRENT===MOCK_SEASON ? new Date(MOCK_NOW) : appNow(); }
+const VCOLOR_BASE = {2022:'#C9603F',2023:'#7FA3D4',2024:'#6E9B72',2025:'#BE9C6A',2026:'#C6A961'};
+const VCOLOR_EXTRA = ['#9C7FC6','#5FA8A0','#D08A9A','#A3A35A'];
+const VCOLOR   = Object.fromEntries(VINTAGES.map(v=>[v, VCOLOR_BASE[v] || VCOLOR_EXTRA[(v-2027) % VCOLOR_EXTRA.length]]));
+// Simulated-data profiles exist ONLY for the seeded vintages. A vintage with
+// no profile never gets mock data (sample() refuses it): its panels show real
+// data or an honest empty state.
 const VCHAR = {2022:{t:+3.1,w:-.30,hs:-8, label:'hot, compressed harvest'},
                2023:{t:-2.4,w:+.42,hs:+10,label:'cool, long hang time'},
                2024:{t:+0.3,w:+.06,hs:0,  label:'textbook, even ripening'},
                2025:{t:+1.6,w:-.12,hs:-4, label:'warm, early veraison'},
-               2026:{t:+1.9,w:-.22,hs:-5, label:'warm, dry — in progress'}};
+               2026:{t:+1.9,w:-.22,hs:-5, label:'warm, dry'}};
+// Chat header: the vintage range follows the rule (was "2022-2026" in HTML).
+document.getElementById('chat-sub').innerHTML = `Vineyard and winery telemetry &middot; Blocks 1&ndash;3 &middot; Vintages ${FIRST_VINTAGE}&ndash;${CURRENT}`;
+function vintageLabel(y){
+  if(VCHAR[y]) return VCHAR[y].label + (y===CURRENT && seasonStarted(y) ? ' — in progress' : '');
+  return seasonStarted(y) ? 'season in progress' : 'season begins April 1';
+}
 // Cap on simultaneous vintage selection in the dropdown -- all 5 VINTAGES
 // entries are selectable in principle (groupedBars/legendFor/VCOLOR are all
 // already N-vintage-generic), but a chart with 5 overlapping lines reads as
@@ -1048,8 +1085,11 @@ const clearSky = d => {
   return day**1.28 * 1010 * (1+season(d)*.13);
 };
 
+window.__mockRefused = 0; // test instrumentation: refused mock requests
 function sample(key, scope, date, vintage){
-  const m=METRICS[key], vc=VCHAR[vintage]||VCHAR[2024];
+  // No simulated profile = no mock data, ever (was: fall back to 2024's).
+  if(!VCHAR[vintage]){ window.__mockRefused++; return null; }
+  const m=METRICS[key], vc=VCHAR[vintage];
   const hr=date.getHours()+date.getMinutes()/60, t=date.getTime()/36e5;
   const sk=key+'|'+scope+'|'+vintage;
   if(m.solar) return Math.round(clearSky(date) * (.74+.26*noise(sk+'c',t/9)));
@@ -1099,6 +1139,7 @@ function rainDay(date,v){
   const dy=doy(date), wet = dy<105||dy>295;
   const n=noise('rain|'+v, date.getTime()/864e5*3.7), thr = wet?.62:.955;
   if(n<thr) return 0;
+  if(!VCHAR[v]){ window.__mockRefused++; return null; }
   return +Math.max(0,((n-thr)/(1-thr))*(wet?1.55:.35)*(1+VCHAR[v].w)).toFixed(2);
 }
 // irrigblk's per-vintage subtitle -- four genuinely different states,
@@ -1412,7 +1453,7 @@ function pickInfo(t,v){
   const s=tankStart(t,v);
   return {date:doyDate(v,s), brix:+(24.8+noise('pk|'+t.id+'|'+v,v)*2.4).toFixed(1),
           ph:+(3.58+noise('ph|'+t.id+'|'+v,v)*.26).toFixed(2),
-          tons:+((t.vol/L_PER_TON)*(1+VCHAR[v].w*.18)).toFixed(2)};
+          tons:+((t.vol/L_PER_TON)*(1+(VCHAR[v]?VCHAR[v].w:0)*.18)).toFixed(2)};
 }
 
 /* §2b ── SERIES BUILDER ────────────────────────────── */
@@ -1464,7 +1505,7 @@ function endOf(v, align){
    must land inside the seeded data's actual date range. align:true now
    matches endOf(v,true) -- see clampToSeason above for why it's clamped. */
 function endOfReal(v, align){
-  if(v===CURRENT) return MOCK_NOW;
+  if(v===CURRENT) return currentRealAnchor();
   if(align){ const c=clampToSeason(NOW); return new Date(v, c.getMonth(), c.getDate(), c.getHours(), c.getMinutes()); }
   const fs=fermSeason(v);
   const d=doyDate(v, Math.round((fs.sd+fs.ed)/2)); d.setHours(14,0,0,0); return d;
@@ -1504,7 +1545,7 @@ function seriesEnd(v, align){
 // Real-data mirror of seriesEnd() -- same reasoning, anchored to MOCK_NOW
 // instead of the live-ticking NOW for the same reason endOfReal() is.
 function seriesEndReal(v, align){
-  if(!align && v===CURRENT) return new Date(MOCK_NOW);
+  if(!align && v===CURRENT) return currentRealAnchor();
   return new Date(v, 9, 31, 23, 59, 59, 999);
 }
 // Shared tab-level scroll offset for 30D/1Y-range panels -- 1D/5D always
@@ -1967,7 +2008,7 @@ async function refreshRealClimateVintages(){
     const [{data: counts, error: countsErr}, {data: derivation, error: derivationErr}, {data: asOf, error: asOfErr}] = await Promise.all([
       sb.rpc('real_metric_vintage_counts', {p_metrics: REAL_CLIMATE_RAW_METRICS, p_vintages: VINTAGES}),
       sb.from('metric_derivation').select('metric_key, derived_from'),
-      sb.rpc('real_climate_as_of_2026'),
+      sb.rpc('real_climate_as_of', { p_vintage: CURRENT }),
     ]);
     if(countsErr || derivationErr){
       console.error('refreshRealClimateVintages: falling back to last-known-real set', countsErr||derivationErr);
@@ -1981,11 +2022,11 @@ async function refreshRealClimateVintages(){
     }
     // real_climate_as_of_2026() returns null until every in-scope metric has
     // landed at least one real row -- a query failure is logged and leaves
-    // realClimateAsOf2026 at whatever it already was (null at boot, or the
+    // realClimateAsOfCurrent at whatever it already was (null at boot, or the
     // last successful value), same "never advance past the last successful
     // read" rule ingest-climate-2026 applies on the write side.
-    if(asOfErr) console.error('refreshRealClimateVintages: real_climate_as_of_2026 failed', asOfErr);
-    else realClimateAsOf2026 = asOf;
+    if(asOfErr) console.error('refreshRealClimateVintages: real_climate_as_of failed', asOfErr);
+    else realClimateAsOfCurrent = asOf;
   }catch(err){
     console.error('refreshRealClimateVintages: unexpected error, falling back to last-known-real set', err);
   }
@@ -2118,12 +2159,12 @@ function realOnlyEmptyState(label){
   return el('div','empty',`Not available in real-only mode — ${label} is simulated for this vintage.`);
 }
 
-// Latest real date ingest-climate-2026 has actually landed for 2026,
-// read via real_climate_as_of_2026() -- null until every in-scope metric
+// Latest real date ingest-climate-2026 has actually landed for the CURRENT
+// vintage, read via real_climate_as_of(CURRENT) (was real_climate_as_of_2026()) -- null until every in-scope metric
 // has at least one real row. Deliberately NOT NOW (the ticking demo
 // clock) or MOCK_NOW (the seeded mock data's fixed anchor): see
 // vineyardAsOfDate() below, the filter bar's only consumer.
-let realClimateAsOf2026 = null;
+let realClimateAsOfCurrent = null;
 
 // The vineyard filter bar's "as of" badge, for CURRENT specifically:
 // the real latest date ingest-climate-2026 has actually landed, not
@@ -2137,12 +2178,12 @@ let realClimateAsOf2026 = null;
 // seriesEnd(v,false) already returns that vintage's real Oct 31 season
 // end for them, which needed no "as of" ambiguity to begin with.
 function vineyardAsOfDate(v){
-  if(v===CURRENT && realClimateAsOf2026) return new Date(realClimateAsOf2026+'T00:00:00');
+  if(v===CURRENT && realClimateAsOfCurrent) return new Date(realClimateAsOfCurrent+'T00:00:00');
   return seriesEnd(v, false);
 }
 
 // current-vintage-date-range-freshness fix (2026-09-13): the prior merge
-// wired realClimateAsOf2026 into vineyardAsOfDate() (the filter bar's
+// wired realClimateAsOfCurrent into vineyardAsOfDate() (the filter bar's
 // label) but not into the CHART query ranges themselves -- those still
 // went through seriesEndReal(), whose v===CURRENT branch returns the
 // permanently-frozen MOCK_NOW (28 Jul 2026), the fixed anchor the seeded
@@ -2171,23 +2212,23 @@ function vineyardAsOfDate(v){
 // far it actually extends on that shared axis -- there was never a
 // "stuck in July" bug in compare mode, only in the single-vintage path.
 function realClimateSeriesEnd(metricKey, v, align){
-  if(align || v!==CURRENT || !isRealClimateVintage(metricKey, v) || !realClimateAsOf2026)
+  if(align || v!==CURRENT || !isRealClimateVintage(metricKey, v) || !realClimateAsOfCurrent)
     return seriesEndReal(v, align);
   // Matches MOCK_NOW's own time-of-day convention (14:20 Pacific) rather
   // than midnight, so a scroll/range window computed from this end lines
   // up on the same clock as the rest of this vintage's real data.
-  return new Date(realClimateAsOf2026+'T14:20:00-07:00');
+  return new Date(realClimateAsOfCurrent+'T14:20:00-07:00');
 }
 
 // Sibling to realClimateSeriesEnd() for callers with no single specific
 // metric in mind (anomalies_eval evaluates several real climate rules in
 // one RPC call) -- same underlying date, gated the same way (all 5
 // REAL_CLIMATE_RAW_METRICS being real for CURRENT is exactly what a
-// non-null realClimateAsOf2026 already means), but falls back to
+// non-null realClimateAsOfCurrent already means), but falls back to
 // endOfReal() (MOCK_NOW) rather than seriesEnd()'s NOW, since this feeds
 // a real-data RPC parameter, not a display label.
 function realClimateAsOfInstant(v){
-  return (v===CURRENT && realClimateAsOf2026) ? new Date(realClimateAsOf2026+'T14:20:00-07:00') : endOfReal(v);
+  return (v===CURRENT && realClimateAsOfCurrent) ? new Date(realClimateAsOfCurrent+'T14:20:00-07:00') : endOfReal(v);
 }
 
 // Panel id -> the metric/field key isRealClimateVintage()/
@@ -2274,7 +2315,7 @@ const REAL_FRUIT_VINTAGES = new Set([2022,2023,2024]);
 // resource -> Date | undefined, last successful ingest-innovint run per
 // phase (innovint_sync_status, written by the Edge Function -- see
 // docs/SECURITY.md's "winery Harvest 'as of'" entry). Deliberately NOT
-// the same mechanism as realClimateAsOf2026/vineyardAsOfDate: that one
+// the same mechanism as realClimateAsOfCurrent/vineyardAsOfDate: that one
 // derives freshness from the DATA's own content (the latest real
 // calendar day actually landed), which works for climate because one
 // day's data always lands as that same day. InnoVint's receipt/analysis
@@ -3418,7 +3459,7 @@ function renderFruitMock(box, ctx){
              {l:'Acres in view',v:fmt(ac,2),u:'ac'},
              {l:'Yield',v:fmt(tons/ac,2),u:'t/ac'},
              {l:'Lots',v:rows.length},
-             {l:'Vintage character',v:VCHAR[v].label.split(',')[0]}]);
+             {l:'Vintage character',v:vintageLabel(v).split(',')[0]}]);
   table(box,[{h:'Block'},{h:'Variety',dim:1},{h:'Tank'},{h:'Picked',dim:1},{h:'Tons',num:1},
              {h:'°Bx at pick',num:1},{h:'pH',num:1},{h:'Litres',num:1}],rows,
     ['Total','','','',fmt(tons,2),'','',fmt(tk.reduce((s,t)=>s+t.vol,0),0)]);
@@ -3769,7 +3810,7 @@ function buildVintageGroup(tab){
     // cap===1 (winery today) is single-select -- a checkbox affordance implies
     // multi-select, which vineyard's cap>1 dropdown genuinely is and this isn't.
     opt.innerHTML=`<span class="${cap===1?'vdd-radio':'vdd-check'}"></span><span class="vdd-dot" style="--c:${VCOLOR[y]}"></span>
-      <span class="vdd-label"><span class="vdd-y">${y}</span><span class="vdd-sub">${y===CURRENT?'current · live feed':VCHAR[y].label}</span></span>`;
+      <span class="vdd-label"><span class="vdd-y">${y}</span><span class="vdd-sub">${y===CURRENT?(seasonStarted(y)?'current · live feed':'current · season begins April 1'):vintageLabel(y)}</span></span>`;
     if(inert){
       // Cap reached: leave unselected options visible but inert, rather than
       // hiding them -- the user can see what they'd need to deselect first.
@@ -3855,7 +3896,7 @@ function buildVintageMeta(tab){
     ? `synced ${dstr(synced)}, ${synced.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}`
     : `as of ${dstr(seriesEnd(v, false))} ${v}`;
   meta.innerHTML=`<div class="fmeta-txt">${asOfLine}</div>
-     <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`;
+     <div class="fmeta-txt">${selV(tab).map(y=>y+': '+vintageLabel(y)).join('<br>')}</div>`;
   return meta;
 }
 
@@ -3900,10 +3941,15 @@ function renderFilters(tab){
   const live=st.vintages.includes(CURRENT);
   const meta=el('div','fmeta');
   meta.innerHTML = tab==='vineyard'
-    ? `<div class="live ${live?'on':'off'}"><span class="pulse"></span>${live?'Live feed':'Archive · '+primV(tab)}</div>
+    ? (live && !seasonStarted(CURRENT)
+      ? `<div class="live off"><span class="pulse"></span>Off-season · ${CURRENT}</div>
+         <div class="fmeta-txt">${st.blocks.length} of 3 blocks · ${fmt(acresOf(selB(tab)),2)} acres</div>
+         <div class="fmeta-txt">${CURRENT} season begins April 1</div>
+         <div class="fmeta-txt">${selV(tab).map(y=>y+': '+vintageLabel(y)).join('<br>')}</div>`
+      : `<div class="live ${live?'on':'off'}"><span class="pulse"></span>${live?'Live feed':'Archive · '+primV(tab)}</div>
        <div class="fmeta-txt">${st.blocks.length} of 3 blocks · ${fmt(acresOf(selB(tab)),2)} acres</div>
        <div class="fmeta-txt">as of ${dstr(vineyardAsOfDate(primV(tab)))} ${primV(tab)}</div>
-       <div class="fmeta-txt">${selV(tab).map(y=>y+': '+VCHAR[y].label).join('<br>')}</div>`
+       <div class="fmeta-txt">${selV(tab).map(y=>y+': '+vintageLabel(y)).join('<br>')}</div>`)
     : `<div class="live on"><span class="pulse"></span>Cellar sensors live</div>`;
   host.appendChild(meta);
 }
@@ -4096,6 +4142,14 @@ function applyVineyardRealtimeInsert(row){
 }
 async function paintOverviewV(tab, c, animate){
   const g=$('#ovg-'+tab); if(!g) return;
+  // A vintage with no simulated profile, before its season: say so instead
+  // of a row of empty tiles (season gate, see seasonGate()).
+  const offSeason=c.vintages.find(v=>!VCHAR[v] && !seasonStarted(v));
+  if(offSeason){
+    g.innerHTML=`<div class="stat" style="grid-column:1/-1"><div class="stat-l">Off-season</div>
+      <div class="stat-d">The ${offSeason} season begins April 1. ${offSeason-1} is the latest complete season &mdash; choose it under Vintage.</div></div>`;
+    return;
+  }
   const stats = await overviewStats(tab,c);
   if(!stats) return;
   g.innerHTML=stats.map(s=>`<div class="stat" data-key="${s.key}">
@@ -4122,6 +4176,13 @@ async function paintOverviewW(animate){
   // wineryOverviewCache stays null when blocked, which also makes
   // updateWineryTile() (the realtime-insert path) a safe no-op -- it
   // already early-returns on !wineryOverviewCache.
+  // Cellar sensors are simulated for every seeded vintage and have no real
+  // source; a vintage with no simulated profile gets no mock cellar data.
+  if(!VCHAR[CURRENT]){
+    wineryOverviewCache = null;
+    g.innerHTML = `<div class="stat" style="grid-column:1/-1"><div class="stat-d">No ${CURRENT} cellar data &mdash; the cellar sensors are simulated for earlier vintages and have no real source.</div></div>`;
+    return;
+  }
   if(realOnlyBlocked('cellar_temp', [CURRENT])){
     wineryOverviewCache = null;
     g.innerHTML = `<div class="stat" style="grid-column:1/-1"><div class="stat-d">Not available in real-only mode — cellar sensors are simulated.</div></div>`;
@@ -4185,6 +4246,35 @@ function unsubscribeOverviewRealtime(){
 }
 
 /* Panel construction */
+/* Season gate (docs/SECURITY.md, "Current vintage from the harvest-year
+   rule"). A vintage with no simulated profile (VCHAR) -- 2027 onward -- is
+   never shown mock data. For such a vintage a panel renders only if its data
+   is REAL for that vintage (domain_reality, strict: unknown = not real);
+   otherwise it shows an honest state: before April 1 "the season begins
+   April 1", after that "no real data source for this panel yet".
+   Vintage-agnostic panels (the block map; current vessel inventory) always
+   render. Seeded vintages (2022-2026) are untouched. */
+const VINTAGE_AGNOSTIC_PANELS = new Set(['map','tanks']);
+const GATE_DOMAIN = {et0:'et0_in', labhours:'labour', labcost:'labour', 'anom-v':'air_temp', 'anom-w':null};
+function isDomainRealStrict(domain, vintage){ return domainRealCache?.get(domain)?.has(vintage) === true; }
+function seasonGate(p, c){
+  if(VINTAGE_AGNOSTIC_PANELS.has(p.id)) return null;
+  const vs=(c.vintages && c.vintages.length ? c.vintages : [c.primary]).filter(v=>!VCHAR[v]);
+  for(const v of vs){
+    if(!seasonStarted(v)) return {kind:'offseason', v};
+    const domain = p.id in GATE_DOMAIN ? GATE_DOMAIN[p.id] : PANEL_DOMAIN[p.id];
+    if(!domain || !isDomainRealStrict(domain, v)) return {kind:'nosource', v};
+  }
+  return null;
+}
+function seasonGateState(g){
+  const d=el('div','empty');
+  d.innerHTML = g.kind==='offseason'
+    ? `<b>${g.v} season begins April 1.</b><br>${g.v-1} is the latest complete season &mdash; choose it under Vintage.`
+    : `<b>No ${g.v} data for this panel yet.</b><br>It has no real data source for ${g.v}; its earlier vintages are simulated, and ${g.v} is not.`;
+  return d;
+}
+
 function makePanel(p, c){
   const panel=el('div','panel '+(p.span||'s4'));
   panel.dataset.panelId=p.id;
@@ -4302,6 +4392,13 @@ function makePanel(p, c){
     // c.vintages (not just c.primary) so a compare-mode chart mixing one
     // real and one simulated vintage is blocked entirely -- see
     // realOnlyBlocked()'s own comment.
+    const gate = seasonGate(p, c);
+    if(gate){
+      body.innerHTML='';
+      body.appendChild(seasonGateState(gate));
+      panelStatus(p.id, gate.kind, {vintage: gate.v});
+      return;
+    }
     const domain = PANEL_DOMAIN[p.id];
     if(domain && realOnlyBlocked(domain, c.vintages)){
       body.innerHTML='';
@@ -4322,7 +4419,8 @@ function makePanel(p, c){
    one substring. */
 function vineyardOverviewNote(c){
   return `${c.compare?'Comparing '+c.vintages.join(', ')+'<br>aligned to '+dstr(NOW)
-    : (c.primary===CURRENT?'Live · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
+    : (c.primary===CURRENT && !seasonStarted(CURRENT) ? `Vintage ${CURRENT} · off-season<br>season begins April 1`
+      : c.primary===CURRENT?'Live · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
        :'Vintage '+c.primary+' archive · static')}<br>${c.blocks.length} of 3 blocks in view`;
 }
 
@@ -4583,6 +4681,13 @@ function refreshPanelRun(p, c){
     // re-render, so it needs the identical check or a real-only account
     // could see simulated soil/labour data reappear after touching a
     // block chip. See makePanel()'s own comment for the full reasoning.
+    const gate = seasonGate(p, c);
+    if(gate){
+      body.innerHTML='';
+      body.appendChild(seasonGateState(gate));
+      panelStatus(p.id, gate.kind, {vintage: gate.v});
+      return;
+    }
     const domain = PANEL_DOMAIN[p.id];
     if(domain && realOnlyBlocked(domain, c.vintages)){
       body.innerHTML='';

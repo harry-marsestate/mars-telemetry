@@ -24,11 +24,12 @@
 // The text content is runTool()'s output byte for byte plus one appended
 // "[gateway]" line; the tags and counts are also in MCP structuredContent.
 // Parity tests compare the text minus that line against the chat path.
-import type { DomainReality, ToolResult } from "../chat/tools.ts";
+import { currentToolVintage, type DomainReality, type ToolResult } from "../chat/tools.ts";
 
 export const DATA_TOOLS: readonly string[] = ["get_series", "get_derived_series", "get_anomalies", "get_vessels"];
 
-const CURRENT_VINTAGE = 2026; // chat/tools.ts's CURRENT_VINTAGE, the default vintage of get_anomalies
+// The current vintage comes from chat/tools.ts's currentToolVintage() (the
+// harvest-year rule, _shared/vintage.ts) -- get_anomalies' default vintage.
 
 // Mirrors chat/tools.ts's RULE_METRIC_DOMAIN exactly (anomaly metric_key ->
 // domain_reality() domain); scripts/check-mcp-boundaries.mjs fails if the two
@@ -88,9 +89,9 @@ function statusOf(name: string, row: any, input: Record<string, unknown>, realit
       return each.includes("unknown") ? "unknown" : each.every((x) => x === "real") ? "real" : "mock";
     }
     case "get_anomalies":
-      return isReal(reality, RULE_METRIC_DOMAIN[row.metric_key], typeof input.vintage === "number" ? input.vintage : CURRENT_VINTAGE);
+      return isReal(reality, RULE_METRIC_DOMAIN[row.metric_key], typeof input.vintage === "number" ? input.vintage : currentToolVintage());
     case "get_vessels":
-      return isReal(reality, "vessels", CURRENT_VINTAGE);
+      return isReal(reality, "vessels", currentToolVintage());
     default:
       return "unknown";
   }
@@ -163,6 +164,11 @@ export async function runDataTool(
   return {
     content: `${result.content}${GATEWAY_NOTE_PREFIX}data_status: ${statusText}; total_count: ${total} (${rows.length} returned${truncated ? ", TRUNCATED -- narrow the filters" : ""}).`,
     isError: false,
-    structuredContent: { tool: name, rows, returned_count: rows.length, total_count: total, truncated, data_status_source: "domain_reality()" },
+    structuredContent: {
+      tool: name, rows, returned_count: rows.length, total_count: total, truncated, data_status_source: "domain_reality()",
+      // The vintage actually evaluated (get_anomalies defaults to the current
+      // one) -- P3 compares it with the harvest-year rule.
+      ...(name === "get_anomalies" ? { vintage_used: typeof input.vintage === "number" ? input.vintage : currentToolVintage() } : {}),
+    },
   };
 }

@@ -1,4 +1,5 @@
 import { labourResult } from "./labour-totals.ts";
+import { currentVintage, vintagesThrough } from "../_shared/vintage.ts";
 import type Anthropic from "@anthropic-ai/sdk";
 
 // series_bucketed's own aggregation is bounded by the caller's date range
@@ -6,18 +7,23 @@ import type Anthropic from "@anthropic-ai/sdk";
 // bucket can generate an enormous series. Reject before calling the RPC.
 const MAX_SERIES_BUCKETS = 500;
 
-const CURRENT_VINTAGE = 2026;
-// Mirrors web/index.html's MOCK_NOW -- the app anchors "current" to this
-// simulated timestamp, not the real wall clock, since real ingestion only
-// covers data up to this point. Keep in sync with web/index.html's own
-// MOCK_NOW until the Phase 7 TODO to remove the override is done.
-const MOCK_NOW = "2026-07-28T14:20:00-07:00";
+// "Current vintage" comes from the harvest-year rule (_shared/vintage.ts),
+// never a year written here (docs/SECURITY.md, "Current vintage from the
+// harvest-year rule"). The clock is replaceable ONLY by tests
+// (setToolClockForTests); no request can change it.
+let clock: () => Date = () => new Date();
+export function setToolClockForTests(fn: () => Date): void { clock = fn; }
+export function currentToolVintage(): number { return currentVintage(clock()); }
+// Every vintage from the first to the current one (was a fixed
+// [2022..2026]) -- used to bulk-fetch domain_reality() once per request.
+export function allVintages(): number[] { return vintagesThrough(clock()); }
 
-// real-only-data-mode project (2026-09-13): every vintage this app knows
-// about, mirroring web/index.html's own VINTAGES constant -- used to
-// bulk-fetch domain_reality() once per chat request (see index.ts),
-// covering every vintage a tool call could plausibly ask about.
-export const ALL_VINTAGES = [2022, 2023, 2024, 2025, 2026];
+// A fact about the seeded MOCK data, not "the current vintage": the mock
+// generator narrates MOCK_SEASON's in-progress season frozen at MOCK_NOW
+// (mirrors web/index.html). While MOCK_SEASON is current, "now" for it is
+// MOCK_NOW; any later current vintage uses the real clock.
+const MOCK_SEASON = 2026;
+const MOCK_NOW = "2026-07-28T14:20:00-07:00";
 
 // domain -> Set<real vintage>, built from domain_reality() -- the SAME
 // server-side RPC web/index.html calls (see
@@ -27,7 +33,7 @@ export const ALL_VINTAGES = [2022, 2023, 2024, 2025, 2026];
 export type DomainReality = Map<string, Set<number>>;
 
 // deno-lint-ignore no-explicit-any
-export async function fetchDomainReality(supabase: any, vintages: number[] = ALL_VINTAGES): Promise<DomainReality> {
+export async function fetchDomainReality(supabase: any, vintages: number[] = allVintages()): Promise<DomainReality> {
   const { data, error } = await supabase.rpc("domain_reality", { p_vintages: vintages });
   if (error) {
     console.error("chat: domain_reality failed, real-only gating disabled this request", error);
@@ -79,7 +85,7 @@ export const TOOLS: Anthropic.Tool[] = [
       properties: {
         metric: { type: "string", description: "Metric key, e.g. 'air_temp', 'soil_moisture', 'soil_temp', 'humidity', 'wind_speed', 'precip'." },
         block: { type: "string", description: "Block id, e.g. 'B1'. Omit for all accessible blocks." },
-        vintage: { type: "integer", description: "Year, e.g. 2026. Omit for all vintages." },
+        vintage: { type: "integer", description: "Vintage (harvest year), e.g. 2024. Omit for all vintages." },
         start: { type: "string", description: "ISO 8601 start timestamp." },
         end: { type: "string", description: "ISO 8601 end timestamp." },
         bucket_hours: { type: "number", description: "Bucket width in hours, e.g. 1 for hourly, 24 for daily." },
@@ -91,13 +97,13 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_derived_series",
     description:
-      "Real derived daily climate metrics for a vintage: cumulative growing degree days (gdd_cumulative_calibrated -- calibrated per-vintage against the Napa Valley Grapegrowers Growing Conditions Report figures for Angwin, and the authoritative GDD figure to quote), average-based vapor pressure deficit (vpd_kpa), peak-hour vapor pressure deficit (vpd_peak_kpa), uncalibrated diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in). One row per day. Defaults to the current 2026 vintage's live-to-date range if start_date/end_date are omitted.",
+      "Real derived daily climate metrics for a vintage: cumulative growing degree days (gdd_cumulative_calibrated -- calibrated per-vintage against the Napa Valley Grapegrowers Growing Conditions Report figures for Angwin, and the authoritative GDD figure to quote), average-based vapor pressure deficit (vpd_kpa), peak-hour vapor pressure deficit (vpd_peak_kpa), uncalibrated diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in). One row per day. Defaults to the vintage's growing-season range if start_date/end_date are omitted.",
     input_schema: {
       type: "object",
       properties: {
-        vintage: { type: "integer", description: "Year, e.g. 2026." },
-        start_date: { type: "string", description: "ISO date, e.g. '2026-04-01'. Defaults to the start of the growing season." },
-        end_date: { type: "string", description: "ISO date. Defaults to today for the current vintage (2026-07-28), or end of season for an archived vintage." },
+        vintage: { type: "integer", description: "Vintage (harvest year), e.g. 2024." },
+        start_date: { type: "string", description: "ISO date, e.g. '2024-04-01'. Defaults to the start of the growing season." },
+        end_date: { type: "string", description: "ISO date. Defaults to the latest data for the current vintage, or end of season for an archived vintage." },
       },
       required: ["vintage"],
     },
@@ -105,11 +111,11 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_anomalies",
     description:
-      "Real-time evaluation of vineyard anomaly rules (soil moisture, DTR, VPD, humidity, wind) against current sensor and climate data, as of a given snapshot. Only vineyard-tab rules are wired to real data; winery/tank anomalies are not covered by this tool. Defaults to the current 2026 vintage as of the app's live snapshot date (2026-07-28) -- pass vintage/as_of explicitly to check an archived vintage (e.g. 'were there issues in 2022?').",
+      "Real-time evaluation of vineyard anomaly rules (soil moisture, DTR, VPD, humidity, wind) against current sensor and climate data, as of a given snapshot. Only vineyard-tab rules are wired to real data; winery/tank anomalies are not covered by this tool. Defaults to the current vintage (see the date line in your instructions) as of its live snapshot -- pass vintage/as_of explicitly to check an archived vintage (e.g. 'were there issues in 2022?').",
     input_schema: {
       type: "object",
       properties: {
-        vintage: { type: "integer", description: "Year to evaluate. Defaults to the current vintage (2026)." },
+        vintage: { type: "integer", description: "Vintage (harvest year) to evaluate. Defaults to the current vintage." },
         as_of: { type: "string", description: "ISO 8601 timestamp to evaluate as of. Defaults to the current live snapshot for the current vintage, or end-of-year for an archived vintage." },
       },
       required: [],
@@ -149,7 +155,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_labour_summary",
     description:
-      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026, ingested month by month as new invoices arrive). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 is a partial, still-growing season -- the exact month range is NOT fixed here, always read it from this tool's own returned Coverage note rather than assuming a specific month or month count. 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Pass period_month to scope the answer to ONE specific calendar month (e.g. 'what did we spend in August specifically') instead of the whole vintage -- without it, results are summed across every month on file for that vintage, which is almost certainly NOT what a month-specific question wants. Use the supplied totals.display values verbatim for headline totals and the total row; NEVER sum category rows yourself or average category rates. totals contains exact decimal sums; display rounds once to two decimals. Empty categories mean no records, NOT known zero spend. Operator access only -- returns no rows for customer or pending accounts.",
+      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026, ingested month by month as new invoices arrive). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 grows month by month as its invoices arrive -- the exact month range is NOT fixed here, always read it from this tool's own returned Coverage note rather than assuming a specific month or month count. 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Pass period_month to scope the answer to ONE specific calendar month (e.g. 'what did we spend in August specifically') instead of the whole vintage -- without it, results are summed across every month on file for that vintage, which is almost certainly NOT what a month-specific question wants. Use the supplied totals.display values verbatim for headline totals and the total row; NEVER sum category rows yourself or average category rates. totals contains exact decimal sums; display rounds once to two decimals. Empty categories mean no records, NOT known zero spend. Operator access only -- returns no rows for customer or pending accounts.",
     input_schema: {
       type: "object",
       properties: {
@@ -167,7 +173,7 @@ export const TOOLS: Anthropic.Tool[] = [
     input_schema: {
       type: "object",
       properties: {
-        vintage: { type: "integer", description: "Year, e.g. 2026. Omit for all vintages." },
+        vintage: { type: "integer", description: "Vintage (harvest year), e.g. 2024. Omit for all vintages." },
         block_id: { type: "string", description: "Block id, e.g. 'B2' or 'B3'. Omit for all blocks." },
       },
       required: [],
@@ -410,8 +416,11 @@ const RULE_METRIC_DOMAIN: Record<string, string> = {
 // deno-lint-ignore no-explicit-any
 async function getAnomalies(supabase: any, input: Record<string, unknown>, dataMode: string, domainReality: DomainReality): Promise<ToolResult> {
   const { vintage, as_of } = input as { vintage?: number; as_of?: string };
-  const p_vintage = vintage ?? CURRENT_VINTAGE;
-  const p_as_of = as_of ?? (p_vintage === CURRENT_VINTAGE ? MOCK_NOW : `${p_vintage}-12-31T23:59:59Z`);
+  const current = currentToolVintage();
+  const p_vintage = vintage ?? current;
+  const p_as_of = as_of ?? (p_vintage === current
+    ? (current === MOCK_SEASON ? MOCK_NOW : clock().toISOString())
+    : `${p_vintage}-12-31T23:59:59Z`);
 
   const { data, error } = await supabase.rpc("anomalies_eval", { p_vintage, p_as_of });
   if (error) return formatErrorForModel(error);
@@ -842,7 +851,7 @@ async function getBerryMaturity(supabase: any, input: Record<string, unknown>): 
     berry_smoke: "smoke-taint screening", trial_ferment: "a trial micro-ferment",
   };
   const coverageLines: string[] = [];
-  for (const v of [2022, 2023, 2024, 2025, 2026]) {
+  for (const v of allVintages()) {
     // deno-lint-ignore no-explicit-any
     const rows = (allMaturity as any[]).filter((r) => r.vintage === v);
     if (rows.length === 0) {
@@ -953,7 +962,7 @@ async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): P
     .select("vintage, block_id, collected_on, sample_type, sample_description_raw");
   if (allSamplesErr) return formatErrorForModel(allSamplesErr);
   const coverageLines: string[] = [];
-  for (const v of [2022, 2023, 2024, 2025, 2026]) {
+  for (const v of allVintages()) {
     // deno-lint-ignore no-explicit-any
     const smokeSamples = (allSamples as any[]).filter((s) => s.vintage === v && (s.sample_type === "berry_smoke" || s.sample_type === "trial_ferment"));
     if (smokeSamples.length === 0) {

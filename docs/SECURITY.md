@@ -7108,14 +7108,30 @@ tools, with everything that runs each night.
 |-------|----------|------------|-----------|
 | 12:00 | P1 `p1_database` | pg_cron job `health-p1-database`: `system_health.run_p1_checks()` (SECURITY INVOKER, postgres) | postgres, through `record_run`/`record_result` |
 | 12:10 | P2 `p2_probes` | pg_cron job `health-p2-probes`: `net.http_post` to Edge Function `health-probe`, key read from Vault (`edge_functions_secret_key`) at call time | `health_writer` (`HEALTH_WRITER_DB_URL` Supabase secret) |
-| 12:20 | P3 `p3_frontend` | GitHub Actions `.github/workflows/nightly-health-p3.yml`, Playwright in the runner's Chrome | `health_writer` (`HEALTH_WRITER_DB_URL` GitHub secret) |
+| 12:17 | P3 `p3_frontend` | GitHub Actions `.github/workflows/nightly-health-p3.yml`, Playwright in the runner's Chrome (moved from 12:20 on 2026-09-30, off the busy slot) | `health_writer` (`HEALTH_WRITER_DB_URL` GitHub secret) |
+| 12:35 | P3 backup `p3_backup` | pg_cron job `health-p3-backup`: `system_health.p3_backup_dispatch()`. If no P3 run has started since 12:17 today, it calls GitHub's `workflow_dispatch` for the P3 workflow with the token read from Vault (`github_p3_dispatch_token`) at call time, and records warn "P3 schedule missed, dispatched by backup" (fail if the token is missing) | postgres |
 | on call | P4 | computed inside `get_system_health` on every call | nothing is stored |
 | 12:40 | prune | pg_cron job `health-prune`: `system_health.prune(90)`; baselines are kept | postgres |
 
 P1 takes about 3-6 s, P2 about 2 s, and P3 about 2-3 minutes, so all of it
 finishes well before 12:45. A producer counts as **stale** in
-`get_system_health` when it has no run or its latest run is more than 26
-hours old.
+`get_system_health` (`public.health_producer_stale`) when either of these
+holds:
+- it has no run since its most recent scheduled slot whose 30-minute grace
+  has already passed (P1 12:00, P2 12:10, P3 12:17 UTC);
+- its latest run is more than 26 hours old.
+
+Before 12:47, P3 is judged against yesterday's 12:17 slot, and from 12:47
+against today's. The P3 backup's own records (`p3_backup`) are listed
+separately in `p3_backup_dispatches`, count toward `overall`, and never count
+as a P3 run.
+
+The backup token is a fine-grained GitHub PAT scoped to this repository
+only, with Actions read/write and nothing else. Store it with
+`pbpaste | node scripts/vault-put-secret.mjs github_p3_dispatch_token`, which
+reads stdin only and prints the name and a digest. While a dispatch waits in
+pg_net's queue, its Authorization header is readable like the Vault key's
+(the same accepted residual risk).
 
 ### Every check_id
 
@@ -7127,9 +7143,14 @@ hours old.
   be at most 26 hours old.
 - `ingestion.climate.daily_weather_through` [ingestion]: `daily_weather` for
   the current vintage must reach at least Pacific today minus 2 days.
-- `ingestion.climate.current_vintage` [ingestion]: the newest real climate
-  vintage must equal the current Pacific year. This is the tracked VINTAGE
-  item: it fails from the first night of 2027 until `VINTAGE` is updated.
+- `ingestion.climate.current_vintage` [ingestion] (reworked 2026-09-30 for
+  the harvest-year rule):
+  - fails if any real climate row from the last 3 days has a vintage other
+    than `public.harvest_vintage(recorded_at)`;
+  - fails if the current harvest vintage isn't in `public.vintages` (the
+    ingest refuses its hours);
+  - **warns from 14 days before 1 November** if the next vintage isn't in
+    `public.vintages`.
 - `database.integrity.soil_moisture_range`: every soil reading between 0 and
   100.
 - `database.integrity.gdd_calibrated_2022_2025`: each closed vintage's final
@@ -7175,8 +7196,13 @@ hours old.
   table in `public` and `system_health`.
 - `security.anon.no_data_privileges` [security]: anon has no
   SELECT/INSERT/UPDATE/DELETE on any relation (fail).
-  `security.anon.residual_privileges`: anon's full grant set compared with
-  the baseline (warn); see the finding below.
+- `security.anon.no_table_privileges` [security] (2026-09-30): fails if anon
+  holds any privilege on a relation in `public`, `system_health` or `backup`,
+  or if postgres's default privileges would grant it one on a new table. It
+  replaced `security.anon.residual_privileges`.
+- `database.backup.retention_decision` (2026-09-30): warns when a table in
+  schema `backup` is more than 30 days old, taking the date from its
+  `_YYYYMMDD` suffix. Nothing is ever dropped automatically.
 - `security.policies.baseline` [security]: a fingerprint of every RLS policy.
   The result names what was added, removed or changed.
 - `security.functions.required_present` [security]: 17 functions the system
@@ -7191,7 +7217,8 @@ hours old.
   BYPASSRLS or superuser.
 - `security.no_embedded_keys` [security]: no `sb_secret_…` or JWT-shaped
   string in any trigger argument, function body, view, cron command or role
-  setting. It records object names only.
+  setting. It records object names only. Since 2026-09-30 it also matches
+  GitHub tokens (`github_pat_…`, `gh?_…`).
 - `security.pg_net.queue_not_stale` [security]: warns if a queued pg_net
   request has waited over 10 minutes while later requests got responses (the
   accepted residual risk above).
@@ -7569,3 +7596,116 @@ identical.**
 The Climate section note, "Estate weather station", was also inaccurate:
 there is no station. It now reads "Open-Meteo ECMWF IFS model · wind, solar
 & UV simulated".
+
+## Vintage is the harvest year, starting 1 November Pacific (2026-09-30)
+
+**Decision (owner).** A vintage is its harvest year, and the cycle starts on
+1 November Pacific. Hours from 1 November onward belong to the **next**
+year's vintage; January to October belong to their own calendar year.
+
+**Implementation.**
+- *Ingest* (`ingest-climate-2026`):
+  - `harvestVintage()` (window.ts) gives each hour its vintage, replacing the
+    hard-coded `VINTAGE = 2026`.
+  - The fail-loud guard now refuses any hour whose vintage isn't in
+    `public.vintages`, and reports it by name
+    (`per_metric.<m>.unknown_vintage`).
+  - `daily_weather` is refreshed once per vintage the window touches
+    (`vintageRanges`, split at Oct 31 / Nov 1, never at Jan 1).
+- *SQL:* `public.harvest_vintage(ts)` is the same rule.
+- *`daily_derived`* (migration `20260930100000`): a vintage's derived rows
+  start at day of year 91 **of its own year**. Without this, next vintage's
+  Nov–Dec days (day of year 305 and later) would count toward its GDD
+  before April. The existing day-91 condition is unchanged; it includes 31
+  March in leap years, and 2024-03-31's gdd_day is 0. Output for every
+  existing row is identical: the production proof shows 402 of 402 entries
+  unchanged, with GDD for every vintage identical, so the **calibration
+  stays valid**.
+- *dbt:* `models/curated/daily_derived.sql` now mirrors the production view.
+  It was an older definition without the calibrated columns, so any `dbt
+  run` would have broken the dashboard, the gateway and P1.
+
+**Consumers checked:**
+- `daily_weather`: keyed by (vintage, day), and refreshed per vintage;
+- insights-scan: seasons run 1 April to 1 November of year v, and it uses
+  closed vintages only (`is_current = false`), so it already matches;
+- `real_climate_as_of_2026()`: vintage-2026 rows now end on 31 October, so
+  it stays correct for 2026;
+- P1 `current_vintage`, `daily_weather_through` and `daily_weather_pacific_days`:
+  updated;
+- the dashboard's real-vintage sets: they come from `domain_reality` per
+  vintage, unchanged;
+- chat and the gateway: vintage is a parameter, and their defaults are
+  covered under the decisions below.
+
+No existing row changed. No `sensor_readings` or `daily_weather` row has a
+Pacific November or December date, or a year other than its vintage. The
+winery tables (`lab_samples` 8 rows, `labour_actuals` 50 rows with Nov–Dec
+dates) use the wine's vintage and are outside this rule.
+
+**Verified.**
+- Boundary tests:
+  - 2026-10-31 → 2026-11-01, including the DST change that night:
+    06:59:59Z → 2026, 07:00Z → 2027, and both 01:30 hours → 2027;
+  - 2026-12-31 → 2027-01-01: both sides → 2027;
+  - hour by hour, the TypeScript and SQL rules agree on 1,561 hours.
+- Shadow: 2027's GDD starts on 1 April 2027.
+- One live read-only request with the pinned URL across 2025-10-29..11-03:
+  it splits exactly at Pacific midnight (06:00Z → 2025, 07:00Z → 2026), with
+  144 unique UTC hours.
+- Production: the proof harness shows 402 of 402 unchanged, the verification
+  ingest assigned vintage 2026, and P1 passed.
+
+**Decisions still needed before 1 November 2026:**
+1. **`public.vintages` has no 2027 row.** From Nov 1 00:00 PDT the ingest
+   refuses every hour until one exists, and P1 warns from 18 October. The
+   row carries mock-generator fields (`temp_offset_f`, `character`) and
+   `is_current`. Flipping `is_current` moves 2026 into insights-scan's
+   closed-vintage set.
+2. **Dashboard:** `CURRENT = 2026` and `VINTAGES = [2022..2026]` are
+   hard-coded, so 2027 isn't selectable and 2026 stays "current / live
+   feed" after Nov 1. `NOW`/`MOCK_NOW` (2026-07-28) and
+   `CALIBRATED_GDD_VINTAGES` also need a 2027 decision.
+3. **Chat and the gateway:** `CURRENT_VINTAGE = 2026` (`chat/tools.ts`,
+   `mcp/data-tools.ts`) is `get_anomalies`' default vintage.
+4. **`real_climate_as_of_2026()`** covers 2026 only; a 2027 equivalent (or a
+   vintage parameter) is needed for 2027's "as of" date.
+
+## Cleanup (2026-09-30)
+
+- **Removed customer 9782853b (ACCT-TEST, block B2).** It was deleted
+  through the Auth Admin API; its profile and identity went with it.
+  Checked first: no agent keys, key-call audit rows, lots, sessions or any
+  other row referenced it. Migration `20260930110000` then deleted exactly
+  the 4 `customer_block_access` rows of ACCT-TEST (B2), ACCT-01 (B1, B2) and
+  ACCT-02 (B3); re-insert those to roll back. `scripts/mcp-verify.mjs` now
+  uses the synthetic HEALTH-CUST-B2 customer (48/48).
+- **anon privileges.**
+  - REFERENCES, TRIGGER, TRUNCATE and MAINTAIN (PG17) were revoked on every
+    table and view in `public`.
+  - postgres's default privileges in `public` granted anon exactly those
+    four on every new table; that is revoked too.
+  - `supabase_admin`'s default privileges still grant anon everything on
+    tables it creates, and postgres can't alter them. No `public` table is
+    owned by supabase_admin, and `security.anon.no_table_privileges` fails
+    on any anon grant.
+  - The `security.structure.daily_derived` baseline was re-baselined: its
+    grant list lost exactly anon's REFERENCES/TRIGGER/TRUNCATE, and nothing
+    else changed.
+  - P3 16/16 afterwards (PostgREST and the dashboard are unaffected).
+  - `authenticated` still holds REFERENCES/TRIGGER/TRUNCATE; that was not in
+    scope.
+- **Thresholds fetch.** The dashboard now fetches anomaly thresholds in
+  `runSessionGate()`: approved sessions only, fresh on every sign-in, and
+  cleared on sign-out. It used to fetch them at parse time, as anon. An
+  empty inline favicon also stops the `/favicon.ico` 404. Verified in Chrome
+  with a fresh context against production: before, a pre-login 401 on
+  `anomaly_thresholds` and `THRESHOLDS` never loaded; after, **0 console
+  errors and 0 failed requests, before and after sign-in**, with thresholds
+  loaded (17 rules).
+- **Keychain:** the entries for revoked keys `mtk_dTzu_nYj`, `mtk_NLNErWJD`
+  and `mtk_O9WU1CIb` were deleted (attributes only). The active
+  `mtk_vIfyFJL1`, `mtk_KqE9zEvd` and `mtk_jvOeHpCG` remain.
+- **One transient 503** on the gateway's first `initialize` during a harness
+  run. P3 used the gateway successfully at the same time, and the immediate
+  retry passed 48/48.

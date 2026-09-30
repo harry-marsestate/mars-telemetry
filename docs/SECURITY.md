@@ -7148,6 +7148,12 @@ hours old.
   sensor_id, recorded_at)` is present.
 - `database.integrity.no_future_real_rows`: no real reading is timestamped in
   the future (the forecast-hours incident).
+- `database.integrity.climate_source_labels` (added 2026-09-30): no legacy
+  `open_meteo_era5`/`OM-ERA5` label, no non-soil row labelled ERA5 or
+  ERA5-Land, and no Open-Meteo soil row labelled anything but ERA5-Land.
+- `ingestion.climate.model_pinned` [ingestion] (added 2026-09-30): the
+  newest climate ingest recorded `requested_models = {weather: ecmwf_ifs,
+  soil: era5_land}`.
 - `database.checksum.sensor_readings_closed_vintages`,
   `database.checksum.daily_weather_closed_vintages`: 2022-2025 row count
   plus the sum of 64-bit row hashes, compared with the baseline. Any change
@@ -7193,10 +7199,12 @@ hours old.
 **P2, sources**, each one zero-cost GET with the credential production uses,
 retried once on 5xx or a network error:
 - `source.innovint.api`: `vessels?limit=1`.
-- `source.open_meteo.archive` and `source.open_meteo.archive_era5_land`: the
-  ingest's own `archiveUrl()` for the last complete Pacific day. The ERA5
-  check warns if there are fewer than 24 non-null hours. The ERA5-Land
-  non-null count is informational, because it lags about 5 days.
+- `source.open_meteo.ecmwf_ifs` and `source.open_meteo.era5_land` (named
+  `source.open_meteo.archive` / `archive_era5_land` before the 2026-09-30
+  relabel): the ingest's own `archiveUrl()` with the same pinned model
+  (`CLIMATE_SOURCES`) for the last complete Pacific day. The IFS check
+  warns if there are fewer than 24 non-null hours. The ERA5-Land non-null
+  count is informational, because it lags about 5 days.
 - `source.anthropic.model`: `GET /v1/models/claude-sonnet-5`, the chat model,
   pinned by test to chat's code.
 - `source.fireworks.model`: the Kimi model is listed. This provider is
@@ -7361,3 +7369,203 @@ Once the change is confirmed intended, run (as postgres):
 - **Rate-limit counting rule** (restated): scope refusals count toward a
   key's limits and are audited `rejected_scope`; throttled calls are audited
   `throttled` and don't count.
+
+## Climate rows were labelled ERA5 but came from ECMWF IFS (2026-09-30)
+
+**Finding.** Every Open-Meteo row was stored as `source_system =
+'open_meteo_era5'`, `sensor_id = 'OM-ERA5'`, and the dashboard said
+"Open-Meteo (ERA5)". But the atmospheric variables (air_temp, humidity,
+precipitation, solar) were always requested without a `models` parameter,
+so they came from Open-Meteo's default `best_match`, and at this site
+`best_match` serves **ECMWF IFS** (HRES, 9 km), not ERA5. Only soil
+(soil_moisture, soil_temp) was requested with `models=era5_land`, and it
+really is ERA5-Land.
+
+**Evidence (2026-09-30).**
+- *Open-Meteo's documentation* (historical-weather-api): "The default Best
+  Match combines IFS HRES, ERA5 and ERA5-Land seamlessly". Datasets: ECMWF
+  IFS, 9 km, 2017 to present, no delay; ERA5, 0.25°, 5-day delay; ERA5-Land,
+  0.1°, 5-day delay.
+- *Sampled.* One spring and one summer date per vintage 2022-2026, every
+  metric against best_match / ecmwf_ifs / era5 / era5_seamless / era5_land,
+  with the ingest's own URL builder, units and coordinates:
+  - air_temp, humidity and solar: 24/24 hours equal to best_match and
+    ecmwf_ifs every time; ERA5 matched 0-3 hours.
+  - precipitation: equal to ecmwf_ifs. ERA5 coincides on dry hours but
+    differs on wet ones (2022-05-10: IFS 24/24, ERA5 20/24).
+  - soil: 24/24 equal to era5_land. era5_seamless is the same series for
+    soil.
+- *Every stored hour.* One full-range request per vintage per model:
+  - air_temp: 24,899 of 24,905 equal to ecmwf_ifs;
+  - humidity: 24,901 of 24,905;
+  - precipitation: 24,905 of 24,905;
+  - solar: 20,544 of 20,544;
+  - soil_moisture and soil_temp: 24,761 of 24,761 each, equal to
+    era5_land.
+
+  The 10 exceptions were all 2026-09-29 18:00-23:00Z, hours IFS revised
+  after they were ingested; the next rolling refetch replaces them.
+- *Stable over time.* The 2022-2025 rows were fetched on 2026-08-25 and the
+  2026 rows from 2026-09-13, and they still equal today's `ecmwf_ifs`. For
+  2026-09-15..24, where ERA5 has now been published, `best_match` still
+  serves IFS: it did not switch to ERA5 after the publication lag. So the
+  data is one model throughout, not mixed.
+
+**Fix.**
+1. *Pinned models.* `supabase/functions/ingest-climate-2026/window.ts`
+   `CLIMATE_SOURCES` requests `models=ecmwf_ifs` for the atmospheric
+   variables and `models=era5_land` for soil. It never uses best_match, so
+   Open-Meteo can't silently change which model we get. The Python backfill
+   client now refuses a request without `models`. Before merging, the
+   exact new URLs were requested once live (read-only): HTTP 200, UTC, and
+   values equal to the stored hours except the 10 IFS revisions above.
+2. *Relabelled data*, with values and timestamps untouched:
+   - atmospheric rows become `open_meteo_ecmwf_ifs` / `OM-IFS`;
+   - soil rows become `open_meteo_era5_land` / `OM-ERA5-LAND`.
+
+   Migrations:
+   - `20260930080000` snapshots every affected row to
+     **`backup.sensor_readings_open_meteo_era5_20260930`**, with a
+     per-metric count and value-checksum manifest in
+     `backup.open_meteo_relabel_manifest_20260930`. Schema `backup` is not
+     exposed by PostgREST, every privilege is revoked from the API roles, and
+     RLS is on with no policies.
+   - `20260930080100` does the relabel in one transaction. It asserts the
+     backup equals the live rows, that no row already carries a new label,
+     that the updated counts equal the backup's per group, that no legacy
+     label remains, and that per-metric value checksums (metric_key,
+     recorded_at, value) equal the manifest. It then swaps the old
+     `real_data_sources` entry for the two new ones, so every row keeps its
+     real/mock status, and updates the three functions that named the old
+     label literally: `refresh_daily_weather_range`,
+     `real_climate_as_of_2026` and `run_p1_checks`. The dbt model
+     `daily_weather.sql` was changed in step. The UNIQUE (metric_key,
+     sensor_id, recorded_at) key can't collide: each metric moves to one
+     sensor_id that no row used, and the redeployed ingest writes exactly
+     those labels.
+   - `sensor_readings` was taken out of the `supabase_realtime` publication
+     for that transaction, so Realtime didn't decode about 145k UPDATEs (the
+     dashboard subscribes to INSERTs only). `20260930080200` put it back.
+   - Timing: after the 13:17 UTC climate ingest and outside the 12:00-12:20
+     health producers, with the new ingest deployed straight after.
+3. *Wording.* The dashboard says **"Open-Meteo · ECMWF IFS model"**, also on
+   GDD, DTR and VPD, which derive from it, and **"Open-Meteo · ERA5-Land
+   reanalysis, surface 0-7cm"** for soil. The P2 probe checks
+   `source.open_meteo.ecmwf_ifs` and `source.open_meteo.era5_land` with the
+   same pinned URLs. The chat prompt and tools, the MCP gateway
+   (`data_status` comes from `domain_reality`, which reads
+   `real_data_sources`) and the tutorial docs made no ERA5 claim; nothing
+   there changed.
+4. *New P1 checks:*
+   - `database.integrity.climate_source_labels` fails on any legacy label,
+     any non-soil row labelled ERA5 or ERA5-Land, or any Open-Meteo soil row
+     not labelled ERA5-Land.
+   - `ingestion.climate.model_pinned` fails unless the newest climate ingest
+     recorded `requested_models = {weather: ecmwf_ifs, soil: era5_land}`.
+     The ingest reads these back from the URLs it actually built.
+
+**GDD calibration is unaffected.** The `vintage_climate_calibration` scalars
+were fitted to these same values, which are IFS values. Keeping `ecmwf_ifs`
+keeps the series continuous and the scalars valid. Switching to ERA5 would
+have changed every value and invalidated the calibration.
+
+**Rollback** (as postgres, in one transaction, and only while no newer
+ingest has written the new labels; otherwise delete those newer rows first,
+or relabel only the ids in the backup):
+
+    begin;
+    alter publication supabase_realtime drop table public.sensor_readings;
+    update public.sensor_readings s set source_system = b.source_system, sensor_id = b.sensor_id
+      from backup.sensor_readings_open_meteo_era5_20260930 b where s.id = b.id;
+    insert into public.real_data_sources (source_system) values ('open_meteo_era5') on conflict do nothing;
+    delete from public.real_data_sources where source_system in ('open_meteo_ecmwf_ifs', 'open_meteo_era5_land');
+    -- restore the three functions from 20260930050100 / 20260913120000 (label literal back to 'open_meteo_era5')
+    alter publication supabase_realtime add table public.sensor_readings;
+    commit;
+
+then redeploy ingest-climate-2026 from the commit before the model pin.
+
+**Applied (2026-09-30, UTC).**
+- 13:17:01: the regular climate ingest ran on the old code. Step (a) part
+  v then passed all five assertions.
+- 13:18: "before" snapshot, described below.
+- 13:19:14-13:19:50: `20260930080000` (backup) and `20260930080100`
+  (relabel) applied. Every in-transaction assertion passed.
+- 13:19:56: `ingest-climate-2026` and `health-probe` deployed from main.
+  The downloaded source is byte-identical.
+- 13:20:46: `20260930080200` applied, after both Realtime replication slots
+  had confirmed the current WAL position (0 bytes behind). `sensor_readings`
+  was out of `supabase_realtime` for 56 seconds, with no inserts in that
+  window.
+
+**Row counts.**
+- Before: 144,871 rows labelled `open_meteo_era5` / `OM-ERA5`, all 144,871
+  in the backup (distinct ids): air_temp 24,919, humidity 24,919,
+  precipitation 24,919, solar 20,544, soil_moisture 24,785, soil_temp
+  24,785.
+- After:
+  - `open_meteo_ecmwf_ifs` / `OM-IFS`: 95,301 (24,919 + 24,919 + 24,919 +
+    20,544);
+  - `open_meteo_era5_land` / `OM-ERA5-LAND`: 49,570 (24,785 + 24,785);
+  - legacy labels: 0.
+- Duplicate (metric, hour) pairs across the Open-Meteo labels: 0. That held
+  after a verification ingest on the new code at 13:22 too: 1,482 rows
+  upserted onto the relabelled keys, `requested_models` = ecmwf_ifs /
+  era5_land.
+- Every backed-up id is still present, with 0 values changed.
+
+**Checksums of (metric_key, recorded_at, value)**, identical before and
+after:
+
+| metric | rows | md5 |
+|---|---|---|
+| air_temp | 24,919 | d9f469391f807a38f67f9288b1b36a83 |
+| humidity | 24,919 | eeb10514102b0253a12511ef4fdd6765 |
+| precipitation | 24,919 | 29d2fa49dfa2ac3c50183c7bc425047a |
+| solar | 20,544 | ca371be1e50b1361c946c37c968d7f18 |
+| soil_moisture | 24,785 | 07c98f69772443cf93b90101b8d41d84 |
+| soil_temp | 24,785 | 9e40252a657270c9076e2f3f6666291d |
+
+**Precedence and derived data, before vs after: 402 of 402 entries
+identical.**
+- All 392 dashboard `series_bucketed` calls: 16 metrics x 4 blocks
+  (estate, B1, B2, B3) x (5 full-season vintages 2022-2026, a 2026 hourly
+  window, and a no-vintage cross-year window).
+- All of `daily_weather` and `daily_derived`.
+- `domain_reality`, `real_metric_vintage_counts`, `real_climate_as_of_2026()`
+  (2026-09-24) and both anomaly anchors.
+- `refresh_daily_weather_range` over 2026-09-01..28 and 2024-07, run in a
+  rolled-back transaction. It reproduces `daily_weather` exactly both
+  before and after.
+- The calibration scalars and the final calibrated GDD per vintage: 2022
+  3812.3, 2023 3576.0, 2024 4058.0, 2025 3359.8. **The GDD calibration is
+  unchanged and stays valid.**
+
+**Health checks.**
+- P1 run 12 failed only `database.checksum.sensor_readings_closed_vintages`,
+  as expected: it hashes `sensor_id` and `source_system`. **Re-baselined**
+  to run 12's observed value with `set_by` = "2026-09-30 climate source
+  relabel …", after confirming the per-vintage row counts were unchanged:
+  {"2022": 41118, "2023": 40529, "2024": 40527, "2025": 60414}. The previous
+  baseline (set 2026-09-30 04:52 by the initial run) is recorded here: 2022
+  sum 109817742273874523137, 2023 890264298253090967273,
+  2024 -110516922426758823099, 2025 552787738259727564470.
+- P1 run 13: 31/31 pass, including both new checks.
+- P2 run 14: both pinned Open-Meteo probes pass.
+- P3 run 15 (dispatched manually): 16/16, including GDD and air-temperature
+  fidelity against the gateway.
+
+**Live dashboard (fresh Chrome context, synthetic operator).** For both
+2026 and a 2024-only selection:
+- air temperature, humidity and precipitation read "Open-Meteo · ECMWF IFS
+  model";
+- GDD reads "…, calibrated to Napa Valley Grapegrowers regional reports"
+  (2024) or "…, uncalibrated — no Napa Valley Grapegrowers report yet"
+  (2026);
+- DTR and VPD name the IFS model;
+- soil reads "Open-Meteo · ERA5-Land reanalysis, surface 0-7cm";
+- no subtitle claims plain ERA5.
+
+The Climate section note, "Estate weather station", was also inaccurate:
+there is no station. It now reads "Open-Meteo ECMWF IFS model · wind, solar
+& UV simulated".

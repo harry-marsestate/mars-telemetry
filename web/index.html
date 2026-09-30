@@ -5923,7 +5923,9 @@ function openKeyDetail(r, tr){
       <div><div class="flabel">Expires</div>${keysDateTime(r.expires_at)}</div>
       <div><div class="flabel">Last used</div>${r.last_used_at ? `${keysDateTime(r.last_used_at)}<span class="dim">${timeAgo(r.last_used_at)}</span>` : 'Never'}</div>
       <div><div class="flabel">Status</div><span class="keys-st-${escapeHtml(r.status)}">${KEY_STATUS_LABELS[r.status]||escapeHtml(r.status)}</span>${r.revoked_at ? `<span class="dim">revoked ${keysDateTime(r.revoked_at)}</span>` : ''}</div>
+      <div><div class="flabel">Rate limits</div>${r.rate_per_minute!=null ? `${Number(r.rate_per_minute)}/min &middot; ${Number(r.rate_per_day).toLocaleString()}/day` : '&mdash;'}<span class="dim">excess calls get HTTP 429</span></div>
     </div>
+    <div class="keys-detail-sect"><div class="flabel">Allowed tools</div><div class="keys-note">${(r.allowed_tools||[]).map(t=>`<code>${escapeHtml(t)}</code>`).join(' ') || '&mdash;'}</div><div class="keys-note dim">Read-only here; change with scripts/agent-keys.mjs set-tools (audited).</div></div>
     <div class="keys-detail-sect keys-expiry-edit"></div>
     <div class="keys-detail-sect"><div class="flabel">Expiry changes</div><div class="keys-expiry-log"><div class="keys-note">Loading&hellip;</div></div></div>
     <div class="keys-detail-sect"><div class="flabel">Recent gateway calls</div><div class="keys-calls"><div class="keys-note">Loading&hellip;</div></div></div>
@@ -5998,7 +6000,7 @@ async function loadKeyAudit(r, detail){
         const args=c.args==null ? '' : JSON.stringify(c.args);
         const shortArgs=args.length>140 ? args.slice(0,140)+'…' : args;
         return `<tr><td class="nw">${keysDateTime(c.called_at)}</td><td>${escapeHtml(c.tool)}</td>
-          <td class="${c.is_error?'keys-st-revoked':'keys-st-active'}">${c.is_error?'error':'ok'}</td>
+          <td class="${c.is_error?'keys-st-revoked':'keys-st-active'}">${c.outcome==='throttled'?'throttled':c.outcome==='rejected_scope'?'not permitted':c.is_error?'error':'ok'}</td>
           <td title="${escapeHtml(args)}">${escapeHtml(shortArgs)||'<span class="dim">&mdash;</span>'}</td></tr>`;
       }).join('')}
     </tbody></table>`;

@@ -33,6 +33,13 @@ export interface McpDeps {
   // closed as a 500, never as an unauthenticated pass-through.
   authenticate(keyHash: string): Promise<{ keyId: string; userId: string } | null>;
   logCall(keyHash: string, tool: string, args: unknown, isError: boolean): Promise<void>;
+  // The key's allowed_tools (mcp_key_scope), for tools/list. null for a key
+  // that isn't active any more.
+  scope(keyHash: string): Promise<string[] | null>;
+  // Per-key scope + rate limit for one tools/call (mcp_authorize_call). A
+  // refusal is audited by the database function itself. Throws on an
+  // infrastructure failure -- which fails closed as a 500.
+  authorize(keyHash: string, tool: string): Promise<{ allowed: boolean; httpStatus: number; reason: string; retryAfterSeconds: number | null }>;
   // Runs fn inside the key owner's read-only mcp_reader transaction, handing
   // it a supabase-js-shaped client (the adapter).
   // deno-lint-ignore no-explicit-any
@@ -129,13 +136,51 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
       return new Response(null, { status: 405, headers: { Allow: "POST, DELETE" } });
     }
 
+    // Peek at the JSON-RPC body (a clone; the transport reads the original).
+    // Per-key scope and rate limits are decided HERE, before the MCP
+    // transport runs, so a refusal can be a real HTTP 429 with Retry-After.
+    let message: unknown = null;
+    try { message = await req.clone().json(); } catch { /* the transport answers malformed JSON itself */ }
+    if (Array.isArray(message)) {
+      return jsonRpcError(400, -32600, "Batch requests are not supported");
+    }
+    // deno-lint-ignore no-explicit-any
+    const m = message as any;
+    if (m?.method === "tools/call") {
+      const toolName = String(m?.params?.name ?? "").slice(0, 100);
+      let decision;
+      try {
+        decision = await deps.authorize(keyHash, toolName);
+      } catch (err) {
+        console.error("mcp: authorize failed", err instanceof Error ? err.message : String(err));
+        return jsonRpcError(500, -32603, "Authorization backend unavailable");
+      }
+      if (!decision.allowed) {
+        const id = m?.id ?? null;
+        if (decision.httpStatus === 401) return unauthorized();
+        if (decision.httpStatus === 429) {
+          return new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: `Too many requests: ${decision.reason}` } }), {
+            status: 429,
+            headers: { ...JSON_HEADERS, "Retry-After": String(decision.retryAfterSeconds ?? 60) },
+          });
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code: ErrorCode.InvalidParams, message: `Tool not permitted for this key: ${toolName}` } }), {
+          status: 200,
+          headers: JSON_HEADERS,
+        });
+      }
+    }
+
     // Stateless: a fresh server + transport per HTTP request, no session ids,
     // plain JSON responses (every tool here is a single request/response).
     const server = new Server({ name: "mars-telemetry", version: "1.0.0" }, { capabilities: { tools: {} } });
 
-    server.setRequestHandler(ListToolsRequestSchema, () => ({
-      tools: exposed.map((t) => ({ name: t.name, description: t.description, inputSchema: t.input_schema })),
-    }));
+    // Only the tools this key may call -- the intersection of what this server
+    // exposes and the key's allowed_tools.
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const allowed = new Set((await deps.scope(keyHash)) ?? []);
+      return { tools: exposed.filter((t) => allowed.has(t.name)).map((t) => ({ name: t.name, description: t.description, inputSchema: t.input_schema })) };
+    });
 
     server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
       const name = String(request.params.name).slice(0, 100);

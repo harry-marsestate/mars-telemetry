@@ -221,7 +221,7 @@ export class PostgrestAdapter {
   }
 
   async rpc(name: string, params: Record<string, unknown> = {}): Promise<PgrstResult> {
-    if (!(name in RPCS) || name === "mcp_authenticate" || name === "mcp_log_call") {
+    if (!(name in RPCS) || ["mcp_authenticate", "mcp_log_call", "mcp_key_scope", "mcp_authorize_call"].includes(name)) {
       throw new Error(`mcp adapter: rpc '${name}' is not callable from tool code`);
     }
     try {

@@ -11,14 +11,23 @@ const GOOD_KEY = "mtk_" + "A".repeat(43);
 const USER = "00000000-0000-4000-8000-000000000001";
 const KEY_ID = "00000000-0000-4000-8000-0000000000aa";
 
-function harness(overrides: Partial<McpDeps> = {}) {
-  const calls = { authenticate: [] as string[], scoped: [] as [string, string][], runTool: [] as string[], log: [] as [string, boolean][] };
+// keyTools: the fake key's allowed_tools (mcp_key_scope); authorize() allows
+// exactly those, like mcp_authorize_call's scope branch.
+function harness(overrides: Partial<McpDeps> = {}, keyTools: readonly string[] = MCP_TOOLS) {
+  const calls = { authenticate: [] as string[], scoped: [] as [string, string][], runTool: [] as string[], log: [] as [string, boolean][], authorize: [] as string[] };
   const deps: McpDeps = {
     async authenticate(hash) {
       calls.authenticate.push(hash);
       return hash === await sha256Hex(GOOD_KEY) ? { keyId: KEY_ID, userId: USER } : null;
     },
     async logCall(_hash, tool, _args, isError) { calls.log.push([tool, isError]); },
+    async scope() { return [...keyTools]; },
+    async authorize(_hash, tool) {
+      calls.authorize.push(tool);
+      return keyTools.includes(tool)
+        ? { allowed: true, httpStatus: 200, reason: "ok", retryAfterSeconds: null }
+        : { allowed: false, httpStatus: 403, reason: `tool not permitted for this key: ${tool}`, retryAfterSeconds: null };
+    },
     async runScoped(userId, keyId, fn) {
       calls.scoped.push([userId, keyId]);
       return await fn({ rpc: async () => ({ data: "all", error: null }) });
@@ -84,18 +93,65 @@ Deno.test("initialize, then tools/list returns exactly the round-one allowlist",
   assertEquals(calls.scoped.length, 0, "no scoped transaction is opened for list/initialize");
 });
 
-Deno.test("non-allowlisted tools are rejected before any scoped transaction or runTool, and are audited", async () => {
-  const { handler, calls } = harness();
-  for (const name of ["get_series", "get_derived_series", "get_anomalies", "get_vessels", "drop_everything"]) {
-    const body = await (await handler(call(name))).json();
-    assertEquals(body.error.code, -32602);
-    assertMatch(body.error.message, /Unknown tool/);
+Deno.test("tools outside the key's scope are refused before any scoped transaction or runTool (audited by mcp_authorize_call)", async () => {
+  const { handler, calls } = harness({}, ["get_berry_maturity"]);
+  for (const name of ["get_lot_analyses", "get_series", "drop_everything"]) {
+    const res = await handler(call(name));
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals([body.id, body.error.code], [3, -32602]);
+    assertMatch(body.error.message, /not permitted for this key: /);
   }
+  assertEquals(calls.authorize, ["get_lot_analyses", "get_series", "drop_everything"]);
   assertEquals(calls.runTool, []);
   assertEquals(calls.scoped.length, 0);
-  assertEquals(calls.log.map(([t, e]) => `${t}:${e}`), [
-    "get_series:true", "get_derived_series:true", "get_anomalies:true", "get_vessels:true", "drop_everything:true",
-  ]);
+  assertEquals(calls.log, [], "refusals are audited by mcp_authorize_call, not logged twice");
+});
+
+Deno.test("a tool the key allows but this server doesn't expose is still rejected (and logged)", async () => {
+  const { handler, calls } = harness({}, [...MCP_TOOLS, "get_not_exposed"]);
+  const body = await (await handler(call("get_not_exposed"))).json();
+  assertEquals(body.error.code, -32602);
+  assertMatch(body.error.message, /Unknown tool/);
+  assertEquals(calls.runTool, []);
+  assertEquals(calls.log, [["get_not_exposed", true]]);
+});
+
+Deno.test("tools/list shows only the key's allowed tools", async () => {
+  const { handler } = harness({}, ["get_labour_summary", "get_berry_maturity", "get_not_exposed"]);
+  const list = await handler(rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" }));
+  assertEquals((await list.json()).result.tools.map((t: { name: string }) => t.name).sort(), ["get_berry_maturity", "get_labour_summary"]);
+  const none = harness({ scope: () => Promise.resolve(null) });
+  assertEquals((await (await none.handler(rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" }))).json()).result.tools, []);
+});
+
+Deno.test("rate limited -> HTTP 429 with Retry-After, before any scoped transaction", async () => {
+  const { handler, calls } = harness({
+    authorize: () => Promise.resolve({ allowed: false, httpStatus: 429, reason: "rate limit: 60 calls per minute", retryAfterSeconds: 17 }),
+  });
+  const res = await handler(call("get_berry_maturity"));
+  assertEquals(res.status, 429);
+  assertEquals(res.headers.get("Retry-After"), "17");
+  const body = await res.json();
+  assertEquals(body.id, 3);
+  assertMatch(body.error.message, /60 calls per minute/);
+  assertEquals([calls.scoped.length, calls.runTool.length], [0, 0]);
+});
+
+Deno.test("authorization backend failure fails closed (500); a key that died since authenticate -> 401", async () => {
+  const broken = harness({ authorize: () => Promise.reject(new Error("db down")) });
+  const res = await broken.handler(call("get_berry_maturity"));
+  assertEquals(res.status, 500);
+  assertEquals(broken.calls.runTool, []);
+  const dead = harness({ authorize: () => Promise.resolve({ allowed: false, httpStatus: 401, reason: "unauthorized", retryAfterSeconds: null }) });
+  assertEquals((await dead.handler(call("get_berry_maturity"))).status, 401);
+});
+
+Deno.test("JSON-RPC batches are refused (so none can slip past per-call authorization)", async () => {
+  const { handler, calls } = harness();
+  const res = await handler(rpc([{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_berry_maturity", arguments: {} } }]));
+  assertEquals(res.status, 400);
+  assertEquals([calls.authorize.length, calls.runTool.length], [0, 0]);
 });
 
 Deno.test("allowlisted call: one scoped transaction per call, as the key's owner", async () => {

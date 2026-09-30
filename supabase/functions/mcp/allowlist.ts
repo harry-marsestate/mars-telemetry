@@ -59,6 +59,8 @@ export const RPCS: Readonly<Record<string, string>> = {
   domain_reality: "SECURITY DEFINER, caller-independent real/simulated classification; resolved exactly as chat does.",
   mcp_authenticate: "SECURITY DEFINER key lookup; EXECUTE for mcp_gateway only. Returns (key_id, user_id) for an active key.",
   mcp_log_call: "SECURITY DEFINER audit append into agent_api_key_calls; EXECUTE for mcp_gateway only, gated on the key hash.",
+  mcp_key_scope: "SECURITY DEFINER: an active key's allowed_tools and rate limits; EXECUTE for mcp_gateway only (tools/list).",
+  mcp_authorize_call: "SECURITY DEFINER per-key scope + rate-limit decision for one tools/call, auditing refusals; EXECUTE for mcp_gateway only.",
 };
 
 // Everything the MCP path may reference, for the boundary check's reachability walk.

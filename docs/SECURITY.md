@@ -7278,6 +7278,11 @@ Operator only, panels vs the gateway (P3 key `mtk_jxk3p3fn`):
   and range, the latest chip, the newest plotted point and the overview tile
   agree within 0.001 (see "Latest value: one point-in-time reading on every
   range").
+- `frontend.tab_cache` (added 2026-10-01): returning to an already-rendered
+  tab with unchanged inputs re-renders nothing and sends no `series_bucketed`
+  request; changing the vineyard vintage, or one panel's range, while the
+  tab is hidden re-renders it with new requests on the next visit (see
+  "Dashboard load time and the tab cache").
 
 **P4, the gateway itself** (inside `get_system_health`):
 - `gateway.p4.database_reachable`.
@@ -8061,3 +8066,116 @@ fail on a copy with the newest-point override removed: air temperature
 The local run serves `web/` with `python3 -m http.server 8765`. It needs
 `.env`'s service key for the magic links. Without `P3_MCP_KEY`, the gateway
 checks report `error`; the rest run.
+
+## Dashboard load time and the tab cache (2026-10-01)
+Symptoms: after sign-in the dashboard could take about a minute to show
+anything, and every switch between the Vineyard and Winery tabs rebuilt and
+re-fetched the whole tab.
+
+### Root causes, by impact (measured, see "Before / after")
+1. **A hidden page never rendered.** `renderTab()` waited for one
+   `requestAnimationFrame` before starting any panel. Chrome runs no rAF
+   callbacks while a page is hidden (background tab, minimised or covered
+   window), so a dashboard loaded there booted in ~4 s and then drew nothing
+   until the page was shown again: first panel at 34.6 s in the measured
+   session, only because a screenshot forced a frame.
+2. **Every tab switch was a full rebuild.** The tab buttons called
+   `renderTab()` unconditionally: 19 requests (operator) / 22 (customer) per
+   return to Vineyard, 6 per return to Winery, ~1-2 s each time.
+3. **Returning to the browser tab re-runs the session gate** (not changed,
+   see "Left as is"). supabase-js 2.117.2 emits `SIGNED_IN` from
+   `_recoverAndRefresh` on every `visibilitychange` to visible;
+   `runSessionGate()` then re-reads the profile and role and six metadata
+   RPCs (`domain_reality` ~1-2 s). It re-renders nothing.
+4. **Serial boot chain.** name profile -> role -> header profile -> metadata
+   batch: four round trips before the first panel; the header re-read the
+   same `user_profiles` row.
+5. **The hidden Winery tab was rendered at boot** (its panels laid out at
+   zero width and were rebuilt on first open anyway).
+
+### What changed (web/index.html)
+- `nextFrame()`: one rAF **or** 100 ms, whichever comes first. Safe for
+  layout: the panels are already in the DOM and reading `clientWidth` forces a
+  synchronous layout whether or not a frame was painted.
+- Boot renders only the tab on screen; the other renders on first open.
+- `runSessionGate()` reads the profile row (name + `is_admin`) and the role in
+  one parallel round trip; the header reuses that row.
+- Each gate pass fingerprints what it read (role, data mode, real-climate
+  as-of and vintages, `domain_reality`, metric derivation, InnoVint sync
+  times, thresholds) and bumps `sessionMetaVersion` only when that changed,
+  so a return to the browser tab does not invalidate cached dashboard tabs
+  unless the metadata really moved.
+
+### Caching rules and TTLs
+| What | Where | Key | Lifetime | Invalidated by |
+|---|---|---|---|---|
+| `series_bucketed` results | `memoized()` | every RPC parameter (metric, block, vintage, start, end, bucket, agg) | 60 s (`DATA_TTL_MS`) | sign-out, user change, a realtime insert for that metric |
+| `daily_derived` chart rows | `memoized()` | field, vintage, window start, window end | 60 s | same |
+| `latest_reading` / latest derived row | `memoized()` (was its own 60 s memo) | spec, vintage, as-of | 60 s | same |
+| a rendered tab (its DOM) | `tabView` / `showTab()` | `tabInputs()`: user, role-bearing session metadata version, data mode, current vintage, the tab's vintages and blocks, every panel's range and history scroll, ferm lot and archived-vessels toggle | 5 min since its last full render (`TAB_TTL_MS`) | any input change, a realtime insert for one of its metrics, a 5-minute poll while it was hidden, a width change, a session-gate refresh, sign-out / user change |
+
+Identical requests in flight share one promise. A failed fetch (`stale`
+result or rejection) is never kept. The 60 s data TTL is below the 5-minute
+poll, so a poll always refetches.
+
+### What can no longer go stale, and why
+- **Another user's data**: every cache is cleared when the signed-in user
+  changes or signs out (RLS differs per user; the old latest-reading memo
+  was not cleared before this change).
+- **Vintage / blocks / range / scroll / compare mode / lot / archived
+  toggle**: part of the tab's recorded inputs; the data caches are keyed by
+  the exact request, so a different window or vintage is a different entry.
+  Every in-place control re-renders the visible tab immediately (unchanged)
+  and re-records its inputs.
+- **New realtime data**: the insert still updates the overview tile in place
+  (`applyVineyardRealtimeInsert` / `applyWineryRealtimeInsert`, unchanged),
+  and now also drops that metric's cached series and latest readings and
+  marks its tab dirty, so the next visit re-renders.
+- **Time**: a tab older than 5 minutes re-renders on its next visit; data
+  entries expire after 60 s.
+- **Latest-value consistency**: chip, newest point and overview tile still
+  come from one `latestFor()` reading; the cache only changed where that
+  reading is memoised.
+
+### Left as is
+- The tab on screen is not re-rendered by a timer (only the 5-minute
+  soil/irrigation poll, as before).
+- The session gate still re-runs on every return to the browser tab (9
+  requests, was 10). Throttling it (e.g. to once per 5 minutes for the same
+  account) was built and measured (0 requests) but taken out: an admin's
+  revoke, a real-only switch or the daily as-of advance would then reach an
+  open tab up to 5 minutes later than the next focus. That is a product
+  decision, not a performance fix.
+- Panels below the fold are not lazy-loaded with IntersectionObserver:
+  Chrome throttles IntersectionObserver in hidden pages the same way as
+  rAF (cause 1), P3's role-visibility check reads every panel's hook, and a
+  foreground load already completes in ~4 s.
+- The remaining serial cost before the first panel is the metadata batch
+  (`domain_reality`, `real_metric_vintage_counts`: 1-1.5 s); speeding that
+  up is a database change.
+
+### Before / after (headless Chrome, synthetic operator, 3 runs each)
+| | before (main, production) | after (this branch, served locally) |
+|---|---|---|
+| reload -> vineyard all panels ok | 5.2 / 5.1 / 4.5 s | 3.9 / 4.1 / 5.5 s |
+| magic-link login -> vineyard all ok | 5.4 / 8.6 / 7.1 s | 3.9 / 4.1 / 14.1 s (one slow-database outlier) |
+| requests at boot | 57 | 46 (Winery deferred) |
+| return to Vineyard | 1.1-1.9 s, 19 requests | 30-60 ms, 0 requests |
+| return to Winery | 1.3-4.2 s, 6 requests | 30-45 ms, 0 requests |
+| hidden window, reload -> all ok (real Chrome) | never without a frame; 38.9 s when one was forced at 34.6 s | 4.0 s |
+
+Customer (production, before): return to Vineyard was 1.8-2.0 s and 22
+requests; after: cached, 0 requests.
+
+### Verified (2026-10-01)
+- Every panel x every range for the current and previous vintage, the
+  Winery tab and the overview tiles: 104 snapshots identical between main
+  and this branch (operator); 85 each for both customers, identical except
+  2026 solar, which is simulated against the live-ticking demo clock and
+  shifts by one minute between any two runs.
+- P3 locally, all three synthetic users: every frontend check passes,
+  including `frontend.latest.consistent` and `frontend.tab_cache`; the new
+  check fails on main (12 `series_bucketed` requests on an unchanged
+  revisit). The four gateway checks need `P3_MCP_KEY` (GitHub only); the
+  air-temperature fidelity replay was repeated against `series_bucketed`
+  directly: identical.

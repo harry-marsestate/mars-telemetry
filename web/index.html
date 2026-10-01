@@ -3723,6 +3723,9 @@ const RULES = [
        d:`No fruit in the building. ${c.primary} harvest is projected to start around ${dstr(fs.start)}; the cellar is holding ${c.primary-1} lots in barrel.`,
        m:'Note · cellar sensors remain live'};}}
 ];
+// Client-side rule domains whose data is operator-only (metric_registry
+// min_role 'operator'); those rules never run for a customer.
+const OPERATOR_ONLY_RULE_DOMAINS = new Set(['irrigation_volume']);
 async function renderAnomalies(box, ctx, tab){
   let hits;
   let nowBlockedMessage = null; // real-only-data-mode override for the "Now" section, winery only
@@ -3757,6 +3760,9 @@ async function renderAnomalies(box, ctx, tab){
     // below: irrigation_volume is explicitly still-simulated for 2026 and
     // must not be affected either.
     const asOf = endOfReal(v);
+    // Customers: no irrigation-gap fetch and no irrigation rule (irrigation
+    // is min_role 'operator' in metric_registry, like its panels).
+    const isOperator = (await getCurrentUserRole())==='operator';
     // All three real-data calls run concurrently (not RPC-then-fetches) and
     // degrade independently -- a timeout in any one (seen in practice:
     // anomalies_eval can hit a statement timeout under the initial
@@ -3768,7 +3774,7 @@ async function renderAnomalies(box, ctx, tab){
     // propagate out of renderAnomalies and wipe out the other two.
     const [rpcResult, gapsResult, gddResult] = await Promise.allSettled([
       sb.rpc('anomalies_eval', { p_vintage: v, p_as_of: asOf.toISOString() }),
-      fetchIrrigationGaps(v, ctx.blocks, asOf),
+      isOperator ? fetchIrrigationGaps(v, ctx.blocks, asOf) : new Map(),
       // realClimateSeriesEnd(), not the shared `asOf`: the veraison-window
       // rule reads daily_derived.gdd_cumulative_calibrated directly via
       // fetchGddAsOf -- no shared RPC parameter, no freshness-window
@@ -3824,6 +3830,7 @@ async function renderAnomalies(box, ctx, tab){
     // checked the same way regardless of current data state).
     const clientHits = RULES.filter(r=>r.tab===tab)
       .filter(r => dataMode!=='real_only' || !r.domain || isDomainReal(r.domain, v))
+      .filter(r => isOperator || !OPERATOR_ONLY_RULE_DOMAINS.has(r.domain))
       .map(r=>{
         let out=null; try{out=r.test(c);}catch(e){}
         return {sev:r.sev, out};}).filter(x=>x.out);
@@ -4709,13 +4716,17 @@ async function renderTab(tab){
     right.appendChild(ov);
     pending.push(()=>paintOverviewV('vineyard',c));
 
-    if(isOperator){
-      const an=makePanel({id:'anom-v', title:'Insights and Anomalies', unit:'AI-enabled',
-        render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c);
-      right.appendChild(an.panel); pending.push(an.run);
-      panelRuns['anom-v']=an.run;
-      panelHeaders['anom-v']=an.panel.querySelector('.p-hd');
-    }
+    // Operators and customers (docs/SECURITY.md, "Insights and Anomalies
+    // for customers"). What a customer sees is scoped by the database, not
+    // here: anomalies_eval() runs as the caller under sensor_read RLS, and
+    // the insights rows are filtered by insights_customer_read. The one
+    // client-side rule that reads operator-only data (irrigation) is skipped
+    // for customers in renderAnomalies().
+    const an=makePanel({id:'anom-v', title:'Insights and Anomalies', unit:'AI-enabled',
+      render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c);
+    right.appendChild(an.panel); pending.push(an.run);
+    panelRuns['anom-v']=an.run;
+    panelHeaders['anom-v']=an.panel.querySelector('.p-hd');
   } else {
     const ov=el('div','panel');
     ov.innerHTML=`<div class="ov-hd"><div class="ov-ttl">Cellar at a glance</div>
@@ -5063,7 +5074,7 @@ async function rerenderVineyardBlocks(){
   await paintOverviewV('vineyard',c);
 
   if(refreshPanelRun({id:'map', render:(b,cc)=>renderMap(b,cc)}, c)) await rerenderPanel('map');
-  if(isOperator && refreshPanelRun({id:'anom-v', render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c)){
+  if(refreshPanelRun({id:'anom-v', render:(b,cc)=>renderAnomalies(b,cc,'vineyard')}, c)){
     await rerenderPanel('anom-v');
   }
 
@@ -5792,7 +5803,7 @@ async function runSessionGate(){
   _userRolePromise=null; /* always re-check fresh, not a stale cached role from a prior session */
   // Another account's cached readings must never be shown to this one
   // (RLS differs per user): drop every cache on a user change.
-  if(session.user.id !== chatUserId){ invalidateDataCache(); resetTabViews(); }
+  if(session.user.id !== chatUserId){ invalidateDataCache(); resetTabViews(); _latestPatternsCache = null; }
 
   // Gated for EVERY role/status/provider, checked every login, ahead of
   // even the pending-approval screen -- a not-yet-approved signup with no

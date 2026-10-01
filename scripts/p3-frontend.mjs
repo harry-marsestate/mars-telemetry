@@ -190,6 +190,31 @@ async function runUser(browser, u) {
     record("frontend", `frontend.${u.key}.rls_boundary`, "error", {}, {}, err.message);
   }
 
+  // Insights and Anomalies (docs/SECURITY.md, "Insights and Anomalies for
+  // customers"): every approved user gets the vineyard panel; a customer's
+  // REST view of `insights` holds only surfaced vineyard rows over
+  // customer-visible metrics, estate-wide or on one of its own blocks.
+  try {
+    const ins = await page.evaluate(async () => {
+      const { data, error } = await sb.from("insights").select("tab, status, metric_a, metric_b, scope_kind, scope_block_id");
+      return { error: error?.message ?? null, rows: data ?? [], panel: "anom-v" in (window.__panelData || {}),
+        panelStatus: window.__panelData?.["anom-v"]?.status ?? null };
+    });
+    const CUSTOMER_METRICS = new Set(["air_temp", "humidity", "precipitation", "soil_moisture", "soil_temp", "solar",
+      "gdd_day", "dtr", "vpd_kpa", "vpd_peak_kpa", "et0_in"]);
+    const outside = u.role === "operator" ? [] : ins.rows.filter((r) => r.tab !== "vineyard" || r.status !== "surfaced"
+      || !CUSTOMER_METRICS.has(r.metric_a) || !CUSTOMER_METRICS.has(r.metric_b)
+      || (r.scope_kind !== "estate" && !u.blocks.includes(r.scope_block_id)));
+    const ok = !ins.error && ins.panel && ins.panelStatus === "ok" && outside.length === 0
+      && (u.role !== "operator" || ins.rows.length > 0);
+    record("frontend", `frontend.${u.key}.insights_scope`, ok ? "pass" : "fail",
+      { panel: ins.panel, panel_status: ins.panelStatus, rows: ins.rows.length, rows_outside_scope: outside.slice(0, 5), error: ins.error },
+      { panel: true, panel_status: "ok", rows_outside_scope: [] },
+      ok ? null : "the Insights and Anomalies panel is missing, or insights rows outside this user's scope are readable");
+  } catch (err) {
+    record("frontend", `frontend.${u.key}.insights_scope`, "error", {}, {}, err.message);
+  }
+
   if (u.role === "operator") { await fidelity(page); await currentVintageChecks(page); await latestConsistency(page); await tabCache(page); }
   await context.close();
   return snapshot;

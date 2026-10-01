@@ -190,7 +190,7 @@ async function runUser(browser, u) {
     record("frontend", `frontend.${u.key}.rls_boundary`, "error", {}, {}, err.message);
   }
 
-  if (u.role === "operator") { await fidelity(page); await currentVintageChecks(page); await latestConsistency(page); }
+  if (u.role === "operator") { await fidelity(page); await currentVintageChecks(page); await latestConsistency(page); await tabCache(page); }
   await context.close();
   return snapshot;
 }
@@ -361,6 +361,64 @@ async function latestConsistency(page) {
     await page.evaluate(async () => {
       state.vineyard.vintages = [CURRENT]; state.vineyard.blocks = [...ALL_IDS];
       state.winery.vintages = [CURRENT]; state.winery.blocks = [...ALL_IDS];
+    }).catch(() => {});
+  }
+}
+
+// ---- operator: tab cache (docs/SECURITY.md, "Dashboard caching") -------------------
+// Returning to an already-rendered tab with unchanged inputs must not re-render
+// it or send a single series_bucketed request; changing an input (vintage,
+// a panel's range) while the tab is hidden must re-render it with new requests
+// on the next visit. Counts the page's own series_bucketed requests (resource
+// timing), and reads showTab()'s decision log (window.__tabRenderLog).
+async function tabCache(page) {
+  const steps = [];
+  try {
+    const step = async (name, fn) => {
+      const r = await page.evaluate(async (fn) => {
+        const count = () => performance.getEntriesByType("resource").filter((e) => e.name.includes("/rpc/series_bucketed")).length;
+        const idle = async () => { // panels settled and no request finished in the last 1 s
+          for (let i = 0, last = -1, quietSince = Date.now(); i < 240; i++) {
+            const n = performance.getEntriesByType("resource").length;
+            const busy = Object.values(window.__panelData || {}).some((p) => p.status === "rendering");
+            if (n !== last || busy) { last = n; quietSince = Date.now(); }
+            if (Date.now() - quietSince > 1000) return;
+            await new Promise((x) => setTimeout(x, 250));
+          }
+        };
+        await idle();
+        // The default 250-entry resource buffer is full by now; a full one records nothing.
+        performance.setResourceTimingBufferSize(100000); performance.clearResourceTimings();
+        const before = count(), logLen = (window.__tabRenderLog || []).length;
+        await (0, eval)(`(async () => { ${fn} })()`);
+        await idle();
+        const decisions = (window.__tabRenderLog || []).slice(logLen);
+        return { series_requests: count() - before, decisions: decisions.map((d) => `${d.tab}:${d.rendered ? d.why : "cached"}`) };
+      }, fn);
+      steps.push({ name, ...r });
+      return r;
+    };
+    const click = (tab) => `document.querySelector("button.tab[data-tab='${tab}']").click();`;
+    await step("prime vineyard", click("vineyard"));
+    await step("prime winery", click("winery"));
+    const back = await step("back to vineyard (unchanged)", click("vineyard"));
+    const again = await step("winery again (unchanged)", click("winery"));
+    const vint = await step("vineyard vintage changed while hidden", `state.vineyard.vintages = [CURRENT - 1]; ${click("vineyard")}`);
+    await step("winery", click("winery"));
+    const rng = await step("airtemp range changed while hidden", `state.range.airtemp = state.range.airtemp === '30D' ? '5D' : '30D'; ${click("vineyard")}`);
+    const ok = back.series_requests === 0 && back.decisions.join() === "vineyard:cached"
+      && again.series_requests === 0 && again.decisions.join() === "winery:cached"
+      && vint.series_requests > 0 && vint.decisions.join() === "vineyard:inputs changed"
+      && rng.series_requests > 0 && rng.decisions.join() === "vineyard:inputs changed";
+    record("frontend", "frontend.tab_cache", ok ? "pass" : "fail", { steps }, {
+      unchanged_revisit: { series_requests: 0, decision: "cached" }, changed_input: { series_requests: "> 0", decision: "inputs changed" } },
+      ok ? null : "a tab revisit re-fetched with unchanged inputs, or did not re-fetch after an input changed");
+  } catch (err) {
+    record("frontend", "frontend.tab_cache", "error", { steps }, {}, err.message);
+  } finally {
+    await page.evaluate(async () => {
+      state.vineyard.vintages = [CURRENT]; delete state.range.airtemp;
+      document.querySelector("button.tab[data-tab='vineyard']").click();
     }).catch(() => {});
   }
 }

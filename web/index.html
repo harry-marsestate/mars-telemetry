@@ -871,6 +871,29 @@ function bucketWindowStart(end, range){
   return new Date(end.getTime() - b.n * intervalToMs(b.interval));
 }
 
+/* Short-lived in-memory cache for chart data (docs/SECURITY.md, "Dashboard
+   caching"). Keyed by every parameter of the request, so two calls share an
+   entry only when they would send the identical request; identical requests
+   in flight share one promise. Entries live DATA_TTL_MS (the same 60 s the
+   latest-reading memo always had, below the 5-minute poll, so a poll always
+   refetches). A failed fetch is never kept. Cleared on sign-out / user
+   change, and per metric when a realtime insert arrives for it. */
+const DATA_TTL_MS = 60000;
+const _dataMemo = new Map(); // key -> {at, p, metric}
+function memoized(key, metric, fetcher, keep = () => true){
+  const hit = _dataMemo.get(key);
+  if(hit && Date.now() - hit.at < DATA_TTL_MS) return hit.p;
+  const entry = { at: Date.now(), metric, p: null };
+  entry.p = fetcher().then(r => { if(!keep(r) && _dataMemo.get(key) === entry) _dataMemo.delete(key); return r; },
+    err => { if(_dataMemo.get(key) === entry) _dataMemo.delete(key); throw err; });
+  _dataMemo.set(key, entry);
+  return entry.p;
+}
+// metric undefined: everything (sign-out, user change, new session metadata).
+function invalidateDataCache(metric){
+  for(const [k, e] of _dataMemo) if(metric === undefined || e.metric === metric) _dataMemo.delete(k);
+}
+
 async function getSeries({ metric, scope, vintage, range, end, agg }) {
   const bucket = RANGE_BUCKETS[range];
   // realClimateSeriesEnd(), not seriesEndReal(): a fallback for a caller
@@ -893,8 +916,7 @@ async function getSeries({ metric, scope, vintage, range, end, agg }) {
   // as-of and reading the hour/day/month AFTER it (docs/SECURITY.md, "Latest
   // value: one point-in-time reading on every range").
   const queryEnd = new Date(endDate.getTime() - 1);
-
-  const { data, error } = await sb.rpc('series_bucketed', {
+  const params = {
     p_metric: metric,
     p_block: (scope === 'estate' || scope === 'cellar') ? null : scope,
     p_vintage: vintage || null,
@@ -902,15 +924,21 @@ async function getSeries({ metric, scope, vintage, range, end, agg }) {
     p_end: queryEnd.toISOString(),
     p_bucket: bucket.interval,
     p_agg: agg || 'avg'
-  });
+  };
+  // Callers only read the result (buildSeriesReal maps it into new points).
+  return memoized('series_bucketed' + JSON.stringify(params), metric, () => fetchSeries(params), r => !r.stale);
+}
+async function fetchSeries(params){
+  const metric = params.p_metric;
+  const { data, error } = await sb.rpc('series_bucketed', params);
 
   if (error) {
     console.error('getSeries error:', error);
     return { metric, points: [], stale: true, lastReading: null };
   }
   try{
-    window.__seriesCalls.push({metric, block:(scope === 'estate' || scope === 'cellar') ? null : scope, vintage: vintage || null,
-      start: startDate.toISOString(), end: queryEnd.toISOString(), bucket: bucket.interval, agg: agg || 'avg', points: data});
+    window.__seriesCalls.push({metric, block:params.p_block, vintage:params.p_vintage,
+      start:params.p_start, end:params.p_end, bucket:params.p_bucket, agg:params.p_agg, points: data});
     if(window.__seriesCalls.length > 300) window.__seriesCalls.shift();
   }catch(_){}
 
@@ -929,6 +957,10 @@ async function getDerivedSeries({ field, vintage, range, end }) {
   const endDate = end || realClimateSeriesEnd(field, vintage);
   const bucket = RANGE_BUCKETS[range];
   const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
+  return memoized('daily_derived' + JSON.stringify([field, vintage, +startDate, +endDate]), field,
+    () => fetchDerivedSeries(field, vintage, startDate, endDate), r => !r.stale);
+}
+async function fetchDerivedSeries(field, vintage, startDate, endDate){
   const { data, error } = await sb.from('daily_derived')
     .select(`day, ${field}`)
     .eq('vintage', vintage)
@@ -1729,17 +1761,13 @@ async function sumSeriesReal(metric, ids, v, range, opts={}){
 const FLUX_INTERVAL = { precipitation:'hour', irrigation_volume:'day' };
 function latestAsOf(key, v){ return realClimateSeriesEnd(key, v); }
 // spec: {metric, scope} | {metric, blocks, agg} | {field}. Returns {t, v} or null.
-// A panel's chip and its chart ask for the same reading in the same render;
-// one request serves both (60 s, so the 5-minute poll still refreshes it).
-const _latestMemo = new Map();
+// A panel's chip, its chart and its overview tile ask for the same reading;
+// one request serves all three. Shares the chart-data cache (memoized(),
+// DATA_TTL_MS = 60 s, so the 5-minute poll still refreshes it).
 function latestFor(spec, vintage, asOf){
   asOf = asOf || latestAsOf(spec.field || spec.metric, vintage);
-  const key = JSON.stringify([spec.field, spec.metric, spec.scope, spec.blocks, spec.agg, vintage, +asOf]);
-  const hit = _latestMemo.get(key);
-  if(hit && Date.now() - hit.at < 60000) return hit.p;
-  const p = latestFetch(spec, vintage, asOf);
-  _latestMemo.set(key, { at: Date.now(), p });
-  return p;
+  const key = 'latest' + JSON.stringify([spec.field, spec.metric, spec.scope, spec.blocks, spec.agg, vintage, +asOf]);
+  return memoized(key, spec.field || spec.metric, () => latestFetch(spec, vintage, asOf));
 }
 async function latestFetch(spec, vintage, asOf){
   if(spec.field){
@@ -4432,7 +4460,12 @@ function subscribeOverviewRealtime(){
       filter:'metric_key=in.(air_temp,humidity,soil_moisture,cellar_temp,cellar_rh)'
     }, payload=>{
       const row=payload.new;
-      if(['air_temp','humidity','soil_moisture'].includes(row.metric_key)) applyVineyardRealtimeInsert(row);
+      // New data for this metric: drop its cached series/latest readings and
+      // make its tab re-render the next time it is opened (tabNeedsRender).
+      invalidateDataCache(row.metric_key);
+      const vineyardRow = ['air_temp','humidity','soil_moisture'].includes(row.metric_key);
+      markTabsDirty([vineyardRow ? 'vineyard' : 'winery']);
+      if(vineyardRow) applyVineyardRealtimeInsert(row);
       else applyWineryRealtimeInsert(row);
     })
     .subscribe();
@@ -4646,6 +4679,7 @@ function vineyardOverviewNote(c){
 }
 
 async function renderTab(tab){
+  const renderedAt=Date.now(), inputs=tabInputs(tab);
   const c=ctxFor(tab);
   const role = await getCurrentUserRole();
   const isOperator = role==='operator';
@@ -4754,8 +4788,83 @@ async function renderTab(tab){
      try/catch -- a throw in either would otherwise surface as an unhandled
      promise rejection; allSettled absorbs it instead, a genuine (if minor)
      fix on top of the scroll-restore bug this was written for. */
-  await new Promise(res=>requestAnimationFrame(res));
+  await nextFrame();
   await Promise.allSettled(pending.map(f=>f()));
+  noteTabRendered(tab, inputs, renderedAt);
+}
+
+/* One frame, or FRAME_FALLBACK_MS if no frame comes. Chrome runs no
+   requestAnimationFrame callbacks while the page is hidden (a background
+   tab, a minimised or covered window), so a dashboard loaded there sat on
+   an empty overview until the page was next shown -- measured at 30+ s.
+   The timer is safe for layout: the panels are already in the DOM, and
+   reading clientWidth forces a synchronous layout whether or not a frame
+   has been painted. */
+const FRAME_FALLBACK_MS = 100;
+function nextFrame(){
+  return new Promise(res=>{ requestAnimationFrame(()=>res()); setTimeout(res, FRAME_FALLBACK_MS); });
+}
+
+/* Per-tab rendered state (docs/SECURITY.md, "Dashboard caching"). A tab's
+   DOM stays in the page while another tab is shown, so returning to it can
+   show it as-is -- but only when nothing that shapes its data has changed.
+   showTab() re-renders when any of these holds:
+     (a) the tab was never rendered (tabs render lazily, on first open);
+     (b) its inputs differ from what is on screen: tabInputs() below --
+         vintages, blocks, every one of its panels' range / scroll / lot /
+         archived state, the user, role, data mode, the current vintage and
+         the session's real-data metadata (bumped by each session-gate pass);
+     (c) its last full render is older than TAB_TTL_MS;
+     (d) a realtime insert for one of its metrics arrived since (dirty);
+     (e) it was laid out at a different width (resize, or rendered hidden).
+   Every in-place path (range buttons, history scroll, block and vintage
+   controls, the 5-minute poll) re-renders the visible tab immediately and
+   then re-records its inputs here, so a matching record always means the
+   DOM shows exactly those inputs. */
+const TAB_TTL_MS = 5*60*1000;
+let sessionMetaVersion = 0; // bumped whenever runSessionGate refreshes real-data metadata
+const tabView = {}; // tab -> {inputs, renderedAt, width, dirty}
+function tabInputs(tab){
+  // Normalised to what a render reads, so makePanel() filling in a panel's
+  // default range does not count as a change.
+  const ps = PANELS.filter(p=>p.tab===tab);
+  return JSON.stringify([tab, chatUserId, CURRENT, dataMode, sessionMetaVersion,
+    state[tab].vintages, state[tab].blocks,
+    ps.map(p => [p.id, state.range[p.id] || p.range || null, state.scrollDays[p.id] || 0]),
+    tab==='winery' ? [state.lotSelect.ferm ?? null, !!state.vesselsArchived.tanks] : null]);
+}
+function tabWidth(tab){ return $('#body-'+tab)?.clientWidth || 0; }
+// inputs: tabInputs() taken when the render STARTED (what it drew).
+// renderedAt: set by a renderTab() rebuild (restarts the TTL); omitted for an
+// in-place update, which keeps the tab's TTL and dirty flag.
+function noteTabRendered(tab, inputs, renderedAt){
+  const prev = tabView[tab];
+  if(renderedAt === undefined && !prev) return;
+  tabView[tab] = { inputs, width: tabWidth(tab),
+    renderedAt: renderedAt ?? prev.renderedAt, dirty: renderedAt === undefined ? prev.dirty : false };
+}
+function tabNeedsRender(tab){
+  const v = tabView[tab];
+  if(!v) return 'never rendered';
+  if(v.dirty) return 'realtime insert';
+  if(Date.now() - v.renderedAt > TAB_TTL_MS) return 'older than TTL';
+  if(v.inputs !== tabInputs(tab)) return 'inputs changed';
+  if(v.width !== tabWidth(tab)) return 'width changed';
+  return null;
+}
+function markTabsDirty(tabs){ tabs.forEach(t => { if(tabView[t]) tabView[t].dirty = true; }); }
+function resetTabViews(){ Object.keys(tabView).forEach(t => delete tabView[t]); }
+const tabRenders = {}; // tab -> in-flight renderTab promise
+// Show a tab: re-render only if tabNeedsRender() says so. The reason is kept
+// for the P3 tab-cache check (window.__tabRenderLog).
+function showTab(tab){
+  const why = tabNeedsRender(tab);
+  try{ (window.__tabRenderLog ||= []).push({tab, at: Date.now(), rendered: !!why, why}); }catch(_){}
+  if(!why) return Promise.resolve(false);
+  if(tabRenders[tab]) return tabRenders[tab].then(()=>false);
+  const p = renderTab(tab).finally(()=>{ delete tabRenders[tab]; });
+  tabRenders[tab] = p;
+  return p.then(()=>true);
 }
 
 /* Wraps renderTab() for any same-tab, in-place interaction (a control the
@@ -4779,7 +4888,7 @@ $$('.tab').forEach(t=>t.onclick=()=>{
   $$('.tab').forEach(x=>x.classList.toggle('on', x===t));
   $$('.view').forEach(v=>v.classList.toggle('on', v.id==='view-'+state.tab));
   hideTip();
-  if(state.tab!=='chat') renderTab(state.tab);
+  if(state.tab!=='chat') showTab(state.tab);
 });
 
 /* Live tick */
@@ -4812,7 +4921,13 @@ let panelHeaders={}; // panelId -> .p-hd element; lets a scoped update refresh a
                       // -- currently only used by rerenderHarvestVintage() below.
 async function rerenderPanel(panelId){
   const run = panelRuns[panelId];
-  if(run) await run();
+  if(!run) return;
+  const tab = panelTab(panelId), inputs = tabInputs(tab);
+  await run();
+  noteTabRendered(tab, inputs);
+}
+function panelTab(panelId){
+  return PANELS.find(p=>p.id===panelId)?.tab || (panelId==='anom-w' ? 'winery' : 'vineyard');
 }
 
 /* Scoped update for the winery Harvest vintage dropdown -- replaces a full
@@ -4963,6 +5078,9 @@ async function rerenderVineyardBlocks(){
 }
 setInterval(()=>{
   if(!dashboardBooted) return;
+  // A hidden tab is not redrawn (its panels would lay out at zero width);
+  // it is marked dirty instead, so showTab() renders it fresh when opened.
+  if(state.tab!=='vineyard'){ markTabsDirty(['vineyard']); return; }
   POLL_5MIN_PANEL_IDS.forEach(id=>panelRuns[id]?.());
 }, 5*60*1000);
 
@@ -5604,8 +5722,7 @@ const ROLE_LABELS = { operator: 'Team Member', customer: 'Obsidian Member' };
 function computeInitials(firstName, lastName){
   return (firstName[0]+lastName[0]).toUpperCase();
 }
-async function updateHeaderForSession(session, role){
-  const { data: profile } = await sb.from('user_profiles').select('first_name, last_name, is_admin').eq('id', session.user.id).single();
+function updateHeaderForSession(profile, role){
   const displayName = `${profile.first_name} ${profile.last_name}`;
   $('#avatar').textContent = computeInitials(profile.first_name, profile.last_name);
   $('.menu-name').textContent = displayName;
@@ -5641,8 +5758,9 @@ function showDashboard(){
   $('.wrap').style.display='';
   if(!dashboardBooted){
     dashboardBooted=true;
-    renderTab('vineyard');
-    renderTab('winery');
+    // Only the tab on screen; the other renders when first opened (showTab).
+    resetTabViews();
+    showTab(state.tab==='chat' ? 'vineyard' : state.tab);
     subscribeOverviewRealtime();
   }
 }
@@ -5667,10 +5785,14 @@ function showFinishProfileOnly(prefill){
   $('#finish-profile-view').classList.add('on');
 }
 
+let sessionMetaFingerprint = null; // what the last gate pass read, see sessionMetaVersion
 async function runSessionGate(){
   const { data: { session } } = await sb.auth.getSession();
-  if(!session){ chatUserId=null; THRESHOLDS=null; thresholdsPromise=null; showAuthOnly(); return; }
+  if(!session){ chatUserId=null; THRESHOLDS=null; thresholdsPromise=null; invalidateDataCache(); showAuthOnly(); return; }
   _userRolePromise=null; /* always re-check fresh, not a stale cached role from a prior session */
+  // Another account's cached readings must never be shown to this one
+  // (RLS differs per user): drop every cache on a user change.
+  if(session.user.id !== chatUserId){ invalidateDataCache(); resetTabViews(); }
 
   // Gated for EVERY role/status/provider, checked every login, ahead of
   // even the pending-approval screen -- a not-yet-approved signup with no
@@ -5682,7 +5804,12 @@ async function runSessionGate(){
   // splitting full_name/name -- same logic as the migration's backfill
   // and handle_new_user(). Email/password accounts have no such metadata
   // and start blank.
-  const { data: nameProfile, error: nameProfileErr } = await sb.from('user_profiles').select('first_name, last_name').eq('id', session.user.id).single();
+  // The profile row (name for this gate, name + is_admin for the header)
+  // and the role are independent: one round trip instead of three.
+  const [{ data: nameProfile, error: nameProfileErr }, role] = await Promise.all([
+    sb.from('user_profiles').select('first_name, last_name, is_admin').eq('id', session.user.id).single(),
+    getCurrentUserRole()
+  ]);
   if(nameProfileErr){
     // A real query failure here (network/DB, not "no name set yet") must
     // not be silently treated as an incomplete profile -- nameProfile
@@ -5702,10 +5829,9 @@ async function runSessionGate(){
     return;
   }
 
-  const role = await getCurrentUserRole();
   if(role==='pending' || role===null){ showPendingOnly(); return; }
   if(session.user.id !== chatUserId){ chatUserId = session.user.id; initChat(session, role); }
-  await updateHeaderForSession(session, role);
+  updateHeaderForSession(nameProfile, role);
   // Must resolve before showDashboard()'s synchronous renderTab() calls --
   // every panel that calls isRealClimateVintage()/vineyardAsOfDate() reads
   // whatever refreshRealClimateVintages() last populated, not a fresh
@@ -5721,6 +5847,17 @@ async function runSessionGate(){
   // synchronously, and this is the first point a signed-in, approved
   // session exists (it replaces the old parse-time, pre-sign-in fetch).
   await Promise.all([refreshRealClimateVintages(), refreshDataMode(), refreshInnovintSyncStatus(), refreshThresholds()]);
+  // supabase-js re-emits SIGNED_IN every time this browser tab becomes
+  // visible again, so this gate re-runs often; unchanged. When what it read
+  // differs from the last pass, every tab re-renders the next time it is
+  // opened (tabInputs() includes sessionMetaVersion). The tab on screen is
+  // left as it is, as before.
+  const fp = JSON.stringify([role, dataMode, realClimateAsOfCurrent,
+    [...realClimateByMetric].map(([m, vs]) => [m, [...vs].sort()]),
+    domainRealCache && [...domainRealCache].map(([d, vs]) => [d, [...vs].sort()]),
+    [...innovintSyncStatus].map(([k, d]) => [k, +d]), realClimateDerivationInputs,
+    THRESHOLDS && [...THRESHOLDS.byKey.values()]]);
+  if(fp !== sessionMetaFingerprint){ sessionMetaFingerprint = fp; sessionMetaVersion++; }
   showDashboard();
   resumeAgentKeyReauth(session);
 }

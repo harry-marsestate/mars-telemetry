@@ -7151,6 +7151,16 @@ pg_net's queue, its Authorization header is readable like the Vault key's
     ingest refuses its hours);
   - **warns from 14 days before 1 November** if the next vintage isn't in
     `public.vintages`.
+- `database.insights_estate_inputs_estate_wide` (added 2026-10-01): fails if
+  `sensor_readings` holds any REAL per-block row (block_id not null, source in
+  `real_data_sources`) for an insights-scan input metric (air_temp, humidity,
+  precipitation, soil_moisture, soil_temp, solar; the derived ones come from
+  air_temp/humidity), any vintage. Mock per-block rows are listed but pass:
+  `series_bucketed` drops all mock rows of a (metric, vintage) with real data,
+  and the scanner scans only such vintages. On failure: compute estate series
+  from block_id-null rows only, or require access to every block for estate
+  rows in `insights_customer_read` (see "Insights and Anomalies for
+  customers").
 - `database.integrity.soil_moisture_range`: every soil reading between 0 and
   100.
 - `database.integrity.gdd_calibrated_2022_2025`: each closed vintage's final
@@ -8188,3 +8198,55 @@ another ~0.2 s on reload, but changes auth-event timing.
   revisit). The four gateway checks need `P3_MCP_KEY` (GitHub only); the
   air-temperature fidelity replay was repeated against `series_bucketed`
   directly: identical.
+
+## Insights and Anomalies for customers (2026-10-01)
+The vineyard "Insights and Anomalies" panel (`anom-v`) is shown to customers
+as well as operators. The winery one (`anom-w`: fermentation, tanks, cellar)
+stays operator-only. Nothing a customer sees in it comes from data their RLS
+does not already give them:
+
+- **Now** (`anomalies_eval()`, `LANGUAGE sql`, not SECURITY DEFINER): runs
+  as the caller, so `sensor_read` limits it to min_role 'all' metrics and
+  the customer's blocks; the derived rules read `daily_derived`, which every
+  customer already reads for the GDD/DTR/VPD/ET0 panels. The client-side
+  irrigation-interval rule (irrigation is min_role 'operator') is skipped
+  for customers, and its `sensor_readings` query is not sent
+  (`OPERATOR_ONLY_RULE_DOMAINS`).
+- **Patterns** (`insights`): new policy `insights_customer_read`
+  (migration `20261001130000`), next to the unchanged operator-only
+  `insights_read`. A customer reads a row only if it is `surfaced`, on the
+  vineyard tab, both metrics are customer-visible
+  (`customer_visible_metric()`: metric_registry min_role 'all', or a
+  metric_derivation whose every input is; anything else, e.g.
+  `harvest_yield_tons`, `irrigation_volume`, labour, is denied), and its
+  scope is estate-wide or one of `accessible_blocks()`.
+- Estate-scope insights are built by insights-scan from
+  `series_bucketed(p_block => null)`. For the vintages it scans, every
+  customer-visible input row is estate-wide (block_id null; 20,544 each for
+  air_temp, humidity, soil_moisture, soil_temp, none per block), which
+  `sensor_read` shows every customer. **If per-block real climate or soil
+  rows are ever ingested**, an estate insight would blend blocks a
+  block-scoped customer cannot see; at that point either compute estate
+  series from block_id-null rows only, or require access to every block for
+  estate rows in this policy. The P1 tripwire
+  `database.insights_estate_inputs_estate_wide` (migration
+  `20261001140000`) fails the day such a row appears; the weekly scan runs
+  Sundays 15:00 UTC, after that day's 12:00 P1. Mock per-block rows (2026
+  `soil_probe` soil moisture/temperature today) cannot reach an insight and
+  only appear in its observation.
+- The veraison note names Block 1 ("sits highest and colours first") only
+  to a reader whose `accessible_blocks()` include B1; others get
+  block-neutral wording. Operator wording is unchanged.
+- The client's patterns cache (`_latestPatternsCache`) is now cleared on a
+  user change, so an operator's patterns can never be shown to a customer
+  who signs in on the same page.
+- The patterns shown are from the newest run that has a surfaced, narrated
+  row the caller can read; for a customer that can be an older run than
+  the operator sees if the newest run surfaced only operator-only pairs.
+
+Verified: `tests/insights-customer-read.test.mjs` (PGlite: operator,
+all-blocks customer, B2-only customer, pending, signed out; fails if the
+metric check is removed); against production data in a rolled-back
+transaction before applying: operator 20 rows, both synthetic customers 13
+(climate and soil pairs only, no yield/irrigation row). P3 adds
+`frontend.<user>.insights_scope` for every synthetic user.

@@ -7274,6 +7274,10 @@ Operator only, panels vs the gateway (P3 key `mtk_jxk3p3fn`):
   REST count.
 - `gateway.tools.anomaly_anchor_vs_rest`: `get_anomalies` at the
   2024-07-06 anchor returns the same 3 rules as REST.
+- `frontend.latest.consistent` (added 2026-10-01): for every timescale panel
+  and range, the latest chip, the newest plotted point and the overview tile
+  agree within 0.001 (see "Latest value: one point-in-time reading on every
+  range").
 
 **P4, the gateway itself** (inside `get_system_health`):
 - `gateway.p4.database_reachable`.
@@ -7292,7 +7296,13 @@ Operator only, panels vs the gateway (P3 key `mtk_jxk3p3fn`):
 range, charts: [...]}`:
 - `makePanel`/`refreshPanelRun` set the status (`rendering`, `ok`, `blocked`
   or `error`);
-- `lineChart`/`barChart`/`table`/`strip` append what they drew.
+- `lineChart`/`barChart`/`groupedBars`/`table`/`strip` append what they drew.
+  Chart series carry `latest` (the shared latest reading) and `newest` (the
+  newest plotted value).
+- `paintPanelLatest` sets `latest: {t, v, interval}` (the panel's chip).
+
+`window.__overviewData[tab]` holds the raw overview tile values (`vintage`,
+`t`, `rh`, `sm`, `g`, `vp`, `dt`; winery `t`, `rh`).
 
 `window.__seriesCalls` records the `series_bucketed` parameters and rows of
 the last 300 calls. The hook holds references to data already fetched for the
@@ -7908,3 +7918,145 @@ them.
   `p3_backup_dispatch()` was run as if on the next day with no P3 run:
   pg_net → GitHub answered 204, workflow run 36741272277 started, and the
   test's `p3_backup` record was deleted.
+
+## Latest value: one point-in-time reading on every range (2026-10-01)
+
+A panel's newest point, its tooltip and the "Estate at a glance" tile could
+each show a different number, and the panel's number changed with the range
+(1D / 5D / 30D / 1Y). Measured on production before the fix (2026 vintage,
+as-of 25 Sep 14:20 Pacific):
+
+| Panel | 1D | 5D | 30D | 1Y | Overview |
+|---|---|---|---|---|---|
+| Air temperature (°F) | 79.0 | 78.5 | 60.7 | 62.8 | 79.0 |
+| Relative humidity (%) | 18 | 16.3 | 48.3 | 56.5 | 18 |
+| Soil moisture (% VWC) | 14.0 | 14.0 | 14.0 | 14.7 | — |
+| Soil temperature (°F) | 76.7 | 76.65 | 76.65 | 66.1 | — |
+| Precipitation (in, bar) | 0 | 0 | 0 | 0.29 | — |
+| Irrigation (gal, bar) | — | — | null (last bar empty) | 113,271 | — |
+| Solar (W/m², simulated) | 893 | 893 | 315 | 307 | panel text 893 |
+| Cellar temp / RH (winery) | last bucket empty; end dot a 1 h / 3 h / 1 day average | | | | 57.2 / 77 |
+
+Every panel now reads 78.0 °F, 22 %, 14.0 % VWC, 75.9 °F, 0 in, 0 gal, 895
+W/m² (all blocks), 57.24 °F and 76.85 % on every range, and the tiles agree.
+2025 and the B1 / B2 / B3 selections were checked the same way.
+
+### Root causes
+1. **Bucket averages and sums.** The newest point was the last
+   `series_bucketed` bucket. Its size depends on the range (1 h, 3 h, 1 day,
+   1 month), so it was a 1 h, 3 h, 24 h or month average (or sum).
+2. **The last bucket started at the as-of and read data after it.**
+   `generate_series(start, end, bucket)` includes `end`. The window
+   `[end - n*bucket, end]` therefore had n+1 buckets, and the last one,
+   `[as-of, as-of + bucket)`, held only readings from after the as-of. The
+   real 2026 ingest runs past the as-of day (air temperature to 1 Oct, as-of
+   25 Sep), so the overview's 79.0 °F was the 15:00 reading, not the newest
+   one at 14:20. For cellar data (it stops at 07:00 on 28 Jul, as-of 14:20)
+   the last bucket was empty.
+3. **The overview used a different source for soil moisture.** It asked per
+   block, but real soil data is estate-wide (`block_id` null), so the tile
+   showed "—" for every real vintage while the panel showed 14.0.
+4. **1Y used 360 days of calendar-month buckets**, so the 12th month ran
+   about 5 days past the as-of.
+5. **Daily derived series (GDD, DTR, VPD, ET₀) were gap-filled over UTC
+   days.** An archived vintage's 31 Oct 23:59 Pacific end is 1 Nov in UTC.
+   That added an empty "1 Nov" newest point, and every daily point was
+   labelled with the previous day west of UTC. This was a timezone edge.
+6. **Simulated solar** took its "current insolation" figure from the reading
+   at the as-of, but the 30D / 1Y newest point was a daily or 10-day mean.
+   For an archived vintage, the figure used a harvest-peak instant while the
+   chart ran to 31 Oct.
+
+### Semantics
+- **As-of**: `latestAsOf(key, v)` = `realClimateSeriesEnd(key, v)`. This is
+  the same instant every unscrolled single-vintage chart ends at:
+  - CURRENT, real-climate metrics: the real-climate as-of day at 14:20
+    Pacific.
+  - CURRENT, still-simulated metrics: `MOCK_NOW` (28 Jul 2026 14:20).
+  - Archived vintages: 31 Oct.
+
+  Ranges, scroll and compare mode never move it. The vintage rule and
+  `MOCK_NOW` are unchanged.
+- **State metrics** (air and soil temperature, humidity, soil moisture,
+  cellar temperature and RH, solar): latest = the newest raw reading at or
+  before the as-of.
+- **Flux metrics** (`FLUX_INTERVAL`: precipitation = hour, irrigation volume
+  = day): latest = the newest raw interval value. Precipitation is an hourly
+  total and irrigation a daily total, and the chip says so ("Latest hour",
+  "Latest day"). Bars still show range-bucket totals. The newest bar's
+  tooltip leads with the interval value, then "Bucket from …" with that
+  bucket's total. Buckets now tile `[start, as-of)` exactly, so there is no
+  partial bucket to mark. The irrigation and precipitation header totals
+  ("in · 5.39 total", "gal · …/ac") are left as they were. They are totals
+  of the visible window and change with the range by design; they are not a
+  latest value.
+- **Daily derived and cumulative metrics** (GDD to date, DTR, VPD, ET₀):
+  latest = the newest `daily_derived` row on or before the as-of day. GDD is
+  the season total to date, so it is the same on every range.
+- **Multi-block** (simulated per-block soil, irrigation over the selected
+  blocks): latest = the newest instant any selected block has, combining the
+  blocks with a reading at that instant (mean for state, sum for flux). This
+  is the same combination the series applies per bucket.
+
+### Fix
+- Migration `20261001120000_latest_reading.sql`:
+  `public.latest_reading(metric, block, vintage, as_of, agg)` returns the
+  newest eligible row(s) at or before `as_of`.
+  - It uses `series_bucketed`'s row eligibility clause for clause, including
+    real-over-mock precedence with and without a vintage.
+  - Rows at the newest instant are averaged or summed.
+  - It is SECURITY INVOKER, so sensor_readings RLS applies to the caller.
+    `search_path = ''`.
+  - EXECUTE is granted to `authenticated` and `service_role` only (not PUBLIC
+    or anon).
+  - Tested offline (`tests/latest-reading.test.mjs`, 6/6), then on
+    production inside a rolled-back transaction. `supabase db push
+    --dry-run` listed only this migration before `db push`. Live grants
+    were checked afterwards.
+- `web/index.html`:
+  - One helper, `latestFor(spec, vintage, asOf)`, reads `latest_reading`, or
+    `daily_derived` for a field.
+  - One registry, `PANEL_LATEST`, holds each timescale panel's spec, unit
+    and overview tile key. The panel chip ("Latest · 78.0 °F · 25 Sep
+    14:00"), the newest plotted point and its tooltip (`withLatest`), and the
+    vineyard and winery overview tiles all read it.
+  - `getSeries` queries `[as-of − n·bucket, as-of − 1 ms]`, so the last
+    bucket is `[as-of − bucket, as-of)`. 1Y starts 12 calendar months (UTC)
+    before the as-of.
+  - `getDerivedSeries` gap-fills over local calendar days.
+  - Realtime inserts newer than the as-of no longer move the overview tiles
+    ahead of the panels.
+  - `series_bucketed` itself is unchanged.
+- Not covered: wind has no range and stays a single simulated reading.
+  Compare mode shares a 31 Oct axis, so the chip there shows the primary
+  vintage's latest and the lines keep their bucket values.
+- Edge: when the as-of falls on the 29th to 31st, Postgres's '1 month' step
+  clamps to the 28th, so the 12th 1Y bucket can run up to 3 days past the
+  as-of. That affects only the 1Y bar total, never the latest value.
+
+### Regression check: `frontend.latest.consistent` (P3, operator)
+`scripts/p3-frontend.mjs` re-renders every `PANEL_LATEST` panel on every
+range it offers, for 4 configurations:
+- the current vintage with all blocks;
+- the current vintage with B2 only;
+- the previous vintage;
+- the winery tab.
+
+The check fails, with up to 20 listed problems, unless all of these hold
+within 0.001 (chart points are rounded to 3 dp):
+- the chip is identical on every range;
+- every series' newest plotted value is identical on every range and equals
+  its own latest reading;
+- single-series panels (and solar's measured line) have newest value =
+  chip;
+- the overview tile (`window.__overviewData`) = chip.
+
+It errors (also non-zero) if the page has no `PANEL_LATEST`. It was proven to
+fail on a copy with the newest-point override removed: air temperature
+75.9 / 65.7 / 63.8 vs 78. Run it locally:
+
+    node scripts/p3-frontend.mjs --dashboard http://localhost:8765/index.html --magic-link --dry-run
+
+The local run serves `web/` with `python3 -m http.server 8765`. It needs
+`.env`'s service key for the magic links. Without `P3_MCP_KEY`, the gateway
+checks report `error`; the rest run.

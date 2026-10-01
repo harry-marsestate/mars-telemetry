@@ -216,6 +216,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   border:1px solid var(--line-2); border-radius:2px; padding:1px 6px; white-space:nowrap;
 }
 .p-sub{font-family:var(--mono); font-size:9.5px; color:var(--muted-2); margin-top:5px; letter-spacing:.02em}
+.p-latest{font-family:var(--mono); font-size:9.5px; color:var(--muted); margin-top:3px; letter-spacing:.02em}
 .p-hd-actions{display:flex; align-items:center; gap:8px; flex:none}
 .rng{display:flex; gap:1px; background:var(--ink); border:1px solid var(--line); border-radius:2px; padding:2px; flex:none}
 .rng button{font-family:var(--mono); font-size:9.5px; padding:3px 8px; color:var(--muted-2); border-radius:1px; transition:all .15s}
@@ -860,13 +861,22 @@ function intervalToMs(interval) {
   const map = { '1 hour': 3600000, '3 hours': 10800000, '1 day': 86400000, '1 month': 2592000000 };
   return map[interval] || 3600000;
 }
+// Start of a range's bucket window: exactly n buckets before `end`. 1Y uses
+// 12 calendar months in UTC (PostgREST sessions run in UTC, so Postgres's
+// '1 month' steps land back on `end` exactly); 360 days would leave the
+// 12th month bucket running ~5 days past the as-of.
+function bucketWindowStart(end, range){
+  const b = RANGE_BUCKETS[range];
+  if(b.interval === '1 month'){ const d = new Date(end); d.setUTCMonth(d.getUTCMonth() - b.n); return d; }
+  return new Date(end.getTime() - b.n * intervalToMs(b.interval));
+}
 
 async function getSeries({ metric, scope, vintage, range, end, agg }) {
   const bucket = RANGE_BUCKETS[range];
-  // realClimateSeriesEnd(), not seriesEndReal(): this fallback is only ever
-  // exercised by getLatestValue() (no caller passes `end` otherwise --
-  // buildSeriesReal always does), whose whole point is "the true latest
-  // real value for this vintage." seriesEndReal() alone would answer that
+  // realClimateSeriesEnd(), not seriesEndReal(): a fallback for a caller
+  // with no `end` (buildSeriesReal always passes one; the old getLatestValue
+  // caller is now latestFor(), which reads latest_reading instead), whose
+  // point is "the true latest real window for this vintage." seriesEndReal() alone would answer that
   // with MOCK_NOW (frozen 28 Jul 2026) for any real-for-2026 metric
   // (air_temp, humidity, soil_moisture) -- the exact stale-tile bug this
   // fix closes (current-vintage-date-range-freshness, 2026-09-13).
@@ -876,14 +886,20 @@ async function getSeries({ metric, scope, vintage, range, end, agg }) {
   // separately have answered ~25 Sep instead of the real season's actual
   // end, the same root cause as the chart-range bug above.
   const endDate = end || realClimateSeriesEnd(metric, vintage);
-  const startDate = new Date(endDate.getTime() - bucket.n * intervalToMs(bucket.interval));
+  const startDate = bucketWindowStart(endDate, range);
+  // Buckets tile [start, end): p_end is 1 ms before the as-of, so the last
+  // bucket is [end - bucket, end). generate_series() includes its upper
+  // bound, so passing endDate itself added one more bucket starting AT the
+  // as-of and reading the hour/day/month AFTER it (docs/SECURITY.md, "Latest
+  // value: one point-in-time reading on every range").
+  const queryEnd = new Date(endDate.getTime() - 1);
 
   const { data, error } = await sb.rpc('series_bucketed', {
     p_metric: metric,
     p_block: (scope === 'estate' || scope === 'cellar') ? null : scope,
     p_vintage: vintage || null,
     p_start: startDate.toISOString(),
-    p_end: endDate.toISOString(),
+    p_end: queryEnd.toISOString(),
     p_bucket: bucket.interval,
     p_agg: agg || 'avg'
   });
@@ -894,7 +910,7 @@ async function getSeries({ metric, scope, vintage, range, end, agg }) {
   }
   try{
     window.__seriesCalls.push({metric, block:(scope === 'estate' || scope === 'cellar') ? null : scope, vintage: vintage || null,
-      start: startDate.toISOString(), end: endDate.toISOString(), bucket: bucket.interval, agg: agg || 'avg', points: data});
+      start: startDate.toISOString(), end: queryEnd.toISOString(), bucket: bucket.interval, agg: agg || 'avg', points: data});
     if(window.__seriesCalls.length > 300) window.__seriesCalls.shift();
   }catch(_){}
 
@@ -934,13 +950,17 @@ async function getDerivedSeries({ field, vintage, range, end }) {
   // 2022+2026 GDD/DTR/VPD/ET0 comparison threw exactly this before this fix.
   const byDay = new Map((data ?? []).map(r => [String(r.day).slice(0, 10), r[field]]));
   const points = [];
+  // Local calendar days up to endDate's own local day (a daily row is a
+  // Pacific calendar day). Iterating UTC days ran one day past an archived
+  // vintage's 31 Oct 23:59 end (= 1 Nov UTC), leaving an empty newest point.
+  const pad = (x) => String(x).padStart(2, '0');
   for (
-    let d = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate()));
+    let d = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
     d <= endDate;
-    d.setUTCDate(d.getUTCDate() + 1)
+    d.setDate(d.getDate() + 1)
   ) {
-    const key = d.toISOString().slice(0, 10);
-    points.push({ t: d.toISOString(), v: byDay.get(key) ?? null });
+    const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    points.push({ t: key + 'T00:00:00.000Z', v: byDay.get(key) ?? null });
   }
   return { points, stale: false };
 }
@@ -1583,6 +1603,13 @@ function buildSeries(getter, v, range, opts={}){
     } else val=getter(d,v);
     pts.push({t:new Date(d), v: val==null?null:+val.toFixed(3), lbl:r.fmt(d,v)});
   }
+  // opts.latestRaw (simulated state metrics, e.g. solar): the newest point is
+  // the reading AT the as-of, not a 30D daily / 1Y 10-day mean, so it matches
+  // the panel's own "current" figure on every range (see latestFor's comment).
+  if(opts.latestRaw && endsAtAsOf(opts)){
+    const x=getter(end,v);
+    if(x!=null){ pts[pts.length-1].v=+x.toFixed(3); pts.latest={t:new Date(end), v:+x.toFixed(3), interval:null, vintage:v, idx:pts.length-1}; }
+  }
   return pts;
 }
 /* Real, async version — fetches from Postgres via getSeries() instead of
@@ -1597,13 +1624,45 @@ async function buildSeriesReal(metric, scope, v, range, opts={}){
   // simulated for 2026 and confirmed unaffected. See realClimateSeriesEnd's
   // own comment for the full reasoning.
   const end = opts.end || applyScroll(realClimateSeriesEnd(metric, v, opts.align), v, range, opts.scrollDays);
-  const result = await getSeries({ metric, scope, vintage: v, range, end, agg: opts.agg });
+  const [result, latest] = await Promise.all([
+    getSeries({ metric, scope, vintage: v, range, end, agg: opts.agg }),
+    endsAtAsOf(opts) ? latestFor({ metric, scope }, v) : null
+  ]);
   const pts = result.points.map(p => {
     const d = new Date(p.t);
     return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d,v) };
   });
+  return withLatest(pts, latest, metric, v);
+}
+/* Only a chart whose window ends at latestAsOf() gets a latest point: not
+   compare mode (shared 31 Oct axis), not scrolled back, not a custom end. */
+const endsAtAsOf = (opts) => !opts.align && !opts.scrollDays && !opts.end && !opts.noLatest;
+/* Attaches the shared latest reading to a chart's points (pts.latest) and,
+   for a state metric, puts it on the bucket that holds it -- the newest
+   plotted point, since every later bucket is empty by construction (the
+   reading is the newest one at or before the as-of). The line, its end dot
+   and that point's tooltip then show the reading on every range, instead
+   of a 3 h / 1 day / 1 month average. Flux bars keep their bucket totals;
+   the newest bar's tooltip leads with pts.latest. */
+function withLatest(pts, latest, key, v){
+  if(!latest || !pts.length) return pts;
+  let idx = -1;
+  for(let i=pts.length-1;i>=0;i--) if(+pts[i].t <= +latest.t){ idx=i; break; }
+  pts.latest = { t: latest.t, v: latest.v, interval: FLUX_INTERVAL[key] || null, vintage: v, idx };
+  if(!FLUX_INTERVAL[key] && idx>=0) pts[idx].v = latest.v;
   return pts;
 }
+// The newest plotted (non-null) value -- what the end dot and its tooltip show.
+const newestValue = (pts) => { for(let i=pts.length-1;i>=0;i--) if(pts[i].v!=null) return pts[i].v; return null; };
+// "25 Sep 14:00" (calendar day only for daily rows), local time like every axis label.
+function latestWhen(l){
+  // Daily irrigation rows are stamped 05:00/07:00 UTC for their calendar
+  // day; the UTC date is that day (local time would say the evening before).
+  if(l.interval==='day') return l.t.getUTCDate()+' '+MON[l.t.getUTCMonth()];
+  const d = l.t, hm = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+  return dstr(d) + (hm==='00:00' && !l.interval ? '' : ' '+hm);
+}
+const latestLead = (l) => l.interval ? `Latest ${l.interval}` : 'Latest';
 /* Real, async — same shape as buildSeriesReal but reads the daily_derived
    dbt view directly (gdd/dtr/vpd/et0 aren't in sensor_readings). */
 async function buildDerivedSeriesReal(field, v, range, opts={}){
@@ -1611,42 +1670,105 @@ async function buildDerivedSeriesReal(field, v, range, opts={}){
   // realClimateSeriesEnd(), not seriesEndReal() -- same fix as
   // buildSeriesReal above, keyed on `field`.
   const end = opts.end || applyScroll(realClimateSeriesEnd(field, v, opts.align), v, range, opts.scrollDays);
-  const result = await getDerivedSeries({ field, vintage: v, range, end });
-  return result.points.map(p => {
-    const d = new Date(p.t);
+  const [result, latest] = await Promise.all([
+    getDerivedSeries({ field, vintage: v, range, end }),
+    endsAtAsOf(opts) ? latestFor({ field }, v) : null
+  ]);
+  return withLatest(result.points.map(p => {
+    // A daily row is a calendar day: local midnight of that date. new
+    // Date(p.t) is UTC midnight, which labels as the PREVIOUS day anywhere
+    // west of UTC (the newest GDD point read "24 Sep" for 25 Sep's row).
+    const d = new Date(String(p.t).slice(0,10)+'T00:00:00');
     return { t: d, v: p.v==null ? null : +(+p.v).toFixed(3), lbl: r.fmt(d,v) };
-  });
+  }), latest, field, v);
 }
 /* Real, async — fetches a per-block metric for each id in `ids` and averages
    the v values at each matching timestamp (bucket boundaries line up because
    every call shares the same metric/vintage/range). */
 async function meanSeriesReal(metric, ids, v, range, opts={}){
-  const perBlock = await Promise.all(ids.map(id => buildSeriesReal(metric, id, v, range, opts)));
-  return perBlock[0].map((p,i) => {
+  const [perBlock, latest] = await Promise.all([
+    Promise.all(ids.map(id => buildSeriesReal(metric, id, v, range, {...opts, noLatest:true}))),
+    endsAtAsOf(opts) ? latestFor({ metric, blocks: ids, agg:'avg' }, v) : null
+  ]);
+  return withLatest(perBlock[0].map((p,i) => {
     const vals = perBlock.map(s=>s[i].v).filter(x=>x!=null);
     return {t:p.t, v: vals.length ? +(vals.reduce((s,x)=>s+x,0)/vals.length).toFixed(3) : null, lbl:p.lbl};
-  });
+  }), latest, metric, v);
 }
 /* Real, async — fetches a per-block metric for each id in `ids` and sums
    (not averages) the v values at each matching timestamp. Used for totals
    across selected blocks, e.g. irrigation volume applied. */
 async function sumSeriesReal(metric, ids, v, range, opts={}){
-  const perBlock = await Promise.all(ids.map(id => buildSeriesReal(metric, id, v, range, opts)));
-  return perBlock[0].map((p,i) => {
+  const [perBlock, latest] = await Promise.all([
+    Promise.all(ids.map(id => buildSeriesReal(metric, id, v, range, {...opts, noLatest:true}))),
+    endsAtAsOf(opts) ? latestFor({ metric, blocks: ids, agg:'sum' }, v) : null
+  ]);
+  return withLatest(perBlock[0].map((p,i) => {
     const vals = perBlock.map(s=>s[i].v).filter(x=>x!=null);
     return {t:p.t, v: vals.length ? +(vals.reduce((s,x)=>s+x,0)).toFixed(3) : null, lbl:p.lbl};
-  });
+  }), latest, metric, v);
 }
 
-async function getLatestValue({ metric, scope, vintage }){
-  const result = await getSeries({ metric, scope, vintage, range: '1D' });
-  const pts = result.points.filter(p => p.v != null);
-  return pts.length ? +pts[pts.length - 1].v : null;
+/* ── LATEST VALUE: one point-in-time reading per panel ──────────────────
+   docs/SECURITY.md, "Latest value: one point-in-time reading on every
+   range" (2026-10-01). Every panel's latest chip, the tooltip on its newest
+   point and the "Estate at a glance" tiles read latestFor(), so they cannot
+   diverge again. Range buckets only shape the line or bars.
+   - State metrics (air/soil temperature, humidity, soil moisture, cellar,
+     solar): the newest raw reading at or before the as-of.
+   - Flux metrics (FLUX_INTERVAL: precipitation, irrigation volume): the
+     newest raw interval value -- one hourly precipitation total, one daily
+     irrigation total -- labelled with that interval. Bars still show range
+     bucket totals; the newest bar's tooltip leads with the interval value.
+   - Daily derived metrics (GDD cumulative, DTR, VPD, ET0): the newest
+     daily_derived row at or before the as-of (GDD = season total to date).
+   The as-of is latestAsOf(): realClimateSeriesEnd(key, v), the same anchor
+   every unscrolled single-vintage chart ends at (CURRENT: the real-climate
+   as-of day at 14:20 Pacific, or MOCK_NOW for still-simulated metrics;
+   archived vintages: 31 Oct). Ranges, scroll and compare mode never move it. */
+const FLUX_INTERVAL = { precipitation:'hour', irrigation_volume:'day' };
+function latestAsOf(key, v){ return realClimateSeriesEnd(key, v); }
+// spec: {metric, scope} | {metric, blocks, agg} | {field}. Returns {t, v} or null.
+// A panel's chip and its chart ask for the same reading in the same render;
+// one request serves both (60 s, so the 5-minute poll still refreshes it).
+const _latestMemo = new Map();
+function latestFor(spec, vintage, asOf){
+  asOf = asOf || latestAsOf(spec.field || spec.metric, vintage);
+  const key = JSON.stringify([spec.field, spec.metric, spec.scope, spec.blocks, spec.agg, vintage, +asOf]);
+  const hit = _latestMemo.get(key);
+  if(hit && Date.now() - hit.at < 60000) return hit.p;
+  const p = latestFetch(spec, vintage, asOf);
+  _latestMemo.set(key, { at: Date.now(), p });
+  return p;
 }
-async function getLatestDerivedValue({ field, vintage }){
-  const result = await getDerivedSeries({ field, vintage, range: '5D' });
-  const pts = result.points.filter(p => p.v != null);
-  return pts.length ? +pts[pts.length - 1].v : null;
+async function latestFetch(spec, vintage, asOf){
+  if(spec.field){
+    const { data, error } = await sb.from('daily_derived').select(`day, ${spec.field}`)
+      .eq('vintage', vintage).lte('day', asOf.toISOString()).not(spec.field, 'is', null)
+      .order('day', { ascending:false }).limit(1);
+    if(error){ console.error('latestFor derived error:', error); return null; }
+    const r = data?.[0];
+    // a calendar day -> local midnight, matching getDerivedSeries' points
+    return r ? { t: new Date(String(r.day).slice(0,10)+'T00:00:00'), v: +r[spec.field] } : null;
+  }
+  const agg = spec.agg || (FLUX_INTERVAL[spec.metric] ? 'sum' : 'avg');
+  const one = async (block) => {
+    const { data, error } = await sb.rpc('latest_reading', { p_metric: spec.metric, p_block: block,
+      p_vintage: vintage ?? null, p_as_of: asOf.toISOString(), p_agg: agg });
+    if(error){ console.error('latestFor error:', error); return null; }
+    return data?.[0] ? { t: new Date(data[0].t), v: +data[0].v } : null;
+  };
+  if(!spec.blocks) return one((spec.scope === 'estate' || spec.scope === 'cellar') ? null : spec.scope);
+  // Several blocks: the newest instant any of them has, combined over the
+  // blocks that have a reading at that instant (mean for state metrics,
+  // sum for flux) -- the same combination meanSeriesReal/sumSeriesReal
+  // apply per bucket.
+  const per = (await Promise.all(spec.blocks.map(one))).filter(Boolean);
+  if(!per.length) return null;
+  const tMax = Math.max(...per.map(p => +p.t));
+  const at = per.filter(p => +p.t === tMax).map(p => p.v);
+  const s = at.reduce((a,x)=>a+x, 0);
+  return { t: new Date(tMax), v: agg === 'sum' ? s : s/at.length };
 }
 
 /* §3 ── STATE ──────────────────────────────────────── */
@@ -1703,6 +1825,7 @@ const hideTip=()=>TIP.classList.remove('on');
    can't be affected. */
 window.__panelData = window.__panelData || {};
 window.__seriesCalls = window.__seriesCalls || [];
+window.__overviewData = window.__overviewData || {};
 function panelHook(box, entry){
   try{
     const id = box?.closest?.('[data-panel-id]')?.dataset.panelId;
@@ -1719,7 +1842,10 @@ function panelStatus(id, status, extra){
 }
 
 function lineChart(box, sets, opts={}){
-  panelHook(box, {kind:'line', sets: sets.map(s=>({name:s.name, pts:s.pts}))});
+  // newest: what the tooltip on the newest point shows, per series (P3's
+  // frontend.latest.* checks compare it with the chip and the overview).
+  panelHook(box, {kind:'line', sets: sets.map(s=>({name:s.name, pts:s.pts, latest:s.pts.latest||null,
+    newest: newestValue(s.pts)}))});
   const W=Math.max(300, Math.round(box.clientWidth)||700), H=opts.h||186, P={t:14,r:12,b:26,l:50};
   const n=sets[0]?.pts.length||0;
   if(!n){box.appendChild(el('div','empty','No data for this selection')); return;}
@@ -1795,7 +1921,10 @@ function lineChart(box, sets, opts={}){
     // real-world calendar date mapped into each vintage's year (see
     // clampToSeason/endOf/endOfReal) -- sets[0]'s date is accurate for
     // every row, so one shared title is correct again, not an overclaim.
-    let h=`<div class="tip-t">${sets[0].pts[i].lbl}</div>`;
+    // Newest point carrying the shared latest reading (withLatest): title it
+    // with that reading's own time instead of the bucket's start.
+    const lt = sets.find(s=>s.pts.latest && s.pts.latest.idx===i)?.pts.latest;
+    let h=`<div class="tip-t">${lt ? latestLead(lt)+' · '+latestWhen(lt) : sets[0].pts[i].lbl}</div>`;
     sets.forEach(s=>{const p=s.pts[i];
       h+=`<div class="tip-r" style="color:${s.color}"><i></i><b>${s.name}</b> ${p.v==null?'—':fmt(p.v,opts.dec??1)+(opts.unit?' '+opts.unit:'')}</div>`;});
     showTip(e.clientX,e.clientY,h);
@@ -1804,7 +1933,8 @@ function lineChart(box, sets, opts={}){
 }
 
 function barChart(box, pts, opts={}){
-  panelHook(box, {kind:'bar', pts});
+  const lt = pts.latest || null;
+  panelHook(box, {kind:'bar', pts, latest:lt, newest: lt ? lt.v : newestValue(pts)});
   const W=Math.max(300, Math.round(box.clientWidth)||700), H=opts.h||170, P={t:14,r:12,b:26,l:50};
   const n=pts.length; if(!n){box.appendChild(el('div','empty','No data')); return;}
   let hi=Math.max(...pts.map(p=>p.v||0), opts.floor||.01)*1.18;
@@ -1826,12 +1956,23 @@ function barChart(box, pts, opts={}){
   svg.addEventListener('mousemove',e=>{
     const r=svg.getBoundingClientRect(), rel=(e.clientX-r.left)/r.width*W;
     let i=Math.floor((rel-P.l)/((W-P.l-P.r)/n)); i=Math.max(0,Math.min(n-1,i));
-    showTip(e.clientX,e.clientY,`<div class="tip-t">${pts[i].lbl}</div><div class="tip-r" style="color:${pts[i].color||opts.color||'#C6A961'}"><i></i><b>${opts.name||''}</b> ${fmt(pts[i].v,opts.dec??1)}${opts.unit?' '+opts.unit:''}</div>`);
+    const col=pts[i].color||opts.color||'#C6A961', u=opts.unit?' '+opts.unit:'';
+    // Newest bar: the shared latest interval value first (the same on every
+    // range), then this bar's own range-bucket total.
+    const head = (i===n-1 && lt)
+      ? `<div class="tip-t">${latestLead(lt)} · ${latestWhen(lt)}</div><div class="tip-r" style="color:${col}"><i></i><b>${opts.name||''}</b> ${fmt(lt.v,opts.dec??1)}${u}</div>`
+        + `<div class="tip-r" style="color:var(--muted)"><i style="opacity:0"></i><b>Bucket from ${pts[i].lbl}</b> ${fmt(pts[i].v,opts.dec??1)}${u}</div>`
+      : `<div class="tip-t">${pts[i].lbl}</div><div class="tip-r" style="color:${col}"><i></i><b>${opts.name||''}</b> ${fmt(pts[i].v,opts.dec??1)}${u}</div>`;
+    showTip(e.clientX,e.clientY,head);
   });
   svg.addEventListener('mouseleave',hideTip);
 }
 
 function groupedBars(box, groups, seriesNames, colors, opts={}){
+  const lts = opts.latest || null; // per series: shared latest reading or null
+  panelHook(box, {kind:'grouped', sets: seriesNames.map((name,j)=>({name,
+    pts: groups.map(g=>({t:g.t||null, lbl:g.lbl, v:g.v[j]})), latest: lts?.[j]||null,
+    newest: lts?.[j] ? lts[j].v : (groups.length ? groups[groups.length-1].v[j] : null)}))});
   const W=Math.max(300, Math.round(box.clientWidth)||700), H=opts.h||170, P={t:14,r:12,b:38,l:50};
   const n=groups.length, m=seriesNames.length;
   let hi=Math.max(...groups.flatMap(g=>g.v), .01)*1.18;
@@ -1856,8 +1997,13 @@ function groupedBars(box, groups, seriesNames, colors, opts={}){
   svg.addEventListener('mousemove',e=>{
     const r=svg.getBoundingClientRect(), rel=(e.clientX-r.left)/r.width*W;
     let i=Math.floor((rel-P.l)/slot); i=Math.max(0,Math.min(n-1,i));
-    let h=`<div class="tip-t">${groups[i].lbl}</div>`;
-    groups[i].v.forEach((v,j)=>{h+=`<div class="tip-r" style="color:${colors[j]}"><i></i><b>${seriesNames[j]}</b> ${fmt(v,opts.dec??0)}${opts.unit?' '+opts.unit:''}</div>`;});
+    const u=opts.unit?' '+opts.unit:'';
+    const lt0 = i===n-1 ? lts?.find(Boolean) : null;
+    let h=`<div class="tip-t">${lt0 ? latestLead(lt0)+' · '+latestWhen(lt0) : groups[i].lbl}</div>`;
+    groups[i].v.forEach((v,j)=>{
+      const lt = i===n-1 ? lts?.[j] : null;
+      h+=`<div class="tip-r" style="color:${colors[j]}"><i></i><b>${seriesNames[j]}</b> ${fmt(lt ? lt.v : v,opts.dec??0)}${u}${lt && +lt.t!==+lt0.t ? ' · '+latestWhen(lt) : ''}</div>`;});
+    if(lt0) h+=`<div class="tip-r" style="color:var(--muted)"><i style="opacity:0"></i><b>Bucket from ${groups[i].lbl}</b> ${groups[i].v.map(x=>fmt(x,opts.dec??0)).join(' · ')}${u}</div>`;
     showTip(e.clientX,e.clientY,h);
   });
   svg.addEventListener('mouseleave',hideTip);
@@ -2426,6 +2572,36 @@ const IRRIGATION_2025_TOTALS = {
   B3: 11842 + 166483.2,  // MRS-3S + MRS-3
 };
 
+/* Each timescale panel's latest reading (latestFor(), see its comment): the
+   panel's chip, its newest-point tooltip and, where one exists, its
+   "at a glance" tile (ov: that tile's key) all come from this spec.
+   vintage(c) defaults to c.primary. P3's frontend.latest.* checks walk it. */
+const soilLatestSpec = (metric, c) => isRealClimateVintage(metric, c.primary)
+  ? { metric, scope:'estate' } : { metric, blocks:c.blocks, agg:'avg' };
+const PANEL_LATEST = {
+  airtemp:  { spec:()=>({metric:'air_temp', scope:'estate'}),  unit:'°F',    dec:1, ov:'t' },
+  rh:       { spec:()=>({metric:'humidity', scope:'estate'}),  unit:'%',     dec:0, ov:'rh' },
+  soilmoist:{ spec:c=>soilLatestSpec('soil_moisture', c),      unit:'% VWC', dec:1, ov:'sm' },
+  soiltemp: { spec:c=>soilLatestSpec('soil_temp', c),          unit:'°F',    dec:1 },
+  gdd:      { spec:()=>({field:'gdd_cumulative_calibrated'}),  unit:'GDD',   dec:0, ov:'g' },
+  dtr:      { spec:()=>({field:'dtr_f'}),                      unit:'°F',    dec:1, ov:'dt' },
+  vpd:      { spec:()=>({field:'vpd_kpa'}),                    unit:'kPa',   dec:2, ov:'vp' },
+  et0:      { spec:()=>({field:'et0_in'}),                     unit:'in',    dec:3 },
+  precip:   { spec:()=>({metric:'precipitation', scope:'estate'}),               unit:'in',  dec:2 },
+  irrig:    { spec:c=>({metric:'irrigation_volume', blocks:c.blocks, agg:'sum'}), unit:'gal', dec:0 },
+  solar:    { sim:(c)=>{ const t=seriesEnd(c.primary,false), v=sample('solar','estate',t,c.primary);
+                return v==null ? null : {t, v:+v.toFixed(3)}; },                  unit:'W/m²', dec:0 },
+  cellart:  { spec:()=>({metric:'cellar_temp', scope:'cellar'}), vintage:()=>CURRENT, unit:'°F', dec:1, ov:'t' },
+  cellarh:  { spec:()=>({metric:'cellar_rh',   scope:'cellar'}), vintage:()=>CURRENT, unit:'%',  dec:0, ov:'rh' },
+};
+async function panelLatest(id, c){
+  const L = PANEL_LATEST[id]; if(!L) return null;
+  if(L.sim) return L.sim(c);
+  const spec = L.spec(c);
+  const r = await latestFor(spec, L.vintage ? L.vintage(c) : c.primary);
+  return r && {...r, interval: FLUX_INTERVAL[spec.metric] || null};
+}
+
 const PANELS = [
 /* ══ VINEYARD · CLIMATE ══ */
 {id:'airtemp', tab:'vineyard', sect:'climate', span:'s6', minRole:'all', title:'Air temperature', unit:'°F',
@@ -2615,7 +2791,8 @@ const PANELS = [
      if(unitEl) unitEl.textContent='gal · '+fmt(totalGal/acresOf(c.blocks),0)+'/ac';
      const groups = perBlock[0].s.map((p,i)=>({lbl:p.lbl, v:perBlock.map(x=>x.s[i].v||0)}));
      legendFor(b.parentElement, perBlock.map(x=>({name:B(x.id).label,color:B(x.id).color})));
-     groupedBars(b, groups, perBlock.map(x=>B(x.id).label), perBlock.map(x=>B(x.id).color), {unit:'gal',dec:0,h:190});
+     groupedBars(b, groups, perBlock.map(x=>B(x.id).label), perBlock.map(x=>B(x.id).color), {unit:'gal',dec:0,h:190,
+       latest: perBlock.map(x=>x.s.latest||null)});
    } else {
      const sets = await sumSeriesReal('irrigation_volume', c.blocks, c.primary, c.range, {agg:'sum', scrollDays:c.scrollDays});
      if(unitEl) unitEl.textContent='gal · '+fmt(sets.reduce((s,p)=>s+(p.v||0),0)/acresOf(c.blocks),0)+'/ac';
@@ -2932,15 +3109,18 @@ function renderWind(box, ctx){
 /* ── Solar insolation with interpretation ── */
 function renderSolar(box, ctx){
   box.innerHTML='';
-  const v=ctx.primary, now=endOf(v,ctx.align);
+  // Single vintage: the chart's own right edge (seriesEnd), so "current
+  // insolation" is the newest point's reading. Archived vintages used to read
+  // a harvest-peak snapshot here while the chart ran to 31 Oct.
+  const v=ctx.primary, now=ctx.compare ? endOf(v,ctx.align) : seriesEnd(v,false);
   const row=el('div','solar-row');
   const cwrap=el('div','solar-c'), rwrap=el('div','solar-r');
   row.appendChild(cwrap); row.appendChild(rwrap); box.appendChild(row);
 
   const sets = ctx.compare
     ? ctx.vintages.map(y=>({name:String(y),color:VCOLOR[y],pts:buildSeries((d,vv)=>sample('solar','estate',d,vv),y,ctx.range,{align:true})}))
-    : [{name:'Measured',color:METRICS.solar.color,pts:buildSeries((d,vv)=>sample('solar','estate',d,vv),v,ctx.range,{align:ctx.align})},
-       {name:'Clear-sky expected',color:'#655F55',pts:buildSeries((d)=>clearSky(d),v,ctx.range,{align:ctx.align})}];
+    : [{name:'Measured',color:METRICS.solar.color,pts:buildSeries((d,vv)=>sample('solar','estate',d,vv),v,ctx.range,{align:ctx.align,latestRaw:true})},
+       {name:'Clear-sky expected',color:'#655F55',pts:buildSeries((d)=>clearSky(d),v,ctx.range,{align:ctx.align,latestRaw:true})}];
   legendFor(box.parentElement, sets);
   lineChart(cwrap, sets, {unit:'W/m²',dec:0,h:196,zero:true});
 
@@ -3963,7 +4143,7 @@ let vineyardOverviewCache = null; // {ids, cur, prev, other}
 /* Seasonal norm: mean air_temp across whichever archived vintages actually
    have data for the ±SEASONAL_NORM_WINDOW_DAYS window around the day-of-
    year `anchorDate` falls on. anchorDate is realClimateSeriesEnd('air_temp', v)
-   for whichever vintage is primary -- matching getLatestValue's own anchor
+   for whichever vintage is primary -- matching latestFor()'s own anchor
    for `t` above, so the norm this compares `t` against is centred on the
    same date `t` was actually read at, not a separately-computed one. Returns the
    contributing-vintage count alongside the value so the caller can label
@@ -4061,26 +4241,35 @@ async function overviewStats(tab, c){
     // real-only status doesn't vary by block for this domain.
     const blocked = new Set(['air_temp','humidity','gdd_cumulative_calibrated','vpd_kpa','dtr_f','soil_moisture']
       .filter(dom => realOnlyBlocked(dom, [vv])));
-    const [t, soilByBlock, g, vp, dt, rh] = await Promise.all([
-      blocked.has('air_temp') ? null : getLatestValue({metric:'air_temp', scope:'estate', vintage:vv}),
-      blocked.has('soil_moisture') ? [] : Promise.all(ids.map(async id => ({id, v: await getLatestValue({metric:'soil_moisture', scope:id, vintage:vv})}))),
-      // Calibrated, matching the GDD panel -- the "GDD to date" tile and the
-      // chart must not quote two different numbers for the same metric.
-      blocked.has('gdd_cumulative_calibrated') ? null : getLatestDerivedValue({field:'gdd_cumulative_calibrated', vintage:vv}),
-      blocked.has('vpd_kpa') ? null : getLatestDerivedValue({field:'vpd_kpa', vintage:vv}),
-      // dtr_f stays RAW: this tile's own good-acid-retention/compressed
-      // verdict is decided against the dtr_low threshold (21°F), which is
-      // tuned to the raw distribution. Switching only the displayed number
-      // would flip verdicts without the threshold moving with it.
-      blocked.has('dtr_f') ? null : getLatestDerivedValue({field:'dtr_f', vintage:vv}),
-      blocked.has('humidity') ? null : getLatestValue({metric:'humidity', scope:'estate', vintage:vv})
+    // Every tile reads the same latestFor() spec as its panel's chip and
+    // newest point (PANEL_LATEST), at the same as-of (docs/SECURITY.md,
+    // "Latest value: one point-in-time reading on every range"). It used to
+    // read the last 1-hour bucket of a 1D window that ran one hour PAST the
+    // as-of, and soil moisture asked per block, which has no rows for a real
+    // (estate-wide) vintage -- the tile showed '—' for 2025 and 2026.
+    // GDD is the calibrated column, matching the GDD panel. dtr_f stays RAW:
+    // this tile's good-acid-retention/compressed verdict is decided against
+    // the dtr_low threshold (21°F), which is tuned to the raw distribution.
+    const cv = {primary:vv, blocks:ids};
+    const tileLatest = async (panelId, dom) => blocked.has(dom) ? null
+      : (await latestFor(PANEL_LATEST[panelId].spec(cv), vv))?.v ?? null;
+    const smSpec = soilLatestSpec('soil_moisture', cv);
+    const [t, sm, g, vp, dt, rh, soilByBlock] = await Promise.all([
+      tileLatest('airtemp', 'air_temp'),
+      tileLatest('soilmoist', 'soil_moisture'),
+      tileLatest('gdd', 'gdd_cumulative_calibrated'),
+      tileLatest('vpd', 'vpd_kpa'),
+      tileLatest('dtr', 'dtr_f'),
+      tileLatest('rh', 'humidity'),
+      // Driest block: only where soil is per block (simulated vintages).
+      (blocked.has('soil_moisture') || !smSpec.blocks) ? [] : Promise.all(ids.map(async id =>
+        ({id, v: (await latestFor({metric:'soil_moisture', scope:id}, vv))?.v ?? null})))
     ]);
     const valid = soilByBlock.filter(b=>b.v!=null);
-    const sm = valid.length ? valid.reduce((s,b)=>s+b.v,0)/valid.length : null;
     const dry = valid.length ? [...valid].sort((a,b)=>a.v-b.v)[0] : null;
     const tAir = th.byKey.get('air_temp_high')?.threshold ?? 92;
     // realClimateSeriesEnd('air_temp', vv), matching `t` above
-    // (getLatestValue, now anchored the same way via getSeries's own fix --
+    // (latestFor(), anchored at latestAsOf() = realClimateSeriesEnd() --
     // current-vintage-date-range-freshness, 2026-09-13): plain
     // seriesEndReal(vv) would anchor CURRENT to MOCK_NOW (frozen 28 Jul)
     // while `t` itself now reflects the vintage's true latest real reading,
@@ -4106,6 +4295,8 @@ async function overviewStats(tab, c){
      vintage) stays fixed, formatVineyardTiles recomputes the delta from
      the same cached prev each time. */
   vineyardOverviewCache = (v===CURRENT) ? {ids, cur, prev, other, th} : null;
+  // P3 hook (frontend.latest.*): the raw tile values, keyed like PANEL_LATEST's ov.
+  try{ window.__overviewData.vineyard = {vintage:v, blocks:[...ids], t:cur.t, rh:cur.rh, sm:cur.sm, g:cur.g, vp:cur.vp, dt:cur.dt}; }catch(_){}
 
   return formatVineyardTiles(cur, prev, other, th);
 }
@@ -4125,6 +4316,9 @@ function updateVineyardTile(key){
 }
 function applyVineyardRealtimeInsert(row){
   if(!vineyardOverviewCache || row.vintage !== CURRENT) return;
+  // A reading past the tiles' as-of (the real-climate as-of day lags the
+  // ingest) would put the tile ahead of every panel's latest: ignore it.
+  if(row.recorded_at && new Date(row.recorded_at) > latestAsOf(row.metric_key, CURRENT)) return;
   const {cur, ids} = vineyardOverviewCache;
   if(row.metric_key==='air_temp' && row.block_id==null){
     cur.t = +row.value; updateVineyardTile('t');
@@ -4132,6 +4326,7 @@ function applyVineyardRealtimeInsert(row){
     cur.rh = +row.value; updateVineyardTile('rh');
   } else if(row.metric_key==='soil_moisture' && row.block_id!=null){
     if(!ids.includes(row.block_id)) return; // not one of the currently-selected blocks
+    if(!soilLatestSpec('soil_moisture', {primary:CURRENT, blocks:ids}).blocks) return; // estate-wide real soil: no per-block tile
     const entry = cur.soilByBlock.find(b=>b.id===row.block_id);
     if(entry) entry.v = +row.value; else cur.soilByBlock.push({id:row.block_id, v:+row.value});
     const valid = cur.soilByBlock.filter(b=>b.v!=null);
@@ -4188,11 +4383,11 @@ async function paintOverviewW(animate){
     g.innerHTML = `<div class="stat" style="grid-column:1/-1"><div class="stat-d">Not available in real-only mode — cellar sensors are simulated.</div></div>`;
     return;
   }
-  const [t, rh] = await Promise.all([
-    getLatestValue({metric:'cellar_temp', scope:'cellar', vintage:CURRENT}),
-    getLatestValue({metric:'cellar_rh', scope:'cellar', vintage:CURRENT})
-  ]);
+  // Same latestFor() spec as the cellart/cellarh panels (PANEL_LATEST).
+  const [t, rh] = await Promise.all(['cellart','cellarh'].map(async id =>
+    (await latestFor(PANEL_LATEST[id].spec(), PANEL_LATEST[id].vintage()))?.v ?? null));
   wineryOverviewCache = {t, rh};
+  try{ window.__overviewData.winery = {vintage:CURRENT, t, rh}; }catch(_){}
   const okT=t!=null&&t>=55&&t<=58, okH=rh!=null&&rh>=68&&rh<=78;
   g.innerHTML=`
     <div class="stat" data-key="t"><div class="stat-l">Cellar temperature · hourly</div>
@@ -4223,6 +4418,7 @@ function updateWineryTile(key, val){
 }
 function applyWineryRealtimeInsert(row){
   if(row.vintage !== CURRENT) return;
+  if(row.recorded_at && new Date(row.recorded_at) > latestAsOf(row.metric_key, CURRENT)) return; // see applyVineyardRealtimeInsert
   if(row.metric_key==='cellar_temp') updateWineryTile('t', +row.value);
   else if(row.metric_key==='cellar_rh') updateWineryTile('rh', +row.value);
 }
@@ -4282,7 +4478,7 @@ function makePanel(p, c){
   const subText = typeof p.sub==='function' ? p.sub(c) : p.sub;
   const unitText = typeof p.unit==='function' ? p.unit(c) : p.unit;
   hd.innerHTML=`<div class="p-hl"><div class="p-ttl-row"><span class="p-ttl">${p.title}</span>${unitText?`<span class="p-unit">${unitText}</span>`:''}</div>
-    ${subText?`<div class="p-sub">${subText}</div>`:''}</div>`;
+    ${subText?`<div class="p-sub">${subText}</div>`:''}${PANEL_LATEST[p.id]?'<div class="p-latest"></div>':''}</div>`;
   if(p.info){
     const infoText = typeof p.info==='function' ? p.info(THRESHOLDS) : p.info;
     const ic=el('button','info-ic','i');
@@ -4392,6 +4588,7 @@ function makePanel(p, c){
     // c.vintages (not just c.primary) so a compare-mode chart mixing one
     // real and one simulated vintage is blocked entirely -- see
     // realOnlyBlocked()'s own comment.
+    paintPanelLatest(p, hd, c, undefined);
     const gate = seasonGate(p, c);
     if(gate){
       body.innerHTML='';
@@ -4407,9 +4604,33 @@ function makePanel(p, c){
       return;
     }
     panelStatus(p.id, 'rendering', {tab:c.tab, vintage:c.primary, range:state.range[p.id]||'5D'});
-    try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); panelStatus(p.id, 'ok'); }
-    catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); panelStatus(p.id, 'error', {error:String(err?.message||err).slice(0,200)}); }
+    await renderPanelBody(p, body, hd, c, unitEl);
   }};
+}
+
+/* Shared by makePanel()'s run() and refreshPanelRun(): render the body and,
+   for a timescale panel, its latest chip (fetched alongside the render). */
+async function renderPanelBody(p, body, hd, c, unitEl){
+  const latestP = PANEL_LATEST[p.id] ? panelLatest(p.id, c).catch(err=>{ console.error(p.id,'latest',err); return null; }) : null;
+  try{
+    await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl);
+    if(latestP) paintPanelLatest(p, hd, c, await latestP);
+    panelStatus(p.id, 'ok');
+  }
+  catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); panelStatus(p.id, 'error', {error:String(err?.message||err).slice(0,200)}); }
+}
+/* The panel's latest chip: one point-in-time reading, identical on every
+   range (PANEL_LATEST / latestFor), also exposed to P3 as
+   __panelData[id].latest. l === undefined clears it (gated/blocked panel). */
+function paintPanelLatest(p, hd, c, l){
+  const L = PANEL_LATEST[p.id], node = hd?.querySelector('.p-latest');
+  if(!L || !node) return;
+  if(l === undefined){ node.textContent = ''; return; }
+  try{ const d = window.__panelData[p.id]; if(d) d.latest = l ? {t:l.t.toISOString(), v:l.v, interval:l.interval||null} : null; }catch(_){}
+  const vin = L.vintage ? L.vintage(c) : c.primary;
+  node.textContent = l
+    ? `${latestLead(l)}${c.compare?' ('+vin+')':''} · ${fmt(l.v, L.dec)} ${L.unit} · ${latestWhen(l)}`
+    : 'Latest · no reading';
 }
 
 /* Factored out of renderTab's hero markup so rerenderVineyardBlocks() can
@@ -4681,6 +4902,7 @@ function refreshPanelRun(p, c){
     // re-render, so it needs the identical check or a real-only account
     // could see simulated soil/labour data reappear after touching a
     // block chip. See makePanel()'s own comment for the full reasoning.
+    paintPanelLatest(p, hd, c, undefined);
     const gate = seasonGate(p, c);
     if(gate){
       body.innerHTML='';
@@ -4696,8 +4918,7 @@ function refreshPanelRun(p, c){
       return;
     }
     panelStatus(p.id, 'rendering', {tab:c.tab, vintage:c.primary, range:state.range[p.id]||'5D'});
-    try{ await p.render(body,{...c, range:state.range[p.id]||'5D', scrollDays:state.scrollDays[p.id]||0}, unitEl); panelStatus(p.id, 'ok'); }
-    catch(err){ body.appendChild(el('div','empty','Panel unavailable')); console.error(p.id,err); panelStatus(p.id, 'error', {error:String(err?.message||err).slice(0,200)}); }
+    await renderPanelBody(p, body, hd, c, unitEl);
   };
   return true;
 }

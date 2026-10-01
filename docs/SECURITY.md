@@ -8155,17 +8155,26 @@ poll, so a poll always refetches.
   up is a database change.
 
 ### Before / after (headless Chrome, synthetic operator, 3 runs each)
-| | before (main, production) | after (this branch, served locally) |
-|---|---|---|
-| reload -> vineyard all panels ok | 5.2 / 5.1 / 4.5 s | 3.9 / 4.1 / 5.5 s |
-| magic-link login -> vineyard all ok | 5.4 / 8.6 / 7.1 s | 3.9 / 4.1 / 14.1 s (one slow-database outlier) |
-| requests at boot | 57 | 46 (Winery deferred) |
-| return to Vineyard | 1.1-1.9 s, 19 requests | 30-60 ms, 0 requests |
-| return to Winery | 1.3-4.2 s, 6 requests | 30-45 ms, 0 requests |
-| hidden window, reload -> all ok (real Chrome) | never without a frame; 38.9 s when one was forced at 34.6 s | 4.0 s |
+Same harness for both: main and this branch served side by side from
+localhost against the same database (a first harness waited 120 s after
+login on the branch, letting the HTTP/2 connection close, and overstated
+its reload time; corrected here), then production after the deploy.
+
+| | before (main) | after (branch, local) | after (production) |
+|---|---|---|---|
+| reload -> vineyard all panels ok | 3.70 / 4.27 / 3.88 s | 2.54 / 3.00 / 2.64 s | 2.57 / 2.93 / 2.46 s |
+| magic-link login -> vineyard all ok | 5.25 / 4.75 / 5.50 s | 2.97 / 3.29 / 3.69 s | 3.84 / 3.64 / 3.20 s |
+| session gate before the metadata batch | 3 serial requests | 1 parallel round trip | same |
+| requests at boot | 57 | 46 (Winery deferred) | 46 |
+| return to Vineyard | 1.1-1.9 s, 19 requests | 30-60 ms, 0 requests | 33-62 ms, 0 |
+| return to Winery | 1.3-4.2 s, 6 requests | 30-45 ms, 0 requests | 32-37 ms, 0 |
+| hidden window, reload -> all ok (real Chrome, signed-in user) | nothing until a frame; 38.9 s when one was forced at 34.6 s | 4.0 s | <= 4.0 s (1 s timer clamp while hidden) |
 
 Customer (production, before): return to Vineyard was 1.8-2.0 s and 22
-requests; after: cached, 0 requests.
+requests; after: 35-46 ms, 0 requests. Not adopted: deferring the session
+gate out of the `onAuthStateChange` callback (`setTimeout`, supabase-js's
+own advice, so start-up calls are not chained on its auth lock) measured
+another ~0.2 s on reload, but changes auth-event timing.
 
 ### Verified (2026-10-01)
 - Every panel x every range for the current and previous vintage, the

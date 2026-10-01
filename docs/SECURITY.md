@@ -7151,6 +7151,16 @@ pg_net's queue, its Authorization header is readable like the Vault key's
     ingest refuses its hours);
   - **warns from 14 days before 1 November** if the next vintage isn't in
     `public.vintages`.
+- `database.insights_estate_inputs_estate_wide` (added 2026-10-01): fails if
+  `sensor_readings` holds any REAL per-block row (block_id not null, source in
+  `real_data_sources`) for an insights-scan input metric (air_temp, humidity,
+  precipitation, soil_moisture, soil_temp, solar; the derived ones come from
+  air_temp/humidity), any vintage. Mock per-block rows are listed but pass:
+  `series_bucketed` drops all mock rows of a (metric, vintage) with real data,
+  and the scanner scans only such vintages. On failure: compute estate series
+  from block_id-null rows only, or require access to every block for estate
+  rows in `insights_customer_read` (see "Insights and Anomalies for
+  customers").
 - `database.integrity.soil_moisture_range`: every soil reading between 0 and
   100.
 - `database.integrity.gdd_calibrated_2022_2025`: each closed vintage's final
@@ -8218,7 +8228,15 @@ does not already give them:
   rows are ever ingested**, an estate insight would blend blocks a
   block-scoped customer cannot see; at that point either compute estate
   series from block_id-null rows only, or require access to every block for
-  estate rows in this policy.
+  estate rows in this policy. The P1 tripwire
+  `database.insights_estate_inputs_estate_wide` (migration
+  `20261001140000`) fails the day such a row appears; the weekly scan runs
+  Sundays 15:00 UTC, after that day's 12:00 P1. Mock per-block rows (2026
+  `soil_probe` soil moisture/temperature today) cannot reach an insight and
+  only appear in its observation.
+- The veraison note names Block 1 ("sits highest and colours first") only
+  to a reader whose `accessible_blocks()` include B1; others get
+  block-neutral wording. Operator wording is unchanged.
 - The client's patterns cache (`_latestPatternsCache`) is now cleared on a
   user change, so an operator's patterns can never be shown to a customer
   who signs in on the same page.

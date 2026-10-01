@@ -3696,9 +3696,13 @@ const RULES = [
        m:'Note · next set likely due this week'};}},
   {tab:'vineyard', sev:'note', domain:'gdd_cumulative_calibrated', test:c=>{
      const g=c.gdd;
+     // Names Block 1 (highest, colours first) only to a reader who can see
+     // it (c.firstToColour, set in renderAnomalies); otherwise block-neutral.
+     const b1=c.firstToColour;
      return g!=null && g>1800 && g<HARVEST_BAND[0] && {t:'Veraison window',
-       d:`At ${fmt(g,0)} GDD the estate is between veraison and the ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD picking band. Block 1 sits highest and colours first.`,
-       m:'Note · begin berry sampling in Block 1'};}},
+       d:`At ${fmt(g,0)} GDD the estate is between veraison and the ${HARVEST_BAND[0]}–${HARVEST_BAND[1]} GDD picking band. `
+         +(b1 ? `${B(b1).label} sits highest and colours first.` : 'Higher ground colours first.'),
+       m:b1 ? `Note · begin berry sampling in ${B(b1).label}` : 'Note · begin berry sampling'};}},
   {tab:'winery', sev:'alert', test:c=>{
      const hot=TANKS.filter(t=>c.blocks.includes(t.blk)).map(t=>({t,v:tankTemp(t,c.end,c.primary)}))
        .filter(x=>x.v!=null&&x.v>88);
@@ -3726,6 +3730,19 @@ const RULES = [
 // Client-side rule domains whose data is operator-only (metric_registry
 // min_role 'operator'); those rules never run for a customer.
 const OPERATOR_ONLY_RULE_DOMAINS = new Set(['irrigation_volume']);
+// The signed-in user's blocks, from the same accessible_blocks() the RLS
+// policies use (an operator gets every block). [] on failure, so copy that
+// depends on it falls back to block-neutral wording. Reset on user change.
+let _accessibleBlocksPromise = null;
+function getAccessibleBlocks(){
+  if(!_accessibleBlocksPromise){
+    _accessibleBlocksPromise = sb.rpc('accessible_blocks').then(({data, error})=>{
+      if(error){ console.error('accessible_blocks failed:', error); _accessibleBlocksPromise = null; return []; }
+      return (data || []).map(r => typeof r === 'string' ? r : r.accessible_blocks);
+    });
+  }
+  return _accessibleBlocksPromise;
+}
 async function renderAnomalies(box, ctx, tab){
   let hits;
   let nowBlockedMessage = null; // real-only-data-mode override for the "Now" section, winery only
@@ -3821,7 +3838,9 @@ async function renderAnomalies(box, ctx, tab){
     const gdd = gddResult.status==='fulfilled' ? gddResult.value : null;
     if(gapsResult.status==='rejected') console.error('irrigation gap fetch failed:', gapsResult.reason);
     if(gddResult.status==='rejected') console.error('gdd fetch failed:', gddResult.reason);
-    const c = {...ctx, end:endOf(ctx.primary,ctx.align), irrigationGaps, gdd};
+    // Block 1 is named in the veraison note only if this reader can see it.
+    const firstToColour = (isOperator || (await getAccessibleBlocks()).includes('B1')) ? 'B1' : null;
+    const c = {...ctx, end:endOf(ctx.primary,ctx.align), irrigationGaps, gdd, firstToColour};
     // Same gate for the two client-side vineyard rules, via each rule's
     // own `domain` field (see RULES' definition) rather than array
     // position -- irrigation-interval-lengthening reads irrigation_volume
@@ -5803,7 +5822,7 @@ async function runSessionGate(){
   _userRolePromise=null; /* always re-check fresh, not a stale cached role from a prior session */
   // Another account's cached readings must never be shown to this one
   // (RLS differs per user): drop every cache on a user change.
-  if(session.user.id !== chatUserId){ invalidateDataCache(); resetTabViews(); _latestPatternsCache = null; }
+  if(session.user.id !== chatUserId){ invalidateDataCache(); resetTabViews(); _latestPatternsCache = null; _accessibleBlocksPromise = null; }
 
   // Gated for EVERY role/status/provider, checked every login, ahead of
   // even the pending-approval screen -- a not-yet-approved signup with no

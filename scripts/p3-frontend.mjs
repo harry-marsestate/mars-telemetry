@@ -190,7 +190,7 @@ async function runUser(browser, u) {
     record("frontend", `frontend.${u.key}.rls_boundary`, "error", {}, {}, err.message);
   }
 
-  if (u.role === "operator") { await fidelity(page); await currentVintageChecks(page); }
+  if (u.role === "operator") { await fidelity(page); await currentVintageChecks(page); await latestConsistency(page); }
   await context.close();
   return snapshot;
 }
@@ -276,6 +276,87 @@ async function fidelity(page) {
       { gateway_rules: rules, rest_rules: inPage.anchor_rules }, { hits: 3, equal: true });
   } catch (err) {
     record("gateway", "gateway.tools.vessels_vs_rest", "error", {}, {}, err.message);
+  }
+}
+
+// ---- operator: one latest value per panel on every range ------------------------
+// docs/SECURITY.md, "Latest value: one point-in-time reading on every range".
+// For every timescale panel (the dashboard's PANEL_LATEST) and every range it
+// offers, re-render it and read __panelData: the latest chip, and each
+// series' newest plotted value (what the end dot and its tooltip show). Fail
+// unless, within LATEST_TOL:
+//   - the chip is identical on every range, and each series' newest value is too;
+//   - each series' newest value equals its own latest reading (pts.latest);
+//   - single-series panels (and solar's measured line): chip == newest value;
+//   - panels with an "at a glance" tile: tile == chip.
+// Runs for the current vintage (all blocks, and B2 only) and the previous
+// vintage, then restores the page.
+const LATEST_TOL = 0.001; // chart points are rounded to 3 dp; latest_reading is exact
+async function latestConsistency(page) {
+  const cur = await page.evaluate(() => CURRENT);
+  const configs = [["vineyard", cur, ["B1", "B2", "B3"]], ["vineyard", cur, ["B2"]], ["vineyard", cur - 1, ["B1", "B2", "B3"]], ["winery", cur, ["B1", "B2", "B3"]]];
+  const problems = [], covered = [];
+  try {
+    for (const [tab, vintage, blocks] of configs) {
+      const r = await page.evaluate(async ({ tab, vintage, blocks, tol }) => {
+        const prevRange = { ...state.range };
+        state[tab].vintages = [vintage]; state[tab].blocks = blocks;
+        delete window.__overviewData?.[tab]; // so the wait below can't pass on the previous config's tiles
+        await renderTab(tab);
+        // overview tiles paint asynchronously (pending runs); wait for this config's values
+        for (let i = 0; i < 60 && !(window.__overviewData?.[tab]?.vintage === vintage); i++) await new Promise((x) => setTimeout(x, 500));
+        const ov = window.__overviewData?.[tab] ?? {};
+        const out = { problems: [], covered: [] };
+        const near = (a, b) => a != null && b != null && Math.abs(a - b) <= tol;
+        for (const [id, L] of Object.entries(PANEL_LATEST)) {
+          if (PANELS.find((p) => p.id === id)?.tab !== tab || !panelRuns[id]) continue;
+          const ranges = PANELS.find((p) => p.id === id).rangeOptions ?? Object.keys(RANGES);
+          const seen = [];
+          for (const k of ranges) {
+            state.range[id] = k;
+            await rerenderPanel(id);
+            const pd = window.__panelData[id] ?? {};
+            if (pd.status !== "ok") { seen.push({ k, skip: pd.status }); continue; }
+            const sets = (pd.charts ?? []).flatMap((c) => c.kind === "bar" ? [{ name: "bar", newest: c.newest, latest: c.latest }] : (c.sets ?? []));
+            seen.push({ k, chip: pd.latest?.v ?? null, sets: sets.map((s) => ({ name: s.name, newest: s.newest ?? null, latest: s.latest?.v ?? null })) });
+          }
+          state.range[id] = prevRange[id]; await rerenderPanel(id);
+          const ok = seen.filter((x) => !x.skip);
+          if (!ok.length) continue;
+          out.covered.push(id);
+          const where = `${id} ${vintage} [${blocks}]`;
+          const chips = ok.map((x) => x.chip);
+          if (chips.some((c) => c == null)) out.problems.push(`${where}: no latest reading (${ok.map((x) => `${x.k}=${x.chip}`).join(" ")})`);
+          else if (!chips.every((c) => near(c, chips[0]))) out.problems.push(`${where}: chip differs by range (${ok.map((x) => `${x.k}=${x.chip}`).join(" ")})`);
+          for (const x of ok) for (const s of x.sets) if (s.latest != null && !near(s.newest, s.latest))
+            out.problems.push(`${where} ${x.k} ${s.name}: newest point ${s.newest} != its latest reading ${s.latest}`);
+          const names = [...new Set(ok.flatMap((x) => x.sets.map((s) => s.name)))];
+          for (const n of names) {
+            const vals = ok.map((x) => [x.k, x.sets.find((s) => s.name === n)?.newest ?? null]);
+            if (vals.some(([, v]) => v == null) || !vals.every(([, v]) => near(v, vals[0][1])))
+              out.problems.push(`${where} ${n}: newest point differs by range (${vals.map(([k, v]) => `${k}=${v}`).join(" ")})`);
+          }
+          for (const x of ok) {
+            const single = x.sets.length === 1 || id === "solar";
+            if (single && x.chip != null && !near(x.sets[0]?.newest, x.chip)) out.problems.push(`${where} ${x.k}: newest point ${x.sets[0]?.newest} != chip ${x.chip}`);
+          }
+          if (L.ov && ov.vintage === vintage && !near(ov[L.ov], chips[0])) out.problems.push(`${where}: overview tile ${L.ov}=${ov[L.ov]} != chip ${chips[0]}`);
+        }
+        return out;
+      }, { tab, vintage, blocks, tol: LATEST_TOL });
+      problems.push(...r.problems);
+      covered.push(`${tab} ${vintage} [${blocks}]: ${r.covered.join(",")}`);
+    }
+    record("frontend", "frontend.latest.consistent", problems.length ? "fail" : "pass",
+      { problems: problems.slice(0, 20), problem_count: problems.length, covered }, { problems: [], tolerance: LATEST_TOL },
+      problems.length ? `a panel's latest value changes with range, or disagrees with its newest point or the overview: ${problems.slice(0, 3).join("; ")}` : null);
+  } catch (err) {
+    record("frontend", "frontend.latest.consistent", "error", { covered }, {}, err.message);
+  } finally {
+    await page.evaluate(async () => {
+      state.vineyard.vintages = [CURRENT]; state.vineyard.blocks = [...ALL_IDS];
+      state.winery.vintages = [CURRENT]; state.winery.blocks = [...ALL_IDS];
+    }).catch(() => {});
   }
 }
 

@@ -8050,6 +8050,7 @@ within 0.001 (chart points are rounded to 3 dp):
 - single-series panels (and solar's measured line) have newest value =
   chip;
 - the overview tile (`window.__overviewData`) = chip.
+- the overview tiles for each tab/vintage appear within 30 s (missing tiles fail the check rather than skipping the comparison; 2026-10-01).
 
 It errors (also non-zero) if the page has no `PANEL_LATEST`. It was proven to
 fail on a copy with the newest-point override removed: air temperature

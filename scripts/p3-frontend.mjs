@@ -307,6 +307,11 @@ async function latestConsistency(page) {
         for (let i = 0; i < 60 && !(window.__overviewData?.[tab]?.vintage === vintage); i++) await new Promise((x) => setTimeout(x, 500));
         const ov = window.__overviewData?.[tab] ?? {};
         const out = { problems: [], covered: [] };
+        // Tiles that never appear are a failure, not a skipped comparison.
+        const ovPainted = ov.vintage === vintage;
+        const ovPanels = Object.entries(PANEL_LATEST).filter(([id, L]) => L.ov && PANELS.find((p) => p.id === id)?.tab === tab && panelRuns[id]).map(([id]) => id);
+        if (ovPanels.length && !ovPainted)
+          out.problems.push(`${tab} ${vintage} [${blocks}]: overview tile values never appeared within 30 s (panels ${ovPanels.join(",")} not compared)`);
         const near = (a, b) => a != null && b != null && Math.abs(a - b) <= tol;
         for (const [id, L] of Object.entries(PANEL_LATEST)) {
           if (PANELS.find((p) => p.id === id)?.tab !== tab || !panelRuns[id]) continue;
@@ -340,7 +345,7 @@ async function latestConsistency(page) {
             const single = x.sets.length === 1 || id === "solar";
             if (single && x.chip != null && !near(x.sets[0]?.newest, x.chip)) out.problems.push(`${where} ${x.k}: newest point ${x.sets[0]?.newest} != chip ${x.chip}`);
           }
-          if (L.ov && ov.vintage === vintage && !near(ov[L.ov], chips[0])) out.problems.push(`${where}: overview tile ${L.ov}=${ov[L.ov]} != chip ${chips[0]}`);
+          if (L.ov && ovPainted && !near(ov[L.ov], chips[0])) out.problems.push(`${where}: overview tile ${L.ov}=${ov[L.ov]} != chip ${chips[0]}`);
         }
         return out;
       }, { tab, vintage, blocks, tol: LATEST_TOL });

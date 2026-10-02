@@ -1,6 +1,7 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
 import { summarizeInnovint, withIngestionLog } from "../_shared/ingestion-log.ts";
+import { currentVintage } from "../_shared/vintage.ts";
 
 // Daily InnoVint sync. Ports ingestion/innovint/{client,db,assets,capacity,
 // weights}.py's three Dagster assets (analyses_sync, vessels_sync,
@@ -186,9 +187,10 @@ async function sync(_req: Request, ctx: any): Promise<Response> {
       // the catch below with nothing upserted and nothing deleted.
       try {
         const now = new Date().toISOString();
-        const currentYear = new Date().getUTCFullYear();
+        // Through the current vintage (harvest-year rule, _shared/vintage.ts)
+        // -- was "UTC calendar year + 1", a second definition of "current".
         const vintages: number[] = [];
-        for (let v = HARVEST_RECEIPTS_FIRST_VINTAGE; v <= currentYear + 1; v++) vintages.push(v);
+        for (let v = HARVEST_RECEIPTS_FIRST_VINTAGE; v <= currentVintage(); v++) vintages.push(v);
 
         const rows: (HarvestReceiptRow & { varietal_id: string })[] = [];
         let unmapped = 0;

@@ -190,9 +190,59 @@ async function runUser(browser, u) {
     record("frontend", `frontend.${u.key}.rls_boundary`, "error", {}, {}, err.message);
   }
 
-  if (u.role === "operator") await fidelity(page);
+  // Insights and Anomalies (docs/SECURITY.md, "Insights and Anomalies for
+  // customers"): every approved user gets the vineyard panel; a customer's
+  // REST view of `insights` holds only surfaced vineyard rows over
+  // customer-visible metrics, estate-wide or on one of its own blocks.
+  try {
+    const ins = await page.evaluate(async () => {
+      const { data, error } = await sb.from("insights").select("tab, status, metric_a, metric_b, scope_kind, scope_block_id");
+      return { error: error?.message ?? null, rows: data ?? [], panel: "anom-v" in (window.__panelData || {}),
+        panelStatus: window.__panelData?.["anom-v"]?.status ?? null };
+    });
+    const CUSTOMER_METRICS = new Set(["air_temp", "humidity", "precipitation", "soil_moisture", "soil_temp", "solar",
+      "gdd_day", "dtr", "vpd_kpa", "vpd_peak_kpa", "et0_in"]);
+    const outside = u.role === "operator" ? [] : ins.rows.filter((r) => r.tab !== "vineyard" || r.status !== "surfaced"
+      || !CUSTOMER_METRICS.has(r.metric_a) || !CUSTOMER_METRICS.has(r.metric_b)
+      || (r.scope_kind !== "estate" && !u.blocks.includes(r.scope_block_id)));
+    const ok = !ins.error && ins.panel && ins.panelStatus === "ok" && outside.length === 0
+      && (u.role !== "operator" || ins.rows.length > 0);
+    record("frontend", `frontend.${u.key}.insights_scope`, ok ? "pass" : "fail",
+      { panel: ins.panel, panel_status: ins.panelStatus, rows: ins.rows.length, rows_outside_scope: outside.slice(0, 5), error: ins.error },
+      { panel: true, panel_status: "ok", rows_outside_scope: [] },
+      ok ? null : "the Insights and Anomalies panel is missing, or insights rows outside this user's scope are readable");
+  } catch (err) {
+    record("frontend", `frontend.${u.key}.insights_scope`, "error", {}, {}, err.message);
+  }
+
+  if (u.role === "operator") { await fidelity(page); await currentVintageChecks(page); await latestConsistency(page); await tabCache(page); }
   await context.close();
   return snapshot;
+}
+
+// ---- current vintage: the rule, and what the apps say --------------------------
+// Vintage = harvest year from Nov 1 Pacific (same rule as _shared/vintage.ts,
+// public.harvest_vintage and the dashboard; tests/vintage-rule.test.ts keeps
+// this copy equal).
+function harvestVintage(d) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit" }).formatToParts(d);
+  const y = Number(parts.find((x) => x.type === "year").value), m = Number(parts.find((x) => x.type === "month").value);
+  return m >= 11 ? y + 1 : y;
+}
+async function currentVintageChecks(page) {
+  const rule = harvestVintage(new Date());
+  try {
+    const dash = await page.evaluate(() => ({ current: CURRENT, vintages: VINTAGES }));
+    const ok = dash.current === rule && dash.vintages[dash.vintages.length - 1] === rule;
+    record("frontend", "frontend.current_vintage", ok ? "pass" : "fail", { dashboard: dash.current, dashboard_vintages: dash.vintages, rule }, { dashboard: rule },
+      ok ? null : "the dashboard's current vintage disagrees with the harvest-year rule");
+  } catch (err) { record("frontend", "frontend.current_vintage", "error", {}, {}, err.message); }
+  try {
+    const g = await gateway("get_anomalies", { as_of: new Date().toISOString() });
+    const ok = g.vintage_used === rule;
+    record("gateway", "gateway.current_vintage", ok ? "pass" : "fail", { gateway: g.vintage_used, rule }, { gateway: rule },
+      ok ? null : "the gateway's default (current) vintage disagrees with the harvest-year rule");
+  } catch (err) { record("gateway", "gateway.current_vintage", "error", {}, {}, err.message); }
 }
 
 // ---- operator: panels vs the gateway --------------------------------------------
@@ -251,6 +301,150 @@ async function fidelity(page) {
       { gateway_rules: rules, rest_rules: inPage.anchor_rules }, { hits: 3, equal: true });
   } catch (err) {
     record("gateway", "gateway.tools.vessels_vs_rest", "error", {}, {}, err.message);
+  }
+}
+
+// ---- operator: one latest value per panel on every range ------------------------
+// docs/SECURITY.md, "Latest value: one point-in-time reading on every range".
+// For every timescale panel (the dashboard's PANEL_LATEST) and every range it
+// offers, re-render it and read __panelData: the latest chip, and each
+// series' newest plotted value (what the end dot and its tooltip show). Fail
+// unless, within LATEST_TOL:
+//   - the chip is identical on every range, and each series' newest value is too;
+//   - each series' newest value equals its own latest reading (pts.latest);
+//   - single-series panels (and solar's measured line): chip == newest value;
+//   - panels with an "at a glance" tile: tile == chip.
+// Runs for the current vintage (all blocks, and B2 only) and the previous
+// vintage, then restores the page.
+const LATEST_TOL = 0.001; // chart points are rounded to 3 dp; latest_reading is exact
+async function latestConsistency(page) {
+  const cur = await page.evaluate(() => CURRENT);
+  const configs = [["vineyard", cur, ["B1", "B2", "B3"]], ["vineyard", cur, ["B2"]], ["vineyard", cur - 1, ["B1", "B2", "B3"]], ["winery", cur, ["B1", "B2", "B3"]]];
+  const problems = [], covered = [];
+  try {
+    for (const [tab, vintage, blocks] of configs) {
+      const r = await page.evaluate(async ({ tab, vintage, blocks, tol }) => {
+        const prevRange = { ...state.range };
+        state[tab].vintages = [vintage]; state[tab].blocks = blocks;
+        delete window.__overviewData?.[tab]; // so the wait below can't pass on the previous config's tiles
+        await renderTab(tab);
+        // overview tiles paint asynchronously (pending runs); wait for this config's values
+        for (let i = 0; i < 60 && !(window.__overviewData?.[tab]?.vintage === vintage); i++) await new Promise((x) => setTimeout(x, 500));
+        const ov = window.__overviewData?.[tab] ?? {};
+        const out = { problems: [], covered: [] };
+        // Tiles that never appear are a failure, not a skipped comparison.
+        const ovPainted = ov.vintage === vintage;
+        const ovPanels = Object.entries(PANEL_LATEST).filter(([id, L]) => L.ov && PANELS.find((p) => p.id === id)?.tab === tab && panelRuns[id]).map(([id]) => id);
+        if (ovPanels.length && !ovPainted)
+          out.problems.push(`${tab} ${vintage} [${blocks}]: overview tile values never appeared within 30 s (panels ${ovPanels.join(",")} not compared)`);
+        const near = (a, b) => a != null && b != null && Math.abs(a - b) <= tol;
+        for (const [id, L] of Object.entries(PANEL_LATEST)) {
+          if (PANELS.find((p) => p.id === id)?.tab !== tab || !panelRuns[id]) continue;
+          const ranges = PANELS.find((p) => p.id === id).rangeOptions ?? Object.keys(RANGES);
+          const seen = [];
+          for (const k of ranges) {
+            state.range[id] = k;
+            await rerenderPanel(id);
+            const pd = window.__panelData[id] ?? {};
+            if (pd.status !== "ok") { seen.push({ k, skip: pd.status }); continue; }
+            const sets = (pd.charts ?? []).flatMap((c) => c.kind === "bar" ? [{ name: "bar", newest: c.newest, latest: c.latest }] : (c.sets ?? []));
+            seen.push({ k, chip: pd.latest?.v ?? null, sets: sets.map((s) => ({ name: s.name, newest: s.newest ?? null, latest: s.latest?.v ?? null })) });
+          }
+          state.range[id] = prevRange[id]; await rerenderPanel(id);
+          const ok = seen.filter((x) => !x.skip);
+          if (!ok.length) continue;
+          out.covered.push(id);
+          const where = `${id} ${vintage} [${blocks}]`;
+          const chips = ok.map((x) => x.chip);
+          if (chips.some((c) => c == null)) out.problems.push(`${where}: no latest reading (${ok.map((x) => `${x.k}=${x.chip}`).join(" ")})`);
+          else if (!chips.every((c) => near(c, chips[0]))) out.problems.push(`${where}: chip differs by range (${ok.map((x) => `${x.k}=${x.chip}`).join(" ")})`);
+          for (const x of ok) for (const s of x.sets) if (s.latest != null && !near(s.newest, s.latest))
+            out.problems.push(`${where} ${x.k} ${s.name}: newest point ${s.newest} != its latest reading ${s.latest}`);
+          const names = [...new Set(ok.flatMap((x) => x.sets.map((s) => s.name)))];
+          for (const n of names) {
+            const vals = ok.map((x) => [x.k, x.sets.find((s) => s.name === n)?.newest ?? null]);
+            if (vals.some(([, v]) => v == null) || !vals.every(([, v]) => near(v, vals[0][1])))
+              out.problems.push(`${where} ${n}: newest point differs by range (${vals.map(([k, v]) => `${k}=${v}`).join(" ")})`);
+          }
+          for (const x of ok) {
+            const single = x.sets.length === 1 || id === "solar";
+            if (single && x.chip != null && !near(x.sets[0]?.newest, x.chip)) out.problems.push(`${where} ${x.k}: newest point ${x.sets[0]?.newest} != chip ${x.chip}`);
+          }
+          if (L.ov && ovPainted && !near(ov[L.ov], chips[0])) out.problems.push(`${where}: overview tile ${L.ov}=${ov[L.ov]} != chip ${chips[0]}`);
+        }
+        return out;
+      }, { tab, vintage, blocks, tol: LATEST_TOL });
+      problems.push(...r.problems);
+      covered.push(`${tab} ${vintage} [${blocks}]: ${r.covered.join(",")}`);
+    }
+    record("frontend", "frontend.latest.consistent", problems.length ? "fail" : "pass",
+      { problems: problems.slice(0, 20), problem_count: problems.length, covered }, { problems: [], tolerance: LATEST_TOL },
+      problems.length ? `a panel's latest value changes with range, or disagrees with its newest point or the overview: ${problems.slice(0, 3).join("; ")}` : null);
+  } catch (err) {
+    record("frontend", "frontend.latest.consistent", "error", { covered }, {}, err.message);
+  } finally {
+    await page.evaluate(async () => {
+      state.vineyard.vintages = [CURRENT]; state.vineyard.blocks = [...ALL_IDS];
+      state.winery.vintages = [CURRENT]; state.winery.blocks = [...ALL_IDS];
+    }).catch(() => {});
+  }
+}
+
+// ---- operator: tab cache (docs/SECURITY.md, "Dashboard caching") -------------------
+// Returning to an already-rendered tab with unchanged inputs must not re-render
+// it or send a single series_bucketed request; changing an input (vintage,
+// a panel's range) while the tab is hidden must re-render it with new requests
+// on the next visit. Counts the page's own series_bucketed requests (resource
+// timing), and reads showTab()'s decision log (window.__tabRenderLog).
+async function tabCache(page) {
+  const steps = [];
+  try {
+    const step = async (name, fn) => {
+      const r = await page.evaluate(async (fn) => {
+        const count = () => performance.getEntriesByType("resource").filter((e) => e.name.includes("/rpc/series_bucketed")).length;
+        const idle = async () => { // panels settled and no request finished in the last 1 s
+          for (let i = 0, last = -1, quietSince = Date.now(); i < 240; i++) {
+            const n = performance.getEntriesByType("resource").length;
+            const busy = Object.values(window.__panelData || {}).some((p) => p.status === "rendering");
+            if (n !== last || busy) { last = n; quietSince = Date.now(); }
+            if (Date.now() - quietSince > 1000) return;
+            await new Promise((x) => setTimeout(x, 250));
+          }
+        };
+        await idle();
+        // The default 250-entry resource buffer is full by now; a full one records nothing.
+        performance.setResourceTimingBufferSize(100000); performance.clearResourceTimings();
+        const before = count(), logLen = (window.__tabRenderLog || []).length;
+        await (0, eval)(`(async () => { ${fn} })()`);
+        await idle();
+        const decisions = (window.__tabRenderLog || []).slice(logLen);
+        return { series_requests: count() - before, decisions: decisions.map((d) => `${d.tab}:${d.rendered ? d.why : "cached"}`) };
+      }, fn);
+      steps.push({ name, ...r });
+      return r;
+    };
+    const click = (tab) => `document.querySelector("button.tab[data-tab='${tab}']").click();`;
+    await step("prime vineyard", click("vineyard"));
+    await step("prime winery", click("winery"));
+    const back = await step("back to vineyard (unchanged)", click("vineyard"));
+    const again = await step("winery again (unchanged)", click("winery"));
+    const vint = await step("vineyard vintage changed while hidden", `state.vineyard.vintages = [CURRENT - 1]; ${click("vineyard")}`);
+    await step("winery", click("winery"));
+    const rng = await step("airtemp range changed while hidden", `state.range.airtemp = state.range.airtemp === '30D' ? '5D' : '30D'; ${click("vineyard")}`);
+    const ok = back.series_requests === 0 && back.decisions.join() === "vineyard:cached"
+      && again.series_requests === 0 && again.decisions.join() === "winery:cached"
+      && vint.series_requests > 0 && vint.decisions.join() === "vineyard:inputs changed"
+      && rng.series_requests > 0 && rng.decisions.join() === "vineyard:inputs changed";
+    record("frontend", "frontend.tab_cache", ok ? "pass" : "fail", { steps }, {
+      unchanged_revisit: { series_requests: 0, decision: "cached" }, changed_input: { series_requests: "> 0", decision: "inputs changed" } },
+      ok ? null : "a tab revisit re-fetched with unchanged inputs, or did not re-fetch after an input changed");
+  } catch (err) {
+    record("frontend", "frontend.tab_cache", "error", { steps }, {}, err.message);
+  } finally {
+    await page.evaluate(async () => {
+      state.vineyard.vintages = [CURRENT]; delete state.range.airtemp;
+      document.querySelector("button.tab[data-tab='vineyard']").click();
+    }).catch(() => {});
   }
 }
 

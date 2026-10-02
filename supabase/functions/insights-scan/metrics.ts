@@ -6,6 +6,7 @@
 // reimplementing that precedence logic a third time.
 
 import type { SupabaseClient } from "@supabase/server";
+import { currentVintage } from "../_shared/vintage.ts";
 
 export const TIER_A_METRICS = [
   "air_temp", "humidity", "precipitation", "soil_moisture", "soil_temp", "solar",
@@ -112,7 +113,10 @@ export async function realVintagesByMetric(
   // vintages," which would look identical to a genuine all-mock dataset
   // in the resulting insights rows (all excluded_low_n) and be very hard
   // to tell apart from a real infrastructure problem after the fact.
-  const { data: vintageRows, error: vintageErr } = await sb.from("vintages").select("vintage").eq("is_current", false).order("vintage");
+  // Closed vintages = every vintage before the current one by the
+  // harvest-year rule (_shared/vintage.ts) -- not vintages.is_current,
+  // which is only a derived mirror of the same rule.
+  const { data: vintageRows, error: vintageErr } = await sb.from("vintages").select("vintage").lt("vintage", currentVintage()).order("vintage");
   if (vintageErr) throw new Error(`realVintagesByMetric: could not read vintages: ${vintageErr.message}`);
   const vintages = (vintageRows ?? []).map((r: { vintage: number }) => r.vintage);
 

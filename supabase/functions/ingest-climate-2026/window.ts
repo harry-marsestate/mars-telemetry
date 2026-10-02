@@ -1,3 +1,7 @@
+// Vintage = harvest year from Nov 1 Pacific: the shared definition (re-exported).
+import { harvestVintage, VINTAGE_START_MONTH } from "../_shared/vintage.ts";
+export { harvestVintage, VINTAGE_START_MONTH };
+
 // Upsert/refresh window limits for ingest-climate-2026. Pure functions so
 // they can be tested without a deployed function.
 //
@@ -123,22 +127,6 @@ export function isEndDateOutOfRange(status: number, body: string): boolean {
 // belongs to. The VINTAGE guard in index.ts refuses to write an hour whose
 // Pacific year isn't the job's hard-coded VINTAGE (docs/SECURITY.md tracked
 // item: VINTAGE = 2026 must change before 2027).
-// Vintage = harvest year; the cycle starts November 1 Pacific (decided
-// 2026-09-30, docs/SECURITY.md "Vintage is the harvest year"): an hour from
-// Nov 1 onward belongs to the NEXT year's vintage, Jan-Oct to its own
-// calendar year. Mirrors public.harvest_vintage() in SQL.
-export const VINTAGE_START_MONTH = 11;
-
-function pacificYearMonth(ms: number): [number, number] {
-  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit" }).formatToParts(new Date(ms));
-  return [Number(parts.find((p) => p.type === "year")!.value), Number(parts.find((p) => p.type === "month")!.value)];
-}
-
-export function harvestVintage(ms: number): number {
-  const [y, m] = pacificYearMonth(ms);
-  return m >= VINTAGE_START_MONTH ? y + 1 : y;
-}
-
 // The vintage of a Pacific calendar date (YYYY-MM-DD).
 export function vintageOfPacificDate(date: string): number {
   const [y, m] = date.split("-").map(Number);

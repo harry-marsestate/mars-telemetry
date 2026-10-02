@@ -7151,6 +7151,16 @@ pg_net's queue, its Authorization header is readable like the Vault key's
     ingest refuses its hours);
   - **warns from 14 days before 1 November** if the next vintage isn't in
     `public.vintages`.
+- `database.insights_estate_inputs_estate_wide` (added 2026-10-01): fails if
+  `sensor_readings` holds any REAL per-block row (block_id not null, source in
+  `real_data_sources`) for an insights-scan input metric (air_temp, humidity,
+  precipitation, soil_moisture, soil_temp, solar; the derived ones come from
+  air_temp/humidity), any vintage. Mock per-block rows are listed but pass:
+  `series_bucketed` drops all mock rows of a (metric, vintage) with real data,
+  and the scanner scans only such vintages. On failure: compute estate series
+  from block_id-null rows only, or require access to every block for estate
+  rows in `insights_customer_read` (see "Insights and Anomalies for
+  customers").
 - `database.integrity.soil_moisture_range`: every soil reading between 0 and
   100.
 - `database.integrity.gdd_calibrated_2022_2025`: each closed vintage's final
@@ -7172,6 +7182,14 @@ pg_net's queue, its Authorization header is readable like the Vault key's
 - `database.integrity.climate_source_labels` (added 2026-09-30): no legacy
   `open_meteo_era5`/`OM-ERA5` label, no non-soil row labelled ERA5 or
   ERA5-Land, and no Open-Meteo soil row labelled anything but ERA5-Land.
+- `database.vintage.current_consistent` (added 2026-09-30) fails if any of
+  these is wrong:
+  - the rule's current vintage exists in `public.vintages`;
+  - `vintages.is_current` (a derived mirror) agrees;
+  - the newest P3 run's `frontend.current_vintage` and
+    `gateway.current_vintage` passed.
+
+  It warns if there has been no such P3 run in 26 hours.
 - `ingestion.climate.model_pinned` [ingestion] (added 2026-09-30): the
   newest climate ingest recorded `requested_models = {weather: ecmwf_ifs,
   soil: era5_land}`.
@@ -7247,6 +7265,10 @@ retried once on 5xx or a network error:
   login.
 - `frontend.<user>.role_visibility`: operator-only panels (`tanks`, `fruit`)
   appear for the operator and never for a customer.
+- `frontend.current_vintage` and `gateway.current_vintage` (operator, added
+  2026-09-30): the dashboard's `CURRENT`/`VINTAGES` and the gateway's
+  default `get_anomalies` vintage (`vintage_used`) equal the harvest-year
+  rule at run time.
 - `frontend.<user>.rls_boundary`: in-page through the user's own REST
   session, the blocks with 2026 soil rows equal the user's blocks, the
   vessels rows are 0 for customers, and a customer sees exactly 1
@@ -7262,6 +7284,15 @@ Operator only, panels vs the gateway (P3 key `mtk_jxk3p3fn`):
   REST count.
 - `gateway.tools.anomaly_anchor_vs_rest`: `get_anomalies` at the
   2024-07-06 anchor returns the same 3 rules as REST.
+- `frontend.latest.consistent` (added 2026-10-01): for every timescale panel
+  and range, the latest chip, the newest plotted point and the overview tile
+  agree within 0.001 (see "Latest value: one point-in-time reading on every
+  range").
+- `frontend.tab_cache` (added 2026-10-01): returning to an already-rendered
+  tab with unchanged inputs re-renders nothing and sends no `series_bucketed`
+  request; changing the vineyard vintage, or one panel's range, while the
+  tab is hidden re-renders it with new requests on the next visit (see
+  "Dashboard load time and the tab cache").
 
 **P4, the gateway itself** (inside `get_system_health`):
 - `gateway.p4.database_reachable`.
@@ -7270,6 +7301,9 @@ Operator only, panels vs the gateway (P3 key `mtk_jxk3p3fn`):
 - `gateway.p4.allowed_tools`.
 - `gateway.p4.write_capable_tools`: fails if the key allows any tool that
   isn't a catalogued read-only `get_*` tool.
+- `gateway.p4.current_vintage` (2026-09-30): the gateway's own TypeScript
+  rule equals the database's `harvest_vintage(now())`, and that vintage
+  exists in `vintages`.
 
 ### The dashboard hook P3 reads
 
@@ -7277,7 +7311,13 @@ Operator only, panels vs the gateway (P3 key `mtk_jxk3p3fn`):
 range, charts: [...]}`:
 - `makePanel`/`refreshPanelRun` set the status (`rendering`, `ok`, `blocked`
   or `error`);
-- `lineChart`/`barChart`/`table`/`strip` append what they drew.
+- `lineChart`/`barChart`/`groupedBars`/`table`/`strip` append what they drew.
+  Chart series carry `latest` (the shared latest reading) and `newest` (the
+  newest plotted value).
+- `paintPanelLatest` sets `latest: {t, v, interval}` (the panel's chip).
+
+`window.__overviewData[tab]` holds the raw overview tile values (`vintage`,
+`t`, `rh`, `sm`, `g`, `vp`, `dt`; winery `t`, `rh`).
 
 `window.__seriesCalls` records the `series_bucketed` parameters and rows of
 the last 300 calls. The hook holds references to data already fetched for the
@@ -7709,3 +7749,504 @@ dates) use the wine's vintage and are outside this rule.
 - **One transient 503** on the gateway's first `initialize` during a harness
   run. P3 used the gateway successfully at the same time, and the immediate
   retry passed 48/48.
+
+## API key tool scopes in the admin UI (2026-09-30)
+
+**What happened.** `admin_issue_agent_key` passed no tools to
+`agent_key_issue`, so every key issued from User Management silently got the
+five round-one tools. The owner issued `mtk_bmDX7RTv` ("Claude Code System
+Check", owned by svc-nightly-checks `3c254617`, an operator service account)
+at 15:48 UTC, and at 15:52:28 it was refused `get_system_health`
+(`rejected_scope`). The owner was confirmed first, then the key was widened
+to all 12 tools with `scripts/agent-keys.mjs set-tools`. The change is
+audited in `agent_api_key_scope_changes` (5 → 12, by agent-keys.mjs), and
+`mcp_key_scope` run as `mcp_gateway` (exactly what tools/list uses) returns
+all 12. Its plaintext exists only where the owner saved it; it expires
+2027-09-30.
+
+**Fix: the admin UI chooses tools** (migration `20260930120000`).
+- *Database*, all admin-only SECURITY DEFINER wrappers over the owner-only
+  implementations, with no new table grants:
+  - `admin_issue_agent_key(user, label, days, allowed_tools)` requires tools
+    (empty or NULL is refused). The old 3-argument signature was dropped, so
+    a stale page fails loudly instead of silently defaulting.
+  - `admin_update_agent_key_tools(id, tools)` goes through
+    `agent_key_set_tools`, so every change is audited with "… via web admin".
+  - `admin_list_agent_key_scope_changes(id)` provides the history.
+  - `admin_list_mcp_tools()` returns the catalogue, with each tool's preset
+    group taken from the database.
+
+  Health tools stay operator-only **in the database**: the
+  `agent_api_keys_scope_guard` trigger refuses them on a key whose owner
+  isn't an operator, on issue and on edit, even when an admin asks.
+- *UI:*
+  - The issue form has a required tool picker with nothing preselected:
+    "Original data tools (5)", "All data tools (9)", and "Full, including
+    health tools (12)" (only for operator owners), plus a checkbox per tool.
+    Health checkboxes are disabled for other owners, with a note that the
+    database enforces this.
+  - A new review step lists account, label, expiry and the chosen tools
+    before "Confirm and create key".
+  - The one-time reveal lists the key's tools.
+  - The key detail view has an editable picker (Save enables only on a
+    change) and a "Tool changes" history, like expiry changes.
+- *Verified:*
+  - node tests: tools required, the old signature gone, 12 tools on an
+    operator key, a customer-owned key refused health tools on issue AND
+    edit even as admin, edits audited and listed, presets 5/4/3, non-admins
+    refused everywhere;
+  - `agent-keys-admin-verify.mjs`: 85/85 live;
+  - in Chrome as the admin: the detail view of `mtk_bmDX7RTv` shows its 12
+    tools and the 5 → 12 history; the issue form preselects nothing,
+    refuses no tools, offers Full only for the svc owner, and for a customer
+    owner drops the health tools, disables their checkboxes and hides Full.
+
+  Issuing a throwaway 12-tool key from the UI needs a sign-in within the last
+  10 minutes; that is the owner's to do (see the final report).
+
+## Current vintage from the harvest-year rule; vintage 2027 (2026-09-30)
+
+"Current vintage" has one source of truth: the harvest-year rule (a vintage
+is its harvest year; each begins 1 November Pacific). It is implemented in
+three places that must agree:
+- `supabase/functions/_shared/vintage.ts`, for every Edge Function;
+- `public.harvest_vintage()` in SQL;
+- the dashboard's `harvestVintage()`.
+
+They're kept equal by `tests/vintage-rule.test.ts`, which compares the
+dashboard's and P3's copies hour by hour across both boundaries, and at run
+time by P1, P3 and P4.
+
+**Database** (migration `20260930140000`):
+- `public.vintages` gains **2027**. That is everything a new vintage needs
+  here: `sensor_readings`, `lab_samples`, `labour_actuals` and
+  `vintage_climate_calibration` reference it by foreign key. It has no
+  calibration row (neither does 2026: `coalesce(scalar, 1)`).
+  `metric_registry`, `anomaly_thresholds` and `block_innovint_map`
+  (open-ended ranges) are not per-vintage. The mock-profile columns are
+  NULL: no function reads them, and 2027 gets no simulated data.
+- `vintages.is_current` is now a derived mirror, set by
+  `sync_current_vintage()` daily at 07:05 UTC (1 November starts at 07:00
+  UTC, still PDT). No app code reads it any more.
+- `real_climate_as_of(vintage)` generalizes `real_climate_as_of_2026()`,
+  which remains as a wrapper (identical output: 2026-09-24).
+
+**Every hard-coded current-vintage 2026 changed:**
+- *web/index.html:*
+  - `CURRENT = 2026` → `harvestVintage(appNow())`;
+  - `VINTAGES = [2022..2026]` → 2022 through `CURRENT`;
+  - `NOW = new Date(2026,6,28…)` → the mock anchor only while
+    `MOCK_SEASON` is current, otherwise the real clock;
+  - `VCOLOR` literal → derived, with colours for later vintages;
+  - the 2026 label "warm, dry — in progress" → "warm, dry", with the
+    suffix added only while current;
+  - `MOCK_NOW` as the real-data anchor in `endOfReal`/`seriesEndReal` →
+    `currentRealAnchor()`;
+  - `real_climate_as_of_2026` → `real_climate_as_of(CURRENT)`;
+  - `sample()`'s fallback to 2024's profile → refusal;
+  - the chat header "Vintages 2022–2026" → rule-derived.
+- *chat/tools.ts:*
+  - `CURRENT_VINTAGE = 2026` → `currentToolVintage()`;
+  - `ALL_VINTAGES = [2022..2026]` → `allVintages()`;
+  - two literal `[2022..2026]` loops → `allVintages()`;
+  - tool descriptions citing "(2026)", "current 2026 vintage" and
+    "(2026-07-28)" → rule-neutral wording;
+  - "2026 is a partial, still-growing season" → reworded;
+  - `get_anomalies`' default as-of `MOCK_NOW` → only while `MOCK_SEASON`
+    is current, otherwise the real clock.
+- *chat/index.ts:* the system prompt gets a date + current-vintage line
+  from the rule.
+- *mcp/data-tools.ts:* `CURRENT_VINTAGE = 2026` → `currentToolVintage()`,
+  and `get_anomalies` reports `vintage_used`.
+- *insights-scan:* `is_current = false` → `vintage < currentVintage()`.
+- *ingest-innovint:* "UTC year + 1" → `currentVintage()`.
+- *ingest-climate-2026:* now uses the shared `harvestVintage`.
+
+**Remaining 2026 literals** are facts about data, not "current":
+- `MOCK_SEASON` and `MOCK_NOW` (the seeded mock narrative);
+- the 2026 colour and simulated profile;
+- `REAL_LABOUR_VINTAGES` and the "Mars Invoice Backup" labour-source label;
+- data-coverage facts in the chat tool descriptions;
+- comments.
+
+**Off-season behaviour (1 November to 31 March).** The dashboard opens on
+2027 as current.
+- A vintage with no simulated profile is never shown mock data: `sample()`
+  refuses it, and the season gate never even asks. Before its season starts,
+  every vintage panel shows "2027 season begins April 1. 2026 is the latest
+  complete season — choose it under Vintage".
+- The overview says the same, and the cellar tile says there is no 2027
+  cellar data (its sensors are simulated).
+- The dropdown shows "2027 · current · season begins April 1" and
+  "2026 · warm, dry"; 2026 is fully selectable.
+- From 1 April, panels with real 2027 data render. The rest say "No 2027 data
+  for this panel yet: it has no real data source for 2027".
+- The block map and the vessel inventory (not vintage data) always render.
+
+**No panel needs mock data to work.** Wind, solar/UV, cellar temperature
+and humidity, the fermentation-anomaly insights and (until real records
+exist) irrigation and fruit have no real source. For 2027 they show the
+honest state and never simulate.
+
+**Verified.**
+- A localhost-only test clock (`?test_now=`) was used as the P3 operator on
+  2026-11-01, 2026-12-15 and 2027-04-02:
+  - `CURRENT` 2027 and `VINTAGES` through 2027;
+  - 0 mock requests (`__mockRefused` 0);
+  - 0 panel errors;
+  - choosing 2026 renders every vineyard panel.
+- Today, unchanged: 23/23 panels.
+- On the production host, `?test_now=` is ignored (`TEST_NOW` null, real
+  clock, 0 console errors).
+- P3 run 26: 18/18, including both current-vintage checks.
+- P1 run 27: `database.vintage.current_consistent` passes.
+- Live P4: `gateway.p4.current_vintage` passes (2026 = 2026).
+- Live chat: "2026 is the current vintage … growing season is in progress".
+- Unit tests pin the chat and gateway defaults at the simulated dates.
+
+## authenticated: REFERENCES/TRIGGER/TRUNCATE/MAINTAIN revoked (2026-09-30)
+
+Migration `20260930130000` revoked all four on every table and view in
+`public`, and postgres's default privileges in `public` no longer re-grant
+them.
+- SELECT/INSERT/UPDATE/DELETE were not touched: the 39 grant rows are
+  byte-identical before and after.
+- `security.anon.no_table_privileges` now also fails on any of the four for
+  `authenticated`, on relations or postgres's defaults.
+- The `security.structure.daily_derived` baseline was re-baselined; the only
+  change was authenticated's REFERENCES/TRIGGER/TRUNCATE.
+- Verified: P1 run 23 all pass, P3 16/16, and the gateway harness 48/48.
+- `supabase_admin`'s own defaults still grant `authenticated` everything on
+  tables it creates. postgres can't alter them, and the P1 check catches
+  them.
+
+## Anthropic key replaced; P3 backup trigger tested end to end (2026-09-30)
+
+- The owner replaced `ANTHROPIC_API_KEY`: its digest changed, and it was set
+  19:18 UTC.
+  - P2 run 25, through its cron command: 6/6 pass, including
+    `source.anthropic.model`.
+  - A live chat question as the synthetic operator: HTTP 200 in 10 s, with
+    the correct answer (2024: 4,058.0 calibrated GDD).
+- The GitHub token is in Vault as `github_p3_dispatch_token`, a fine-grained
+  PAT that can read the P3 workflow and is refused repository contents.
+  `p3_backup_dispatch()` was run as if on the next day with no P3 run:
+  pg_net → GitHub answered 204, workflow run 36741272277 started, and the
+  test's `p3_backup` record was deleted.
+
+## Latest value: one point-in-time reading on every range (2026-10-01)
+
+A panel's newest point, its tooltip and the "Estate at a glance" tile could
+each show a different number, and the panel's number changed with the range
+(1D / 5D / 30D / 1Y). Measured on production before the fix (2026 vintage,
+as-of 25 Sep 14:20 Pacific):
+
+| Panel | 1D | 5D | 30D | 1Y | Overview |
+|---|---|---|---|---|---|
+| Air temperature (°F) | 79.0 | 78.5 | 60.7 | 62.8 | 79.0 |
+| Relative humidity (%) | 18 | 16.3 | 48.3 | 56.5 | 18 |
+| Soil moisture (% VWC) | 14.0 | 14.0 | 14.0 | 14.7 | — |
+| Soil temperature (°F) | 76.7 | 76.65 | 76.65 | 66.1 | — |
+| Precipitation (in, bar) | 0 | 0 | 0 | 0.29 | — |
+| Irrigation (gal, bar) | — | — | null (last bar empty) | 113,271 | — |
+| Solar (W/m², simulated) | 893 | 893 | 315 | 307 | panel text 893 |
+| Cellar temp / RH (winery) | last bucket empty; end dot a 1 h / 3 h / 1 day average | | | | 57.2 / 77 |
+
+Every panel now reads 78.0 °F, 22 %, 14.0 % VWC, 75.9 °F, 0 in, 0 gal, 895
+W/m² (all blocks), 57.24 °F and 76.85 % on every range, and the tiles agree.
+2025 and the B1 / B2 / B3 selections were checked the same way.
+
+### Root causes
+1. **Bucket averages and sums.** The newest point was the last
+   `series_bucketed` bucket. Its size depends on the range (1 h, 3 h, 1 day,
+   1 month), so it was a 1 h, 3 h, 24 h or month average (or sum).
+2. **The last bucket started at the as-of and read data after it.**
+   `generate_series(start, end, bucket)` includes `end`. The window
+   `[end - n*bucket, end]` therefore had n+1 buckets, and the last one,
+   `[as-of, as-of + bucket)`, held only readings from after the as-of. The
+   real 2026 ingest runs past the as-of day (air temperature to 1 Oct, as-of
+   25 Sep), so the overview's 79.0 °F was the 15:00 reading, not the newest
+   one at 14:20. For cellar data (it stops at 07:00 on 28 Jul, as-of 14:20)
+   the last bucket was empty.
+3. **The overview used a different source for soil moisture.** It asked per
+   block, but real soil data is estate-wide (`block_id` null), so the tile
+   showed "—" for every real vintage while the panel showed 14.0.
+4. **1Y used 360 days of calendar-month buckets**, so the 12th month ran
+   about 5 days past the as-of.
+5. **Daily derived series (GDD, DTR, VPD, ET₀) were gap-filled over UTC
+   days.** An archived vintage's 31 Oct 23:59 Pacific end is 1 Nov in UTC.
+   That added an empty "1 Nov" newest point, and every daily point was
+   labelled with the previous day west of UTC. This was a timezone edge.
+6. **Simulated solar** took its "current insolation" figure from the reading
+   at the as-of, but the 30D / 1Y newest point was a daily or 10-day mean.
+   For an archived vintage, the figure used a harvest-peak instant while the
+   chart ran to 31 Oct.
+
+### Semantics
+- **As-of**: `latestAsOf(key, v)` = `realClimateSeriesEnd(key, v)`. This is
+  the same instant every unscrolled single-vintage chart ends at:
+  - CURRENT, real-climate metrics: the real-climate as-of day at 14:20
+    Pacific.
+  - CURRENT, still-simulated metrics: `MOCK_NOW` (28 Jul 2026 14:20).
+  - Archived vintages: 31 Oct.
+
+  Ranges, scroll and compare mode never move it. The vintage rule and
+  `MOCK_NOW` are unchanged.
+- **State metrics** (air and soil temperature, humidity, soil moisture,
+  cellar temperature and RH, solar): latest = the newest raw reading at or
+  before the as-of.
+- **Flux metrics** (`FLUX_INTERVAL`: precipitation = hour, irrigation volume
+  = day): latest = the newest raw interval value. Precipitation is an hourly
+  total and irrigation a daily total, and the chip says so ("Latest hour",
+  "Latest day"). Bars still show range-bucket totals. The newest bar's
+  tooltip leads with the interval value, then "Bucket from …" with that
+  bucket's total. Buckets now tile `[start, as-of)` exactly, so there is no
+  partial bucket to mark. The irrigation and precipitation header totals
+  ("in · 5.39 total", "gal · …/ac") are left as they were. They are totals
+  of the visible window and change with the range by design; they are not a
+  latest value.
+- **Daily derived and cumulative metrics** (GDD to date, DTR, VPD, ET₀):
+  latest = the newest `daily_derived` row on or before the as-of day. GDD is
+  the season total to date, so it is the same on every range.
+- **Multi-block** (simulated per-block soil, irrigation over the selected
+  blocks): latest = the newest instant any selected block has, combining the
+  blocks with a reading at that instant (mean for state, sum for flux). This
+  is the same combination the series applies per bucket.
+
+### Fix
+- Migration `20261001120000_latest_reading.sql`:
+  `public.latest_reading(metric, block, vintage, as_of, agg)` returns the
+  newest eligible row(s) at or before `as_of`.
+  - It uses `series_bucketed`'s row eligibility clause for clause, including
+    real-over-mock precedence with and without a vintage.
+  - Rows at the newest instant are averaged or summed.
+  - It is SECURITY INVOKER, so sensor_readings RLS applies to the caller.
+    `search_path = ''`.
+  - EXECUTE is granted to `authenticated` and `service_role` only (not PUBLIC
+    or anon).
+  - Tested offline (`tests/latest-reading.test.mjs`, 6/6), then on
+    production inside a rolled-back transaction. `supabase db push
+    --dry-run` listed only this migration before `db push`. Live grants
+    were checked afterwards.
+- `web/index.html`:
+  - One helper, `latestFor(spec, vintage, asOf)`, reads `latest_reading`, or
+    `daily_derived` for a field.
+  - One registry, `PANEL_LATEST`, holds each timescale panel's spec, unit
+    and overview tile key. The panel chip ("Latest · 78.0 °F · 25 Sep
+    14:00"), the newest plotted point and its tooltip (`withLatest`), and the
+    vineyard and winery overview tiles all read it.
+  - `getSeries` queries `[as-of − n·bucket, as-of − 1 ms]`, so the last
+    bucket is `[as-of − bucket, as-of)`. 1Y starts 12 calendar months (UTC)
+    before the as-of.
+  - `getDerivedSeries` gap-fills over local calendar days.
+  - Realtime inserts newer than the as-of no longer move the overview tiles
+    ahead of the panels.
+  - `series_bucketed` itself is unchanged.
+- Not covered: wind has no range and stays a single simulated reading.
+  Compare mode shares a 31 Oct axis, so the chip there shows the primary
+  vintage's latest and the lines keep their bucket values.
+- Edge: when the as-of falls on the 29th to 31st, Postgres's '1 month' step
+  clamps to the 28th, so the 12th 1Y bucket can run up to 3 days past the
+  as-of. That affects only the 1Y bar total, never the latest value.
+
+### Regression check: `frontend.latest.consistent` (P3, operator)
+`scripts/p3-frontend.mjs` re-renders every `PANEL_LATEST` panel on every
+range it offers, for 4 configurations:
+- the current vintage with all blocks;
+- the current vintage with B2 only;
+- the previous vintage;
+- the winery tab.
+
+The check fails, with up to 20 listed problems, unless all of these hold
+within 0.001 (chart points are rounded to 3 dp):
+- the chip is identical on every range;
+- every series' newest plotted value is identical on every range and equals
+  its own latest reading;
+- single-series panels (and solar's measured line) have newest value =
+  chip;
+- the overview tile (`window.__overviewData`) = chip.
+- the overview tiles for each tab/vintage appear within 30 s (missing tiles fail the check rather than skipping the comparison; 2026-10-01).
+
+It errors (also non-zero) if the page has no `PANEL_LATEST`. It was proven to
+fail on a copy with the newest-point override removed: air temperature
+75.9 / 65.7 / 63.8 vs 78. Run it locally:
+
+    node scripts/p3-frontend.mjs --dashboard http://localhost:8765/index.html --magic-link --dry-run
+
+The local run serves `web/` with `python3 -m http.server 8765`. It needs
+`.env`'s service key for the magic links. Without `P3_MCP_KEY`, the gateway
+checks report `error`; the rest run.
+
+## Dashboard load time and the tab cache (2026-10-01)
+Symptoms: after sign-in the dashboard could take about a minute to show
+anything, and every switch between the Vineyard and Winery tabs rebuilt and
+re-fetched the whole tab.
+
+### Root causes, by impact (measured, see "Before / after")
+1. **A hidden page never rendered.** `renderTab()` waited for one
+   `requestAnimationFrame` before starting any panel. Chrome runs no rAF
+   callbacks while a page is hidden (background tab, minimised or covered
+   window), so a dashboard loaded there booted in ~4 s and then drew nothing
+   until the page was shown again: first panel at 34.6 s in the measured
+   session, only because a screenshot forced a frame.
+2. **Every tab switch was a full rebuild.** The tab buttons called
+   `renderTab()` unconditionally: 19 requests (operator) / 22 (customer) per
+   return to Vineyard, 6 per return to Winery, ~1-2 s each time.
+3. **Returning to the browser tab re-runs the session gate** (not changed,
+   see "Left as is"). supabase-js 2.117.2 emits `SIGNED_IN` from
+   `_recoverAndRefresh` on every `visibilitychange` to visible;
+   `runSessionGate()` then re-reads the profile and role and six metadata
+   RPCs (`domain_reality` ~1-2 s). It re-renders nothing.
+4. **Serial boot chain.** name profile -> role -> header profile -> metadata
+   batch: four round trips before the first panel; the header re-read the
+   same `user_profiles` row.
+5. **The hidden Winery tab was rendered at boot** (its panels laid out at
+   zero width and were rebuilt on first open anyway).
+
+### What changed (web/index.html)
+- `nextFrame()`: one rAF **or** 100 ms, whichever comes first. Safe for
+  layout: the panels are already in the DOM and reading `clientWidth` forces a
+  synchronous layout whether or not a frame was painted.
+- Boot renders only the tab on screen; the other renders on first open.
+- `runSessionGate()` reads the profile row (name + `is_admin`) and the role in
+  one parallel round trip; the header reuses that row.
+- Each gate pass fingerprints what it read (role, data mode, real-climate
+  as-of and vintages, `domain_reality`, metric derivation, InnoVint sync
+  times, thresholds) and bumps `sessionMetaVersion` only when that changed,
+  so a return to the browser tab does not invalidate cached dashboard tabs
+  unless the metadata really moved.
+
+### Caching rules and TTLs
+| What | Where | Key | Lifetime | Invalidated by |
+|---|---|---|---|---|
+| `series_bucketed` results | `memoized()` | every RPC parameter (metric, block, vintage, start, end, bucket, agg) | 60 s (`DATA_TTL_MS`) | sign-out, user change, a realtime insert for that metric |
+| `daily_derived` chart rows | `memoized()` | field, vintage, window start, window end | 60 s | same |
+| `latest_reading` / latest derived row | `memoized()` (was its own 60 s memo) | spec, vintage, as-of | 60 s | same |
+| a rendered tab (its DOM) | `tabView` / `showTab()` | `tabInputs()`: user, role-bearing session metadata version, data mode, current vintage, the tab's vintages and blocks, every panel's range and history scroll, ferm lot and archived-vessels toggle | 5 min since its last full render (`TAB_TTL_MS`) | any input change, a realtime insert for one of its metrics, a 5-minute poll while it was hidden, a width change, a session-gate refresh, sign-out / user change |
+
+Identical requests in flight share one promise. A failed fetch (`stale`
+result or rejection) is never kept. The 60 s data TTL is below the 5-minute
+poll, so a poll always refetches.
+
+### What can no longer go stale, and why
+- **Another user's data**: every cache is cleared when the signed-in user
+  changes or signs out (RLS differs per user; the old latest-reading memo
+  was not cleared before this change).
+- **Vintage / blocks / range / scroll / compare mode / lot / archived
+  toggle**: part of the tab's recorded inputs; the data caches are keyed by
+  the exact request, so a different window or vintage is a different entry.
+  Every in-place control re-renders the visible tab immediately (unchanged)
+  and re-records its inputs.
+- **New realtime data**: the insert still updates the overview tile in place
+  (`applyVineyardRealtimeInsert` / `applyWineryRealtimeInsert`, unchanged),
+  and now also drops that metric's cached series and latest readings and
+  marks its tab dirty, so the next visit re-renders.
+- **Time**: a tab older than 5 minutes re-renders on its next visit; data
+  entries expire after 60 s.
+- **Latest-value consistency**: chip, newest point and overview tile still
+  come from one `latestFor()` reading; the cache only changed where that
+  reading is memoised.
+
+### Left as is
+- The tab on screen is not re-rendered by a timer (only the 5-minute
+  soil/irrigation poll, as before).
+- The session gate still re-runs on every return to the browser tab (9
+  requests, was 10). Throttling it (e.g. to once per 5 minutes for the same
+  account) was built and measured (0 requests) but taken out: an admin's
+  revoke, a real-only switch or the daily as-of advance would then reach an
+  open tab up to 5 minutes later than the next focus. That is a product
+  decision, not a performance fix.
+- Panels below the fold are not lazy-loaded with IntersectionObserver:
+  Chrome throttles IntersectionObserver in hidden pages the same way as
+  rAF (cause 1), P3's role-visibility check reads every panel's hook, and a
+  foreground load already completes in ~4 s.
+- The remaining serial cost before the first panel is the metadata batch
+  (`domain_reality`, `real_metric_vintage_counts`: 1-1.5 s); speeding that
+  up is a database change.
+
+### Before / after (headless Chrome, synthetic operator, 3 runs each)
+Same harness for both: main and this branch served side by side from
+localhost against the same database (a first harness waited 120 s after
+login on the branch, letting the HTTP/2 connection close, and overstated
+its reload time; corrected here), then production after the deploy.
+
+| | before (main) | after (branch, local) | after (production) |
+|---|---|---|---|
+| reload -> vineyard all panels ok | 3.70 / 4.27 / 3.88 s | 2.54 / 3.00 / 2.64 s | 2.57 / 2.93 / 2.46 s |
+| magic-link login -> vineyard all ok | 5.25 / 4.75 / 5.50 s | 2.97 / 3.29 / 3.69 s | 3.84 / 3.64 / 3.20 s |
+| session gate before the metadata batch | 3 serial requests | 1 parallel round trip | same |
+| requests at boot | 57 | 46 (Winery deferred) | 46 |
+| return to Vineyard | 1.1-1.9 s, 19 requests | 30-60 ms, 0 requests | 33-62 ms, 0 |
+| return to Winery | 1.3-4.2 s, 6 requests | 30-45 ms, 0 requests | 32-37 ms, 0 |
+| hidden window, reload -> all ok (real Chrome, signed-in user) | nothing until a frame; 38.9 s when one was forced at 34.6 s | 4.0 s | <= 4.0 s (1 s timer clamp while hidden) |
+
+Customer (production, before): return to Vineyard was 1.8-2.0 s and 22
+requests; after: 35-46 ms, 0 requests. Not adopted: deferring the session
+gate out of the `onAuthStateChange` callback (`setTimeout`, supabase-js's
+own advice, so start-up calls are not chained on its auth lock) measured
+another ~0.2 s on reload, but changes auth-event timing.
+
+### Verified (2026-10-01)
+- Every panel x every range for the current and previous vintage, the
+  Winery tab and the overview tiles: 104 snapshots identical between main
+  and this branch (operator); 85 each for both customers, identical except
+  2026 solar, which is simulated against the live-ticking demo clock and
+  shifts by one minute between any two runs.
+- P3 locally, all three synthetic users: every frontend check passes,
+  including `frontend.latest.consistent` and `frontend.tab_cache`; the new
+  check fails on main (12 `series_bucketed` requests on an unchanged
+  revisit). The four gateway checks need `P3_MCP_KEY` (GitHub only); the
+  air-temperature fidelity replay was repeated against `series_bucketed`
+  directly: identical.
+
+## Insights and Anomalies for customers (2026-10-01)
+The vineyard "Insights and Anomalies" panel (`anom-v`) is shown to customers
+as well as operators. The winery one (`anom-w`: fermentation, tanks, cellar)
+stays operator-only. Nothing a customer sees in it comes from data their RLS
+does not already give them:
+
+- **Now** (`anomalies_eval()`, `LANGUAGE sql`, not SECURITY DEFINER): runs
+  as the caller, so `sensor_read` limits it to min_role 'all' metrics and
+  the customer's blocks; the derived rules read `daily_derived`, which every
+  customer already reads for the GDD/DTR/VPD/ET0 panels. The client-side
+  irrigation-interval rule (irrigation is min_role 'operator') is skipped
+  for customers, and its `sensor_readings` query is not sent
+  (`OPERATOR_ONLY_RULE_DOMAINS`).
+- **Patterns** (`insights`): new policy `insights_customer_read`
+  (migration `20261001130000`), next to the unchanged operator-only
+  `insights_read`. A customer reads a row only if it is `surfaced`, on the
+  vineyard tab, both metrics are customer-visible
+  (`customer_visible_metric()`: metric_registry min_role 'all', or a
+  metric_derivation whose every input is; anything else, e.g.
+  `harvest_yield_tons`, `irrigation_volume`, labour, is denied), and its
+  scope is estate-wide or one of `accessible_blocks()`.
+- Estate-scope insights are built by insights-scan from
+  `series_bucketed(p_block => null)`. For the vintages it scans, every
+  customer-visible input row is estate-wide (block_id null; 20,544 each for
+  air_temp, humidity, soil_moisture, soil_temp, none per block), which
+  `sensor_read` shows every customer. **If per-block real climate or soil
+  rows are ever ingested**, an estate insight would blend blocks a
+  block-scoped customer cannot see; at that point either compute estate
+  series from block_id-null rows only, or require access to every block for
+  estate rows in this policy. The P1 tripwire
+  `database.insights_estate_inputs_estate_wide` (migration
+  `20261001140000`) fails the day such a row appears; the weekly scan runs
+  Sundays 15:00 UTC, after that day's 12:00 P1. Mock per-block rows (2026
+  `soil_probe` soil moisture/temperature today) cannot reach an insight and
+  only appear in its observation.
+- The veraison note names Block 1 ("sits highest and colours first") only
+  to a reader whose `accessible_blocks()` include B1; others get
+  block-neutral wording. Operator wording is unchanged.
+- The client's patterns cache (`_latestPatternsCache`) is now cleared on a
+  user change, so an operator's patterns can never be shown to a customer
+  who signs in on the same page.
+- The patterns shown are from the newest run that has a surfaced, narrated
+  row the caller can read; for a customer that can be an older run than
+  the operator sees if the newest run surfaced only operator-only pairs.
+
+Verified: `tests/insights-customer-read.test.mjs` (PGlite: operator,
+all-blocks customer, B2-only customer, pending, signed out; fails if the
+metric check is removed); against production data in a rolled-back
+transaction before applying: operator 20 rows, both synthetic customers 13
+(climate and soil pairs only, no yield/irrigation row). P3 adds
+`frontend.<user>.insights_scope` for every synthetic user.

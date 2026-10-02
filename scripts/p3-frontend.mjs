@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // P3: nightly frontend checks (docs/SECURITY.md, "Nightly health checks").
-// Run by .github/workflows/nightly-health-p3.yml at 12:20 UTC.
+// Run by .github/workflows/nightly-health-p3.yml at 12:17 UTC.
 //
 // For each synthetic user (operator; HEALTH-CUST, all blocks; HEALTH-CUST-B2,
 // B2 only), in a FRESH browser context (no cache, no stored session):
@@ -105,6 +105,12 @@ async function runUser(browser, u) {
   const consoleErrors = [];
   page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text().slice(0, 200)); });
   page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${String(e.message).slice(0, 200)}`));
+  // Requests still open when the login wait times out: method + path only
+  // (no query string, no headers), for the failure record below.
+  const inflight = new Map();
+  page.on("request", (r) => inflight.set(r, { what: `${r.method()} ${new URL(r.url()).pathname}`, at: Date.now() }));
+  page.on("requestfinished", (r) => inflight.delete(r));
+  page.on("requestfailed", (r) => inflight.delete(r));
   const snapshot = { panels: {} };
   try {
     await page.goto(DASHBOARD, { waitUntil: "domcontentloaded", timeout: 60_000 });
@@ -129,7 +135,19 @@ async function runUser(browser, u) {
     consoleErrors.length = 0;
     record("frontend", `frontend.${u.key}.login`, "pass", { user: u.key });
   } catch (err) {
-    record("frontend", `frontend.${u.key}.login`, "fail", { user: u.key }, {}, err.message);
+    // The dashboard hides its header and tabs until the session gate finishes
+    // (runSessionGate in web/index.html), so a timeout here alone doesn't say
+    // why. Record which screen was up, any sign-in error, requests still
+    // open and the last page errors.
+    const diag = await page.evaluate(() => ({
+      screen: ["auth-view", "pending-view", "finish-profile-view", "queue-view"].find((id) => document.getElementById(id)?.classList.contains("on"))
+        ?? (document.querySelector(".hdr")?.style.display === "none" ? "none (header hidden)" : "dashboard"),
+      auth_error: document.getElementById("auth-err")?.textContent?.trim().slice(0, 200) || null,
+    })).catch((e) => ({ screen: `unreadable: ${String(e.message).slice(0, 100)}` }));
+    const now = Date.now();
+    diag.pending_requests = [...inflight.values()].map((x) => `${x.what} (${Math.round((now - x.at) / 1000)}s)`).slice(0, 10);
+    diag.console_errors = consoleErrors.slice(-5).map(scrub);
+    record("frontend", `frontend.${u.key}.login`, "fail", { user: u.key, ...diag }, {}, err.message);
     await context.close();
     return null;
   }

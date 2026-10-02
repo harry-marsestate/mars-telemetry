@@ -7126,6 +7126,15 @@ against today's. The P3 backup's own records (`p3_backup`) are listed
 separately in `p3_backup_dispatches`, count toward `overall`, and never count
 as a P3 run.
 
+GitHub sometimes starts the scheduled P3 run hours late (17:54 and 18:27 UTC
+on 2026-10-01/02), after the 12:35 backup has already run P3. Those late
+duplicates failed `frontend.operator.login` and overwrote the day's passing
+result. Since 2026-10-02 the workflow's `gate` job skips a scheduled run when
+the workflow already ran that UTC day; dispatched runs always run. A failed
+login now also records the screen shown, any sign-in error, requests still
+open and the last page errors, so the operator timeout can be diagnosed when
+it recurs.
+
 The backup token is a fine-grained GitHub PAT scoped to this repository
 only, with Actions read/write and nothing else. Store it with
 `pbpaste | node scripts/vault-put-secret.mjs github_p3_dispatch_token`, which

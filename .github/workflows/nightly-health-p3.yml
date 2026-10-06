@@ -3,12 +3,29 @@
 # MCP gateway; results recorded as health_writer. 12:17 UTC, after P1 (12:00)
 # and P2 (12:10), finished well before the 12:40 prune. 12:17, off the busy
 # :00/:20 slots; a pg_cron job dispatches it at 12:35 if GitHub skipped it.
+#
+# GitHub sometimes starts the scheduled run hours late (17:54 and 18:27 UTC
+# were seen), after the 12:35 backup dispatch has already run P3. A late
+# duplicate would overwrite that day's on-time result, so a scheduled run
+# that finds an earlier run of this workflow today skips itself. Manual and
+# backup dispatches always run.
+#
+# Failing checks are recorded in system_health and graded by the daily
+# systems check; they do not fail this workflow (so GitHub sends no "All jobs
+# have failed" email for them). The run fails only if P3 itself could not run
+# or record its results. A manual run with dry_run prints results without
+# recording them, for investigating without touching the nightly record.
 name: nightly-health-p3
 
 on:
   schedule:
     - cron: "17 12 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print results only; do not record them in system_health"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,7 +35,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          if [ "$EVENT" != "schedule" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          today=$(date -u +%Y-%m-%d)
+          earlier=$(gh api --method GET "repos/$REPO/actions/workflows/nightly-health-p3.yml/runs" \
+            -f created=">=$today" -f per_page=50 \
+            --jq "[.workflow_runs[] | select(.id != $RUN_ID)] | length")
+          echo "Earlier runs of this workflow today (UTC): $earlier"
+          if [ "$earlier" -gt 0 ]; then
+            echo "P3 already ran today; skipping this late scheduled run."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   p3-frontend:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -37,4 +84,5 @@ jobs:
           P3_CUSTOMER_B2_PASSWORD: ${{ secrets.P3_CUSTOMER_B2_PASSWORD }}
           P3_MCP_KEY: ${{ secrets.P3_MCP_KEY }}
           HEALTH_WRITER_DB_URL: ${{ secrets.HEALTH_WRITER_DB_URL }}
-        run: node scripts/p3-frontend.mjs --chrome /usr/bin/google-chrome
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: node scripts/p3-frontend.mjs --chrome /usr/bin/google-chrome $DRY_RUN

@@ -7126,6 +7126,40 @@ against today's. The P3 backup's own records (`p3_backup`) are listed
 separately in `p3_backup_dispatches`, count toward `overall`, and never count
 as a P3 run.
 
+GitHub starts the scheduled 12:17 P3 run late almost every day (16:29 to
+20:35 UTC seen), so the 12:35 backup is what normally runs P3 and its `warn`
+record is expected. Changes on 2026-10-06:
+
+- The workflow's `gate` job skips a scheduled run when the workflow already
+  ran that UTC day, so a late duplicate can no longer overwrite the day's
+  result. Dispatched runs always run.
+- Failing checks no longer fail the workflow, so GitHub sends no "All jobs
+  have failed" email for them: they are recorded and graded by the daily
+  systems check. The run fails only if P3 could not run or record.
+- A manual run with `dry_run` prints results without recording them.
+- Sign-in: if the dashboard has not appeared 60 s after signing in, P3
+  records why (screen shown, sign-in error, whether the page still has a
+  session and the database answers a `current_role_name` call, requests
+  still open, and a timed trace of the session-gate steps in
+  `web/index.html`), then reloads once. Recovering after the reload is
+  `warn`; a second failure is `fail`. "Shown" means the gate ran
+  `showDashboard()` (`dashboardBooted`), not just a visible tab: after a
+  reload the header is visible before the gate finishes.
+- Root cause of the sign-in stalls (caught by the new trace on 2026-10-06):
+  the first REST call after sign-in can fail with `PGRST303` ("JWT issued
+  at future"), Supabase Auth's clock running a moment ahead of the REST
+  API's. The failed profile read made `runSessionGate` show the
+  finish-profile screen (header hidden) instead of the dashboard; a real
+  user could hit it too. The dashboard's Supabase client now retries
+  `PGRST303` up to 3 times (0.5, 1, 1.5 s), and a profile read that still
+  fails returns to sign-in with a message instead of the finish-profile
+  screen, whose save would overwrite the user's name.
+- The daily systems check grades a successful backup dispatch as
+  information, a sign-in that only needed a reload as LOW, a page that
+  stalled although sign-in and the database worked as MEDIUM, and only a
+  real sign-in failure (error shown, no session, or the database refusing
+  the session) as HIGH.
+
 The backup token is a fine-grained GitHub PAT scoped to this repository
 only, with Actions read/write and nothing else. Store it with
 `pbpaste | node scripts/vault-put-secret.mjs github_p3_dispatch_token`, which

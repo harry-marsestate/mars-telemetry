@@ -154,7 +154,7 @@ checksum. The PDF's report fields go in `ets_report_samples` instead.
 - **`analyzed_at`:** the CSV `Date` column is wall-clock text with no zone
   (`2026-09-22 16:34`). `psycopg2` passes it as text, and the database
   session's zone (UTC on Supabase) labels it, so **the wall-clock ETS prints
-  is stored as UTC**. The PDF path does the same thing deliberately:
+  is stored as UTC** (confirmed live: `2026-09-22 16:34:00+00`). The PDF path does the same thing deliberately:
   `analysis_date` must be `YYYY-MM-DD` or `YYYY-MM-DD HH:MM[:SS]`, has no
   offset, and is stored `at time zone 'UTC'`. A date alone means 00:00.
 - **`collected_on` and `received_on`:** dates.
@@ -292,11 +292,11 @@ python3 -c "import csv,json,sys;sys.path.insert(0,'ingestion');from ets_labs.par
    `ets_report_samples.report_no`. If the PDF's report number is not the
    group number, `lab_group_no` holds a different kind of identifier for
    PDF-ingested rows.
-2. **`analyzed_at` is wall-clock time labelled UTC.** This is inferred from
-   the CSV code path, not checked against live rows. It was not checked
-   because production reads were not permitted in the session that built
-   this. If live rows turn out to be true UTC instants, both paths need the
-   same fix.
+2. **`analyzed_at` is wall-clock time labelled UTC.** Confirmed live on
+   2026-10-06: CSV `Date` `2026-09-22 16:34` is stored as
+   `2026-09-22 16:34:00+00` (database time zone UTC). So it is not a true
+   instant; a reader wanting Pacific time must not convert it. Both paths
+   would need the same fix if this is ever changed.
 3. **The valid ranges are mine, not ETS's.** They are plausibility bounds, not
    lab specification limits.
 4. **Lettered sample numbers are always quarantined.** Reissues therefore need

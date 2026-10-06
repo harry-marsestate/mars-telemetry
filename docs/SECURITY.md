@@ -8364,8 +8364,42 @@ The weekly task sends a heartbeat when there is no new report.
 - `tests/p1-ets-ingest.test.mjs`, 5 tests. The migration equals the previous
   `run_p1_checks()` plus only the new block.
 
-**Not yet verified:** the production steps (dry run, rolled-back production
-test, apply, deploy, end-to-end with a synthetic report). Production reads
-were not permitted in the session that built this, so the "identical to the
-live function" check of `run_p1_checks()` and the live `analyzed_at`
-convention (docs/ETS-INGEST.md, Ambiguities 2) are still open.
+**Production (2026-10-06):**
+- **Dry run:** `migration list` showed local and remote in sync except the
+  two new migrations, and `db push --dry-run` listed exactly those two.
+- **Rolled-back production test** (both migrations plus a synthetic ingest in
+  one transaction, then rolled back):
+  - the live `run_p1_checks()` body was identical to 20261001140000's
+    (compared by SHA-256, not printed);
+  - the closed-vintage `lab_samples` checksum was unchanged;
+  - 207 with 3 written and 1 quarantined, then `updated` on re-send; a bad
+    key gave 401; a CSV sample collision was quarantined;
+  - the row appeared in `berry_maturity_by_block`, with no write or EXECUTE
+    for anon/authenticated;
+  - after rollback, row, table and Vault counts equalled the pre-test counts.
+  - **P1 inside the transaction:**
+    - `security.policies.baseline` failed on exactly the two new policies, as
+      expected. After applying, it was re-baselined by
+      `system_health.set_baseline`, guarded to the exact diff (30 → 32 policies,
+      no removed or changed).
+    - `database.vintage.current_consistent` warned identically with and
+      without these migrations. That day's P3 run recorded no app
+      current-vintage observation, so the warning is unrelated to this change.
+- **Live `analyzed_at` convention confirmed:** `2026-09-22 16:34:00+00` for
+  CSV `2026-09-22 16:34`.
+- **Applied** with `supabase db push`. The key was created in Vault
+  (`ets_ingest_key`, sha256 `f0baa0ce0a5c…`) and the function deployed.
+- **End to end over HTTPS:**
+  - no key or a wrong key → 401; GET → 405;
+  - a synthetic report (`SYNTH-E2E-20261006` / `610069901`, B3) → 207: 3
+    written (`lab_results`, `berry_volume_histogram`, visible in
+    `berry_maturity_by_block`), 1 unknown analyte quarantined;
+  - re-send → all `updated`, quarantine `seen_count` 2;
+  - heartbeat → 200;
+  - 3 `ingestion_runs` rows (partial, partial, success).
+- **Cleanup:** the synthetic sample (cascading to its results, bin and
+  provenance), its quarantine row and the 3 test runs were deleted. Totals
+  are back to 45 samples / 272 results / 200 bins, with zero ETS provenance,
+  quarantine or run rows.
+- Until the cloud task's first run, P1 `ingestion.ets_report.last_run` warns
+  "no successful run recorded". That is expected.

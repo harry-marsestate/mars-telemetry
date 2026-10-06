@@ -84,6 +84,77 @@ async function magicLinkTokenHash(email) {
   return h;
 }
 
+// ---- why the dashboard didn't appear ---------------------------------------
+// The dashboard hides its header and tabs until its session gate finishes
+// (runSessionGate in web/index.html). These are the gate's own global
+// functions; traceGate wraps them in-page (timing only, arguments and results
+// untouched) so a stall shows which step never finished.
+const GATE_STEPS = ["runSessionGate", "getCurrentUserRole", "refreshRealClimateVintages", "refreshDataMode",
+  "refreshInnovintSyncStatus", "refreshThresholds", "showDashboard", "showAuthOnly", "showPendingOnly", "showFinishProfileOnly"];
+function traceGate(steps) {
+  const t0 = performance.now();
+  const trace = (window.__p3trace = []);
+  const note = (ev) => { if (trace.length < 200) trace.push(`${((performance.now() - t0) / 1000).toFixed(1)}s ${ev}`); };
+  const why = (e) => String(e?.message ?? e).slice(0, 80);
+  for (const name of steps) {
+    const f = window[name];
+    if (typeof f !== "function") { note(`${name} not found`); continue; }
+    window[name] = function (...args) {
+      note(`${name} start`);
+      let r;
+      try { r = f.apply(this, args); } catch (e) { note(`${name} threw ${why(e)}`); throw e; }
+      if (r && typeof r.then === "function") r.then(() => note(`${name} done`), (e) => note(`${name} rejected ${why(e)}`));
+      else note(`${name} done`);
+      return r;
+    };
+  }
+  sb.auth.onAuthStateChange((event) => note(`auth ${event}`)); // synchronous: never awaits the client
+}
+// The dashboard is up once the gate has run showDashboard(): dashboardBooted
+// (web/index.html) is true and the Vineyard tab is visible. The tab alone is
+// not enough: after a reload with a stored session the header is visible
+// before the gate has finished.
+async function dashboardShown(page, timeout) {
+  try {
+    await page.waitForFunction(() => {
+      const tab = document.querySelector("button.tab[data-tab='vineyard']");
+      const visible = !!tab && tab.offsetParent !== null && document.querySelector(".hdr")?.style.display !== "none";
+      // eslint-disable-next-line no-undef
+      return visible && (typeof dashboardBooted === "undefined" || dashboardBooted === true);
+    }, null, { timeout, polling: 250 });
+  } catch (err) {
+    throw new Error(`dashboard not shown within ${timeout / 1000}s of sign-in${/Timeout/.test(err.message) ? "" : `: ${firstLine(err.message)}`}`);
+  }
+}
+const firstLine = (s) => String(s ?? "").split("\n")[0].slice(0, 200);
+// Which screen is up, any sign-in error, whether the page's Supabase client
+// still answers (auth session, one REST call), requests still open, the gate
+// trace and the last page errors.
+async function gateDiagnosis(page, inflight, consoleErrors) {
+  const d = await page.evaluate(async () => {
+    const within = (p, ms) => Promise.race([Promise.resolve(p).then((v) => ({ v }), (e) => ({ e: String(e?.message ?? e).slice(0, 100) })),
+      new Promise((r) => setTimeout(() => r({ hung: true }), ms))]);
+    const s = await within(sb.auth.getSession(), 5000);
+    const role = await within(sb.rpc("current_role_name"), 10000);
+    return {
+      screen: ["auth-view", "pending-view", "finish-profile-view", "queue-view"].find((id) => document.getElementById(id)?.classList.contains("on"))
+        ?? (document.querySelector(".hdr")?.style.display === "none" ? "none (header hidden)"
+          // eslint-disable-next-line no-undef
+          : typeof dashboardBooted !== "undefined" && !dashboardBooted ? "header shown, session gate not finished" : "dashboard"),
+      auth_error: document.getElementById("auth-err")?.textContent?.trim().slice(0, 200) || null,
+      session: s.hung ? "getSession() hung 5s" : s.e ? `getSession() error: ${s.e}` : s.v?.data?.session ? "signed in" : "no session",
+      role_probe: role.hung ? "current_role_name hung 10s" : role.e ? `error: ${role.e}`
+        : role.v?.error ? `error: ${String(role.v.error.message).slice(0, 100)}` : `ok (${role.v?.data})`,
+      visibility: document.visibilityState,
+      gate_trace: (window.__p3trace || []).slice(-40),
+    };
+  }).catch((e) => ({ screen: `unreadable: ${String(e.message).slice(0, 100)}` }));
+  const now = Date.now();
+  d.pending_requests = [...inflight.values()].map((x) => `${x.what} (${Math.round((now - x.at) / 1000)}s)`).slice(0, 10);
+  d.console_errors = consoleErrors.slice(-5).map(scrub);
+  return d;
+}
+
 // Waits until every panel the hook knows about has left 'rendering' and the
 // set has been stable for 3s.
 async function settle(page, timeoutMs = 90_000) {
@@ -112,10 +183,16 @@ async function runUser(browser, u) {
   page.on("requestfinished", (r) => inflight.delete(r));
   page.on("requestfailed", (r) => inflight.delete(r));
   const snapshot = { panels: {} };
+  // Sign in, then wait for the dashboard. If it doesn't appear, record why
+  // (gateDiagnosis) and reload once: the session survives a reload, so this
+  // tells a stalled page load apart from sign-in itself being broken. Only a
+  // second failure is a "fail"; recovering after the reload is a "warn".
+  let firstAttempt = null;
   try {
     await page.goto(DASHBOARD, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForFunction(() => typeof sb !== "undefined", null, { timeout: 30_000 });
     if (MAGIC) {
+      await page.evaluate(traceGate, GATE_STEPS);
       const tokenHash = await magicLinkTokenHash(u.email);
       const err = await page.evaluate(async (th) => (await sb.auth.verifyOtp({ token_hash: th, type: "magiclink" })).error?.message ?? null, tokenHash);
       if (err) throw new Error(`verifyOtp: ${err}`);
@@ -123,31 +200,38 @@ async function runUser(browser, u) {
       const pw = process.env[u.pw];
       if (!pw) throw new Error(`${u.pw} is not set`);
       await page.waitForSelector("#auth-email", { state: "visible", timeout: 30_000 });
+      await page.evaluate(traceGate, GATE_STEPS);
       await page.fill("#auth-email", u.email);
       await page.fill("#auth-password", pw);
       await page.click("#auth-submit");
     }
-    await page.waitForSelector("button.tab[data-tab='vineyard']", { state: "visible", timeout: 60_000 });
+    try {
+      await dashboardShown(page, 60_000);
+    } catch (err) {
+      firstAttempt = { error: firstLine(err.message), ...(await gateDiagnosis(page, inflight, consoleErrors)) };
+      log(`frontend.${u.key}.login: dashboard not shown 60s after sign-in; reloading once ${JSON.stringify(firstAttempt)}`);
+      inflight.clear();
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+      await page.waitForFunction(() => typeof sb !== "undefined", null, { timeout: 30_000 });
+      await page.evaluate(traceGate, GATE_STEPS);
+      await dashboardShown(page, 45_000);
+    }
     const who = await page.evaluate(async () => (await sb.auth.getUser()).data.user?.email ?? null);
     if (who !== u.email) throw new Error("signed in as a different user");
     // Count only errors from here on: the page's pre-login work runs as anon
     // (e.g. the thresholds prefetch, docs/SECURITY.md) and is not a render fault.
     consoleErrors.length = 0;
-    record("frontend", `frontend.${u.key}.login`, "pass", { user: u.key });
+    if (firstAttempt) {
+      record("frontend", `frontend.${u.key}.login`, "warn", { user: u.key, recovered: "after one reload", first_attempt: firstAttempt }, {},
+        "dashboard did not appear within 60s of sign-in; appeared after a reload");
+    } else {
+      record("frontend", `frontend.${u.key}.login`, "pass", { user: u.key });
+    }
   } catch (err) {
-    // The dashboard hides its header and tabs until the session gate finishes
-    // (runSessionGate in web/index.html), so a timeout here alone doesn't say
-    // why. Record which screen was up, any sign-in error, requests still
-    // open and the last page errors.
-    const diag = await page.evaluate(() => ({
-      screen: ["auth-view", "pending-view", "finish-profile-view", "queue-view"].find((id) => document.getElementById(id)?.classList.contains("on"))
-        ?? (document.querySelector(".hdr")?.style.display === "none" ? "none (header hidden)" : "dashboard"),
-      auth_error: document.getElementById("auth-err")?.textContent?.trim().slice(0, 200) || null,
-    })).catch((e) => ({ screen: `unreadable: ${String(e.message).slice(0, 100)}` }));
-    const now = Date.now();
-    diag.pending_requests = [...inflight.values()].map((x) => `${x.what} (${Math.round((now - x.at) / 1000)}s)`).slice(0, 10);
-    diag.console_errors = consoleErrors.slice(-5).map(scrub);
-    record("frontend", `frontend.${u.key}.login`, "fail", { user: u.key, ...diag }, {}, err.message);
+    const diag = await gateDiagnosis(page, inflight, consoleErrors);
+    log(`frontend.${u.key}.login diagnosis ${JSON.stringify(diag)}`);
+    record("frontend", `frontend.${u.key}.login`, "fail", { user: u.key, ...diag, ...(firstAttempt ? { first_attempt: firstAttempt } : {}) }, {},
+      `${firstAttempt ? "after a reload: " : ""}${firstLine(err.message)}`);
     await context.close();
     return null;
   }
@@ -494,4 +578,8 @@ if (DRY) {
     await db.end();
   }
 }
-if (results.some((r) => r.status === "fail" || r.status === "error")) process.exitCode = 1;
+// Check results, failures included, are recorded above and reported by the
+// health tools and the daily systems check. This run itself fails (and GitHub
+// emails about it) only when it could not run or record: a thrown error.
+const bad = results.filter((r) => r.status !== "pass").length;
+log(`${results.length} results, ${bad} not passing${bad ? " (recorded; see the health report)" : ""}`);

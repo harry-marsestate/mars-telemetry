@@ -7126,14 +7126,30 @@ against today's. The P3 backup's own records (`p3_backup`) are listed
 separately in `p3_backup_dispatches`, count toward `overall`, and never count
 as a P3 run.
 
-GitHub sometimes starts the scheduled P3 run hours late (17:54 and 18:27 UTC
-on 2026-10-01/02), after the 12:35 backup has already run P3. Those late
-duplicates failed `frontend.operator.login` and overwrote the day's passing
-result. Since 2026-10-02 the workflow's `gate` job skips a scheduled run when
-the workflow already ran that UTC day; dispatched runs always run. A failed
-login now also records the screen shown, any sign-in error, requests still
-open and the last page errors, so the operator timeout can be diagnosed when
-it recurs.
+GitHub starts the scheduled 12:17 P3 run late almost every day (16:29 to
+20:35 UTC seen), so the 12:35 backup is what normally runs P3 and its `warn`
+record is expected. Changes on 2026-10-06:
+
+- The workflow's `gate` job skips a scheduled run when the workflow already
+  ran that UTC day, so a late duplicate can no longer overwrite the day's
+  result. Dispatched runs always run.
+- Failing checks no longer fail the workflow, so GitHub sends no "All jobs
+  have failed" email for them: they are recorded and graded by the daily
+  systems check. The run fails only if P3 could not run or record.
+- A manual run with `dry_run` prints results without recording them.
+- Sign-in: if the dashboard has not appeared 60 s after signing in, P3
+  records why (screen shown, sign-in error, whether the page still has a
+  session and the database answers a `current_role_name` call, requests
+  still open, and a timed trace of the session-gate steps in
+  `web/index.html`), then reloads once. Recovering after the reload is
+  `warn`; a second failure is `fail`. "Shown" means the gate ran
+  `showDashboard()` (`dashboardBooted`), not just a visible tab: after a
+  reload the header is visible before the gate finishes.
+- The daily systems check grades a successful backup dispatch as
+  information, a sign-in that only needed a reload as LOW, a page that
+  stalled although sign-in and the database worked as MEDIUM, and only a
+  real sign-in failure (error shown, no session, or the database refusing
+  the session) as HIGH.
 
 The backup token is a fine-grained GitHub PAT scoped to this repository
 only, with Actions read/write and nothing else. Store it with

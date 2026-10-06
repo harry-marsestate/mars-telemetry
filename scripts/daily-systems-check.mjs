@@ -63,6 +63,7 @@ const add = (severity, layer, check_id, title, observed, expected, next) =>
 const nc = (id, reason, short = reason) => notChecked.push({ id, reason, short });
 const fmt = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
 const clip = (s, n = 400) => (s.length > n ? s.slice(0, n) + '...' : s);
+const firstLine = (s) => String(s ?? '').split('\n')[0].trim();
 
 // ---------- transport ----------
 let rpcId = 1;
@@ -281,9 +282,16 @@ async function main() {
       }
       for (const pr of p.summary?.problems || []) healthProblem(pr, p.producer);
     }
-    for (const d of health.p3_backup_dispatches || []) {
-      const st = d.status || 'warn';
-      if (st !== 'pass') healthProblem({ ...d, check_id: d.check_id || 'p3_backup.dispatch', layer: 'dashboard', status: st }, 'p3_backup');
+    // GitHub starts the 12:17 P3 schedule late most days, so the 12:35 backup
+    // dispatch usually starts P3; it records itself as "warn" by design. That
+    // is GitHub's scheduling, not a fault: note it, and raise only a dispatch
+    // that failed (a stale P3 is already its own HIGH finding above).
+    const backups = health.p3_backup_dispatches || [];
+    obs.p3_backup = backups.map((d) => ({ at: d.started_at, status: d.status }));
+    const failedBackup = backups.find((b) => (b.summary?.problems || []).some((pr) => pr.status === 'fail') || b.status === 'fail' || b.status === 'error');
+    if (failedBackup && !stale.has('p3_frontend')) {
+      add('MEDIUM', 'dashboard', 'p3_backup.dispatch', 'The P3 backup dispatch could not start P3',
+        `backup run at ${et(failedBackup.started_at)}: ${failedBackup.status}`, 'a dispatched P3 run', nextStep('p3_backup.dispatch'));
     }
     for (const c of health.p4_gateway_self_check || []) p4(c);
     obs.p4 = (health.p4_gateway_self_check || []).map((c) => c.status);
@@ -475,9 +483,64 @@ function healthProblem(pr, producer) {
   if (st === 'fail') sev = (/^frontend\..*(rls_boundary)$/.test(id) || /^frontend\.fidelity\./.test(id) || layer === 'security') ? 'CRITICAL' : 'HIGH';
   else if (st === 'warn' || st === 'error') sev = 'MEDIUM';
   else return;
+  if (/^frontend\.[a-z0-9_]+\.login$/.test(id)) return loginProblem(pr, layer);
   const known = KNOWN_ISSUES[id];
-  add(sev, layer, id, `Health check ${id} ${st === 'fail' ? 'failed' : `returned "${st}"`}${pr.detail ? `: ${clip(String(pr.detail), 200)}` : ''}${known ? ` (${known})` : ''}`,
+  add(sev, layer, id, `Health check ${id} ${st === 'fail' ? 'failed' : `returned "${st}"`}${pr.detail ? `: ${clip(firstLine(pr.detail), 200)}` : ''}${known ? ` (${known})` : ''}`,
     clip(fmt(pr.observed ?? '(none recorded)'), 600), clip(fmt(pr.expected ?? '(none recorded)'), 600), nextStep(id));
+}
+
+// P3 signs each synthetic user in through the real form in a headless browser.
+// Its diagnosis (scripts/p3-frontend.mjs) says whether sign-in itself worked:
+//   - real sign-in failure (error shown, no session, or the database won't
+//     answer the user's session): HIGH;
+//   - signed in, but the dashboard page stalled in the test browser even
+//     after a reload: MEDIUM (users can sign in; the page load is suspect);
+//   - dashboard appeared after one reload: LOW.
+// Runs from before that diagnosis existed can't tell these apart: MEDIUM.
+function loginProblem(pr, layer) {
+  const id = pr.check_id, o = (pr.observed && typeof pr.observed === 'object') ? pr.observed : {};
+  const who = o.user || id.split('.')[1];
+  const diag = (d) => [d.screen && `screen: ${d.screen}`, d.session && `session: ${d.session}`, d.role_probe && `database: ${d.role_probe}`,
+    d.pending_requests?.length && `open requests: ${d.pending_requests.slice(0, 3).join(', ')}`].filter(Boolean).join('; ');
+  const step = 'See the P3 GitHub Actions run log: the "diagnosis" line shows which dashboard sign-in step stalled.';
+  const tag = (short) => Object.assign(findings[findings.length - 1], { short, who });
+  if (pr.status === 'warn') {
+    add('LOW', layer, id, `Dashboard test for ${who}: signed in, but the page needed a reload to appear`,
+      clip(diag(o.first_attempt || {}) || 'recovered after one reload', 400), 'dashboard within 60s of sign-in', step);
+    tag('the dashboard test needed a page reload after sign-in');
+    return;
+  }
+  if (pr.status !== 'fail') return;
+  const signedIn = o.session === 'signed in';
+  const dbOk = /^ok \(/.test(o.role_probe || '');
+  const authBroken = !!o.auth_error || o.session === 'no session' || (signedIn && o.role_probe && !dbOk);
+  if (authBroken) {
+    add('HIGH', layer, id, `Dashboard sign-in failed for ${who}${o.auth_error ? `: ${clip(o.auth_error, 120)}` : ''}`,
+      clip(diag(o), 400), 'signed in, dashboard shown', "Check the synthetic user's GitHub secret password and Supabase Auth; see the P3 Actions run log.");
+    tag('dashboard sign-in failed');
+  } else if (signedIn) {
+    add('MEDIUM', layer, id, `Dashboard test for ${who}: signed in and the database answered, but the page did not finish loading in the test browser, even after a reload`,
+      clip(diag(o), 400), 'dashboard within 60s of sign-in', step);
+    tag('the dashboard page stalled in the test browser after sign-in (sign-in itself worked)');
+  } else {
+    add('MEDIUM', layer, id, `Dashboard test for ${who}: the dashboard did not appear within 60s of sign-in (cause not recorded by this P3 version)`,
+      clip(firstLine(pr.detail || ''), 200), 'dashboard within 60s of sign-in',
+      'Usually a stalled page load in the test browser rather than a sign-in failure; if it repeats, sign in as a real user to confirm, and see the P3 Actions run log.');
+    tag('the dashboard test page did not appear after sign-in');
+  }
+}
+
+// One phrase per kind of finding for the executive summary: the per-user
+// dashboard sign-in findings collapse into one, naming the users.
+function summarize(list) {
+  const out = [], byShort = new Map();
+  for (const f of list) {
+    if (!f.short) { out.push(f.title); continue; }
+    if (!byShort.has(f.short)) { byShort.set(f.short, []); out.push(f.short); }
+    byShort.get(f.short).push(f.who);
+  }
+  const text = out.map((t) => byShort.has(t) ? `${t} (${byShort.get(t).length === 1 ? 'test user' : `${byShort.get(t).length} test users`}: ${byShort.get(t).join(', ')})` : t);
+  return `${text.slice(0, 3).join('; ')}${text.length > 3 ? '; ...' : ''}`;
 }
 
 function p4(c) {
@@ -529,8 +592,8 @@ function build() {
     ex.push('Action needed: the check could not sign in to the Mars Telemetry gateway, so nothing else could be checked today.');
     ex.push('The key may have been revoked or replaced, or the service account disabled; the finding below says what to look at.');
   } else {
-    if (status === 'RED') ex.push(`Action needed: ${plural(serious.length, 'serious issue')} found (${serious.slice(0, 3).map((f) => f.title).join('; ')}${serious.length > 3 ? '; ...' : ''}).`);
-    else if (status === 'YELLOW' && findings.length) ex.push(`No urgent problems. ${plural(minor.length, 'lower-priority item')} to be aware of: ${minor.slice(0, 3).map((f) => f.title).join('; ')}${minor.length > 3 ? '; ...' : ''}.`);
+    if (status === 'RED') ex.push(`Action needed: ${plural(serious.length, 'serious issue')} found (${summarize(serious)}).`);
+    else if (status === 'YELLOW' && findings.length) ex.push(`No urgent problems. ${plural(minor.length, 'lower-priority item')} to be aware of: ${summarize(minor)}.`);
     else if (status === 'YELLOW') ex.push(`No problems found, but ${plural(unexpectedNC.length, 'item')} could not be checked today (${unexpectedNC.map((x) => x.short).join('; ')}).`);
     else ex.push('Everything looks healthy: no issues found.');
     const all = Object.values(producers).reduce((m, p) => { for (const [k, v] of Object.entries(p.counts)) m[k] = (m[k] || 0) + v; return m; }, {});
@@ -566,7 +629,10 @@ function build() {
       const p = producers[layerInfo[l][0]];
       detail = p ? `${PRODUCER_NAMES[layerInfo[l][0]]}, last run ${et(p.finished_at || p.started_at)}; ${countsText(p.counts)}${l !== 'sources' && l !== 'dashboard' ? ' (shared across ingestion, database and security)' : ''}` : 'no run reported';
     }
-    return { text: `${LAYER_NAMES[l]}: ${st}`, sub: [detail + (lf.length ? `; ${plural(lf.length, 'finding')} below` : '')] };
+    const sub = [detail + (lf.length ? `; ${plural(lf.length, 'finding')} below` : '')];
+    if (l === 'dashboard' && obs.p3_backup?.length && !lf.some((f) => f.check_id === 'p3_backup.dispatch'))
+      sub.push(`Started by the 12:35 UTC backup dispatch (GitHub ran its 12:17 schedule late, which is normal); not a problem`);
+    return { text: `${LAYER_NAMES[l]}: ${st}`, sub };
   });
   sections.push({ title: 'LAYER STATUS', items: layerItems });
 

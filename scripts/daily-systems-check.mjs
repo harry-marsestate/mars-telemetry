@@ -158,6 +158,8 @@ function nextStep(id) {
   const rules = [
     [/^ingestion\.climate\.last_run$/, 'Read the newest ingestion_runs row for climate (status, http_status, error) and the ingest-climate-2026 Edge Function logs; re-run the ingest once fixed.'],
     [/^ingestion\.innovint\.last_run$/, 'Read the newest ingestion_runs row for InnoVint and the ingest-innovint logs; check INNOVINT_TOKEN and source.innovint.api.'],
+    [/^ingestion\.ets_report\.last_run$/, 'Weekly ETS cloud task: read the newest ingest-ets-report ingestion_runs rows (error, detail) and the function logs; check the task still runs and sends x-ets-ingest-key (docs/ETS-INGEST.md).'],
+    [/^ingestion\.ets_report\.quarantine$/, 'Read public.ets_ingest_quarantine (reason per analyte); fix the PDF parser or ets_analyte_spec and re-send the report, or delete the row once handled (docs/ETS-INGEST.md).'],
     [/^ingestion\.climate\.freshness$/, 'Newest real ERA5 hour is over 26 h old: confirm the climate ingest cron ran and the Open-Meteo probes (source.open_meteo.*) pass.'],
     [/^ingestion\.climate\.daily_weather_through$/, 'daily_weather is behind: run refresh_daily_weather_range() for the missing days and check the daily_weather build.'],
     [/^ingestion\.climate\.current_vintage$/, 'Compare stored vintage with public.harvest_vintage(recorded_at); add the next vintage to public.vintages before 1 November Pacific.'],

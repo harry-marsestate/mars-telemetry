@@ -7195,6 +7195,13 @@ pg_net's queue, its Authorization header is readable like the Vault key's
   from block_id-null rows only, or require access to every block for estate
   rows in `insights_customer_read` (see "Insights and Anomalies for
   customers").
+- `ingestion.ets_report.last_run` [ingestion] (added 2026-10-06, warn only):
+  warns if `ingest-ets-report` has no `success`/`partial` run in the last 10
+  days (the cloud task is weekly and sends a heartbeat when there is no new
+  report), or recorded an `error` run (a refused payload) in that time.
+- `ingestion.ets_report.quarantine` [ingestion] (added 2026-10-06, warn only):
+  warns while `ets_ingest_quarantine` has any row; shows the first 20 (see
+  "ETS PDF report ingestion").
 - `database.integrity.soil_moisture_range`: every soil reading between 0 and
   100.
 - `database.integrity.gdd_calibrated_2022_2025`: each closed vintage's final
@@ -8284,3 +8291,81 @@ metric check is removed); against production data in a rolled-back
 transaction before applying: operator 20 rows, both synthetic customers 13
 (climate and soil pairs only, no yield/irrigation row). P3 adds
 `frontend.<user>.insights_scope` for every synthetic user.
+
+## ETS PDF report ingestion (2026-10-06)
+
+A cloud scheduled task parses ETS Labs PDF reports from email and posts the
+results to a new Edge Function, `ingest-ets-report`. The task holds **no
+Supabase key**: only a dedicated key, sent in `x-ets-ingest-key`, that can do
+exactly one thing, which is call this function. docs/ETS-INGEST.md is the
+reference for the mapping, payload and rules.
+
+**Auth model.**
+- **Where the key lives:** Vault, as `ets_ingest_key`, created and rotated by
+  `scripts/ets-ingest-key.mjs`. The script copies the value to the clipboard
+  and prints only a SHA-256 prefix. The key is not an Edge Function secret and
+  is not in any file.
+- **How it is checked:** the function hashes the presented key and calls
+  `public.ets_ingest_key_ok(sha256)`, which compares hashes against the Vault
+  secret. The key itself never reaches Postgres, a log or `ingestion_runs`. A
+  missing Vault secret refuses everything.
+- **Why the function uses `withSupabase({ auth: "none" })`:** the caller has
+  no Supabase credential. The key check runs before any other work, and a
+  refused key gets 401 and is not logged.
+- **How it writes:** only through `public.ets_ingest_apply(sha256, payload)`,
+  which is SECURITY DEFINER, EXECUTE for `service_role` only, and re-checks
+  the key itself. The `service_role` client is the platform's own, inside the
+  function; it never leaves Supabase.
+- **What a leaked key allows:** writing berry-maturity or smoke rows for new
+  9-digit sample numbers, within the analyte spec, and quarantine rows. It
+  cannot overwrite a CSV-ingested sample, read anything, or reach any other
+  API. Rotate it with the script; rotation takes effect immediately.
+
+**Access, unchanged for existing data.**
+- `lab_samples`, `lab_results` and `berry_volume_histogram` keep the
+  operator-only SELECT policy and `authenticated` grant they had. Nothing new
+  can write them except the definer function.
+- New tables:
+  - `ets_ingest_quarantine` and `ets_report_samples`: RLS on, operator-only
+    SELECT (same predicate), no write grant to any API role;
+  - `ets_analyte_spec` and `ets_description_block`: RLS on, no policy, no
+    grant to any API role.
+- `lab_samples` gets no new columns, so P1's closed-vintage row hashes are
+  unchanged. Its `collected_on_source` check gains the value `'report'`.
+- `system_health.ingestion_runs.asset` gains `'ingest-ets-report'`.
+
+**Scope decisions.**
+- Vineyard samples only (`berry_maturity`, `berry_smoke`). Winery samples carry
+  the wine's vintage, not the harvest-year rule ("Vintage is the harvest
+  year"), so winery analytes are quarantined as unknown.
+- Lettered sample numbers are quarantined for an operator decision, as the
+  CSV path decides reissues by hand.
+- A sample number already present from the CSV path, or belonging to another
+  report, is quarantined and never overwritten.
+
+**Monitoring.** P1 adds two warn-only checks (migration `20261006120100`):
+- `ingestion.ets_report.last_run`: no successful or partial run in 10 days,
+  or a refused run in that time;
+- `ingestion.ets_report.quarantine`: any quarantined row.
+
+The weekly task sends a heartbeat when there is no new report.
+
+**Verified offline:**
+- `tests/ets-ingest-sql.test.mjs`, 14 PGlite tests on the real lab-table DDL
+  and RLS from their migrations. The SQL `analysis_code` port equals
+  `parse.py` on all 59 seed analysis names. The tests also cover a key
+  refused in five ways, 400s writing nothing, quarantine reasons and
+  re-sends, idempotent updates, CSV rows untouched, the Nov 1 vintage
+  rollover, no write or EXECUTE for anon/authenticated, and operator-only
+  reads (customer and pending operator see 0).
+- `tests/ingest-ets-report.test.ts`, 9 Deno tests. They check that the
+  database sees only the hash, the RPC argument names match the SQL, and the
+  run is logged as success, partial or error.
+- `tests/p1-ets-ingest.test.mjs`, 5 tests. The migration equals the previous
+  `run_p1_checks()` plus only the new block.
+
+**Not yet verified:** the production steps (dry run, rolled-back production
+test, apply, deploy, end-to-end with a synthetic report). Production reads
+were not permitted in the session that built this, so the "identical to the
+live function" check of `run_p1_checks()` and the live `analyzed_at`
+convention (docs/ETS-INGEST.md, Ambiguities 2) are still open.

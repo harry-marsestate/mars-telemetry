@@ -1,4 +1,4 @@
-// Durable per-run record for the scheduled ingest functions
+// Durable per-run record for the ingest functions
 // (system_health.ingestion_runs, via public.log_ingestion_run -- service_role
 // only). Before this, a failed run was recorded nowhere durable: pg_cron only
 // knows the HTTP request was queued, and net._http_response keeps the
@@ -34,7 +34,7 @@ export function runStatus(httpStatus: number, body: unknown): RunStatus {
 
 export async function withIngestionLog(
   ctx: { supabaseAdmin: { rpc: Rpc } },
-  asset: "ingest-innovint" | "ingest-climate-2026",
+  asset: "ingest-innovint" | "ingest-climate-2026" | "ingest-ets-report",
   run: () => Promise<Response>,
   summarize: (body: unknown) => RunSummary,
 ): Promise<Response> {
@@ -120,6 +120,28 @@ export function summarizeClimate(body: unknown): RunSummary {
       daily_weather_refreshed: b.daily_weather_refreshed ?? null,
       real_as_of: b.real_as_of ?? null,
       requested_models: b.requested_models ?? null,
+    },
+  };
+}
+
+// ingest-ets-report's JSON response -> a run summary. One run is one report
+// sample (or a heartbeat); rows_written counts analytes written, quarantined
+// ones are in detail.
+export function summarizeEtsReport(body: unknown): RunSummary {
+  // deno-lint-ignore no-explicit-any
+  const b = body as any;
+  if (!b || typeof b !== "object") return { error: "no JSON response body" };
+  return {
+    rows_written: typeof b.written === "number" ? b.written : null,
+    error: b.ok === false ? String(b.reason ?? "refused") : null,
+    detail: {
+      heartbeat: b.heartbeat === true || undefined,
+      report_no: b.report_no ?? null,
+      sample_id: b.sample_id ?? null,
+      sample_status: b.sample?.status ?? null,
+      sample_reason: b.sample?.reason ?? null,
+      written: b.written ?? null,
+      quarantined: b.quarantined ?? null,
     },
   };
 }

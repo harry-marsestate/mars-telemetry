@@ -7145,6 +7145,15 @@ record is expected. Changes on 2026-10-06:
   `warn`; a second failure is `fail`. "Shown" means the gate ran
   `showDashboard()` (`dashboardBooted`), not just a visible tab: after a
   reload the header is visible before the gate finishes.
+- Root cause of the sign-in stalls (caught by the new trace on 2026-10-06):
+  the first REST call after sign-in can fail with `PGRST303` ("JWT issued
+  at future"), Supabase Auth's clock running a moment ahead of the REST
+  API's. The failed profile read made `runSessionGate` show the
+  finish-profile screen (header hidden) instead of the dashboard; a real
+  user could hit it too. The dashboard's Supabase client now retries
+  `PGRST303` up to 3 times (0.5, 1, 1.5 s), and a profile read that still
+  fails returns to sign-in with a message instead of the finish-profile
+  screen, whose save would overwrite the user's name.
 - The daily systems check grades a successful backup dispatch as
   information, a sign-in that only needed a reload as LOW, a page that
   stalled although sign-in and the database worked as MEDIUM, and only a

@@ -582,4 +582,4 @@ if (DRY) {
 // health tools and the daily systems check. This run itself fails (and GitHub
 // emails about it) only when it could not run or record: a thrown error.
 const bad = results.filter((r) => r.status !== "pass").length;
-log(`${results.length} results, ${bad} not passing${bad ? " (recorded; see the health report)" : ""}`);
+log(`${results.length} results, ${bad} not passing${bad && !DRY ? " (recorded; see the health report)" : ""}`);

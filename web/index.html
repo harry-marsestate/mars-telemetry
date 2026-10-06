@@ -841,7 +841,21 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 /* ── SUPABASE CLIENT + DATA ADAPTER ─────────────────── */
 const SUPABASE_URL = 'https://wwdpunaefaiazsjamrkc.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind3ZHB1bmFlZmFpYXpzamFtcmtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU4NzE5OTAsImV4cCI6MjEwMTQ0Nzk5MH0.GFmpd3LP_zeV6BVlEV8SdIde3LJYJRFuL-8TwAAPZOg';
-const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// A token used the instant it is issued can be rejected with PGRST303 ("JWT
+// issued at future"): Supabase Auth's clock can run a moment ahead of the
+// REST API's. Seen right after sign-in (P3, 2026-10-06), where the failed
+// profile read sent the user to the finish-profile screen. Retry just that
+// error, briefly; every other response passes straight through.
+async function fetchRetryingFreshJwt(input, init){
+  for(let attempt=0;; attempt++){
+    const res = await fetch(input, init);
+    if(res.status!==401 || attempt>=3) return res;
+    const body = await res.clone().json().catch(()=>null);
+    if(body?.code!=='PGRST303') return res;
+    await new Promise(r=>setTimeout(r, 500*(attempt+1)));
+  }
+}
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: fetchRetryingFreshJwt } });
 
 // Fixed anchor for the seeded mock data — same July 28 2026 14:20 value as
 // NOW (§1), but NOW ticks forward live for the UI demo clock so it can't be
@@ -5847,6 +5861,12 @@ async function runSessionGate(){
     // already has a name could get bounced to the finish-profile screen
     // with nothing logged anywhere to explain why.
     console.error('runSessionGate: name profile query failed', nameProfileErr);
+    // Not knowing the name is not the same as having none: don't send the
+    // user to the finish-profile screen (its save would overwrite their
+    // name). Ask them to retry instead.
+    showAuthOnly();
+    showAuthError('We couldn’t load your profile just now. Please sign in again.');
+    return;
   }
   if(!nameProfile?.first_name || !nameProfile?.last_name){
     const um = session.user.user_metadata || {};

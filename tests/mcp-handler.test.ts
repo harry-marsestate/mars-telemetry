@@ -7,6 +7,7 @@ import { MCP_TOOLS } from "../supabase/functions/mcp/allowlist.ts";
 import { HEALTH_TOOLS } from "../supabase/functions/mcp/health-tools.ts";
 import { parseBearerKey, sha256Hex } from "../supabase/functions/mcp/auth.ts";
 import { createMcpHandler, type McpDeps, validateArgs } from "../supabase/functions/mcp/handler.ts";
+import { ANSWER_RULES } from "../supabase/functions/chat/query-rules.ts";
 
 const GOOD_KEY = "mtk_" + "A".repeat(43);
 const USER = "00000000-0000-4000-8000-000000000001";
@@ -86,7 +87,12 @@ Deno.test("initialize, then tools/list returns exactly the round-one allowlist",
     params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } },
   }));
   assertEquals(init.status, 200);
-  assertEquals((await init.json()).result.serverInfo.name, "mars-telemetry");
+  const initBody = await init.json();
+  assertEquals(initBody.result.serverInfo.name, "mars-telemetry");
+  // The answer-support rules reach an external agent too (docs/SECURITY.md,
+  // "Chat tool findings"): same text as the in-app system prompt.
+  assertEquals(initBody.result.instructions, ANSWER_RULES);
+  assertMatch(initBody.result.instructions, /No causal explanations/);
 
   const list = await handler(rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" }));
   const names = (await list.json()).result.tools.map((t: { name: string }) => t.name).sort();

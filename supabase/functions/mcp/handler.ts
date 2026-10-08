@@ -2,6 +2,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { type CallToolRequest, CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { DomainReality, ToolResult } from "../chat/tools.ts";
+import { ANSWER_RULES } from "../chat/query-rules.ts";
 import { MCP_TOOLS } from "./allowlist.ts";
 import { gatewayToolDef, type GatewayResult } from "./data-tools.ts";
 import { parseBearerKey, sha256Hex } from "./auth.ts";
@@ -176,7 +177,10 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
 
     // Stateless: a fresh server + transport per HTTP request, no session ids,
     // plain JSON responses (every tool here is a single request/response).
-    const server = new Server({ name: "mars-telemetry", version: "1.0.0" }, { capabilities: { tools: {} } });
+    // instructions: the same answer-support rules the in-app system prompt
+    // carries (chat/query-rules.ts). An external agent never sees that prompt
+    // -- Colin's 5 Oct session ran his own model over these tools.
+    const server = new Server({ name: "mars-telemetry", version: "1.0.0" }, { capabilities: { tools: {} }, instructions: ANSWER_RULES });
 
     // Only the tools this key may call -- the intersection of what this server
     // exposes and the key's allowed_tools.

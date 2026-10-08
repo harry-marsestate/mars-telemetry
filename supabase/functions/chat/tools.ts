@@ -1,5 +1,9 @@
 import { labourResult } from "./labour-totals.ts";
 import { currentVintage, vintagesThrough } from "../_shared/vintage.ts";
+import {
+  analyteFamily, applyBounds, dayLabel, describeChange, isBareDate, normLower, normText, normUpper,
+  pacificDate, pacificMidnightUtc, addDays, type Point, resolveDateBounds, temperatureLabel,
+} from "./query-rules.ts";
 import type Anthropic from "@anthropic-ai/sdk";
 
 // series_bucketed's own aggregation is bounded by the caller's date range
@@ -79,15 +83,15 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_series",
     description:
-      "Time-bucketed real IoT sensor readings for vineyard blocks (air_temp, soil_moisture, soil_temp, humidity, wind, etc.). Averages (or sums, for precipitation/irrigation) readings into buckets across a time range. Block-scoped: a customer only sees blocks they have access to; RLS silently returns no data for inaccessible blocks rather than erroring.",
+      "Time-bucketed real IoT sensor readings for vineyard blocks (air_temp, soil_moisture, soil_temp, humidity, wind, etc.). Averages (or sums, for precipitation/irrigation) readings into buckets across a time range. Block-scoped: a customer only sees blocks they have access to; RLS silently returns no data for inaccessible blocks rather than erroring. The response ends with the effective interval used and a server-computed Changes note (first to last non-empty bucket, change per day, min/max) -- quote those figures rather than computing them.",
     input_schema: {
       type: "object",
       properties: {
         metric: { type: "string", description: "Metric key, e.g. 'air_temp', 'soil_moisture', 'soil_temp', 'humidity', 'wind_speed', 'precip'." },
-        block: { type: "string", description: "Block id, e.g. 'B1'. Omit for all accessible blocks." },
+        block: { type: "string", description: "Block id, e.g. 'B1' (case and surrounding spaces ignored). Omit for all accessible blocks." },
         vintage: { type: "integer", description: "Vintage (harvest year), e.g. 2024. Omit for all vintages." },
-        start: { type: "string", description: "ISO 8601 start timestamp." },
-        end: { type: "string", description: "ISO 8601 end timestamp." },
+        start: { type: "string", description: "ISO 8601 start timestamp, or a calendar date 'YYYY-MM-DD' meaning the start of that Pacific (estate) day." },
+        end: { type: "string", description: "ISO 8601 end timestamp, or a calendar date 'YYYY-MM-DD' meaning through the END of that Pacific day (start and end may be the same date)." },
         bucket_hours: { type: "number", description: "Bucket width in hours, e.g. 1 for hourly, 24 for daily." },
         agg: { type: "string", enum: ["avg", "sum"], description: "Aggregation within each bucket. Use 'sum' for precip/irrigation volume, 'avg' otherwise." },
       },
@@ -97,13 +101,13 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_derived_series",
     description:
-      "Real derived daily climate metrics for a vintage: cumulative growing degree days (gdd_cumulative_calibrated -- calibrated per-vintage against the Napa Valley Grapegrowers Growing Conditions Report figures for Angwin, and the authoritative GDD figure to quote), average-based vapor pressure deficit (vpd_kpa), peak-hour vapor pressure deficit (vpd_peak_kpa), uncalibrated diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in). One row per day. Defaults to the vintage's growing-season range if start_date/end_date are omitted.",
+      "Real derived daily climate metrics for a vintage: cumulative growing degree days (gdd_cumulative_calibrated -- calibrated per-vintage against the Napa Valley Grapegrowers Growing Conditions Report figures for Angwin, and the authoritative GDD figure to quote), average-based vapor pressure deficit (vpd_kpa), peak-hour vapor pressure deficit (vpd_peak_kpa), uncalibrated diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in). One row per day. Defaults to the vintage's growing-season range if start_date/end_date are omitted; a bare end_date includes that whole day. The response ends with the effective interval and a server-computed Changes note (GDD gained and per day, min/max/mean of each other field) -- quote those figures rather than computing them.",
     input_schema: {
       type: "object",
       properties: {
         vintage: { type: "integer", description: "Vintage (harvest year), e.g. 2024." },
-        start_date: { type: "string", description: "ISO date, e.g. '2024-04-01'. Defaults to the start of the growing season." },
-        end_date: { type: "string", description: "ISO date. Defaults to the latest data for the current vintage, or end of season for an archived vintage." },
+        start_date: { type: "string", description: "Calendar date, e.g. '2024-04-01' (inclusive). Defaults to the start of the growing season." },
+        end_date: { type: "string", description: "Calendar date, inclusive of that whole day. Defaults to the latest data for the current vintage, or end of season for an archived vintage." },
       },
       required: ["vintage"],
     },
@@ -124,15 +128,15 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_lot_analyses",
     description:
-      "Real winery lab analysis data per fermentation lot (Brix, pH, TA, and other chemistry), sourced from InnoVint. Operator access only -- returns no rows for customer or pending accounts. Returns at most 200 rows, most recent first; narrow with lot_code/lot_name/analysis_type/date range for a specific question rather than relying on the default limit. InnoVint contains genuine duplicate lot objects for the same physical wine for a few 2023 lots (confirmed: byte-identical chemistry under two or three different lot_codes) -- pass lot_code when you already know it (exact match, unambiguous); a lot_name search (partial match) automatically excludes the known-superseded duplicates and, if it still matches more than one distinct lot_code (e.g. a name that's also a substring of a different vintage's lot name), says so explicitly rather than silently blending them. Querying a superseded lot_code directly still works (its own rows, not redirected) but the result notes which lot_code is canonical.",
+      "Real winery lab analyses recorded in InnoVint per lot (Brix, pH, TA, VA, SO2, YAN, malic, temperature, ethanol and other cellar chemistry), keyed by InnoVint lot_code/lot_name. SOURCE: InnoVint only. ETS Labs results by lab sample number (fermentation checks, wine chemistry, stability trials) are in get_wine_lab_results, not here -- a sample number (9 digits, e.g. '310310429') or an ETS sample description (e.g. 'T-7 V-2') will not match an InnoVint lot. When nothing matches, the response names any ETS samples the same identifier matches; follow that pointer before asking the user. Operator access only -- returns no rows for customer or pending accounts. Returns at most 200 rows, most recent first, with the exact total_count of matching rows and a truncated flag; per-lot row counts and first/last dates are computed in the database over every matching row (never from the capped rows). Dates are labelled in the estate's Pacific calendar day. InnoVint contains genuine duplicate lot objects for the same physical wine for a few 2023 lots (byte-identical chemistry under two or three different lot_codes) -- pass lot_code when you already know it (exact match, case-insensitive, unambiguous); a lot_name search (partial match) automatically excludes the known-superseded duplicates and, if it still matches more than one distinct lot_code (e.g. a name that's also a substring of a different vintage's lot name), says so explicitly rather than silently blending them. Querying a superseded lot_code directly still works (its own rows, not redirected) but the result notes which lot_code is canonical. The same analyte can be recorded at different reference temperatures (ethanol-20c, ethanol-60f, plus plain ethanol/alcohol) -- different measurements, never interchangeable; when you filter on one, the response lists the variants on file. Each result ends with a server-computed Changes note per lot and analysis type (first to last reading, change per day) -- quote it rather than computing rates yourself.",
     input_schema: {
       type: "object",
       properties: {
-        lot_code: { type: "string", description: "Exact lot code, e.g. 'MA23CSV3'. Unambiguous -- prefer this over lot_name when known. Bypasses the duplicate-lot exclusion (an explicit request for a specific code, including a superseded one, is honored as asked)." },
+        lot_code: { type: "string", description: "Exact InnoVint lot code, e.g. 'MA23CSV3' (case and surrounding spaces ignored). Unambiguous -- prefer this over lot_name when known. Bypasses the duplicate-lot exclusion (an explicit request for a specific code, including a superseded one, is honored as asked)." },
         lot_name: { type: "string", description: "Partial lot name match, e.g. 'Zinfandel'. Known-superseded duplicate lot_codes are excluded automatically." },
-        analysis_type: { type: "string", description: "Exact analysis type, e.g. 'brix', 'ph', 'ta'." },
-        start_date: { type: "string", description: "ISO date lower bound on recorded_at." },
-        end_date: { type: "string", description: "ISO date upper bound on recorded_at." },
+        analysis_type: { type: "string", description: "Exact InnoVint analysis type, e.g. 'brix', 'ph', 'titratable-acidity', 'ethanol-20c' (case ignored). Temperature variants of the same analyte are listed in the response." },
+        start_date: { type: "string", description: "Lower bound on recorded_at: a calendar date 'YYYY-MM-DD' (start of that Pacific day) or an ISO 8601 timestamp." },
+        end_date: { type: "string", description: "Upper bound on recorded_at: a calendar date 'YYYY-MM-DD' includes that WHOLE Pacific day (start_date = end_date gives one full day); an ISO 8601 timestamp is used exactly, inclusive." },
         limit: { type: "integer", description: "Max rows to return, default 50, max 200." },
       },
       required: [],
@@ -141,11 +145,11 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_vessels",
     description:
-      "Real winery tank/vessel inventory: type, capacity, current fill volume, and current lot assignment, sourced from InnoVint. Operator access only -- returns no rows for customer or pending accounts.",
+      "Real winery tank/vessel inventory: type, capacity, current fill volume, and current lot assignment, sourced from InnoVint. Operator access only -- returns no rows for customer or pending accounts. Returns at most 500 vessels with the total matching count and a truncated flag.",
     input_schema: {
       type: "object",
       properties: {
-        vessel_type: { type: "string", description: "Filter by vessel type." },
+        vessel_type: { type: "string", description: "Filter by vessel type: 'tank', 'barrel', 'keg', 'steel_drum' (case ignored)." },
         current_lot_name: { type: "string", description: "Partial match on the lot currently assigned to the vessel." },
         include_archived: { type: "boolean", description: "Include archived/decommissioned vessels. Default false." },
       },
@@ -155,7 +159,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_labour_summary",
     description:
-      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026, ingested month by month as new invoices arrive). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: 2023 covers May-Dec (8 months), 2024 covers the full Jan-Dec season, 2026 grows month by month as its invoices arrive -- the exact month range is NOT fixed here, always read it from this tool's own returned Coverage note rather than assuming a specific month or month count. 2022 and 2025 have no labour records of any kind -- returns empty for them, not simulated data. Pass period_month to scope the answer to ONE specific calendar month (e.g. 'what did we spend in August specifically') instead of the whole vintage -- without it, results are summed across every month on file for that vintage, which is almost certainly NOT what a month-specific question wants. Use the supplied totals.display values verbatim for headline totals and the total row; NEVER sum category rows yourself or average category rates. totals contains exact decimal sums; display rounds once to two decimals. Empty categories mean no records, NOT known zero spend. Operator access only -- returns no rows for customer or pending accounts.",
+      "Real vineyard labor hours and cost per operation category and vintage (e.g. Canopy Management, Irrigation, Harvest), sourced from actual Silverado hours invoices (2023, 2024) and the Mars Invoice Backup (2026, ingested month by month as new invoices arrive). No block dimension -- the source records are job-category/task/role, not per-block. Returns labor_cost and expense_cost SEPARATELY (some categories -- Fertilize, Disease Control, Irrigation, Other -- also carry folded-in invoice expenses that have cost but no hours); cost_per_hour is computed from labor_cost only, never the combined total. Coverage is uneven and NOT comparable across vintages: some vintages cover only part of the year, some (the current one) grow month by month as invoices arrive, and some have no labour records of any kind (returns empty for them, not simulated data). The month range per vintage is NOT fixed here -- always read it from this tool's own returned Coverage note, computed from the data on every call, rather than assuming a specific month or month count. Pass period_month to scope the answer to ONE specific calendar month (e.g. 'what did we spend in August specifically') instead of the whole vintage -- without it, results are summed across every month on file for that vintage, which is almost certainly NOT what a month-specific question wants. Use the supplied totals.display values verbatim for headline totals and the total row; NEVER sum category rows yourself or average category rates. totals contains exact decimal sums; display rounds once to two decimals. Empty categories mean no records, NOT known zero spend. Operator access only -- returns no rows for customer or pending accounts.",
     input_schema: {
       type: "object",
       properties: {
@@ -169,12 +173,14 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_berry_maturity",
     description:
-      "Real vineyard berry-maturity sampling per block per collection date (brix, pH, titratable acidity, L-malic acid, glucose+fructose, berry weight, berry volume, berry volume variability, sugar per berry), sourced from ETS Labs. Reads berry_maturity_by_block, a view over CURRENT (non-superseded) samples only -- never the raw lab_samples/lab_results tables, which intentionally retain superseded reissue rows. Coverage is UNEVEN and NOT comparable across vintages: 2023 and 2024 each have exactly ONE collection date with only three analytes measured (brix/pH/titratable acidity) -- L-malic acid, glucose+fructose, and the three berry-size analytes are ABSENT those vintages because ETS ran a smaller panel then, not because the fruit had none or measurement failed; do not read those gaps as zero or as a real change in the vineyard. 2026 has the full nine-analyte Dyostem panel across four collection dates through late-season ripening. 2022 has no berry sampling of any kind. 2025 has smoke-taint screening only (see get_smoke_markers), no maturity/ripening panel. Always read this tool's own returned Coverage note rather than assuming a vintage's shape from another vintage's. Deliberately does NOT expose the underlying 20-bin Dyostem berry-size histogram -- that's raw instrument detail with no value in a chat answer; berry_volume_variability_pct already carries the same ripening-uniformity signal as one number. Operator access only (customer/pending accounts get no rows, enforced by the view's own RLS, not an application check here). Never gated by real-only mode -- this data has no simulated counterpart to withhold, same as get_labour_summary.",
+      "Real vineyard berry-maturity sampling per block per collection date (brix, pH, titratable acidity, L-malic acid, glucose+fructose, berry weight, berry volume, berry volume variability, sugar per berry), sourced from ETS Labs. Reads berry_maturity_by_block, a view over CURRENT (non-superseded) samples only -- never the raw lab_samples/lab_results tables, which intentionally retain superseded reissue rows. Every row carries its provenance: lab_sample_no (the ETS sample number), collected_on_source ('description' = date stated in the sample description, 'report' = date stated on the ETS report, 'inferred_from_receipt' = date inferred from the lab's receipt date) and collected_on_inferred (true when the date was inferred, not recorded) -- say so when you quote an inferred date. Coverage is UNEVEN and NOT comparable across vintages: early vintages ran a smaller panel (brix/pH/TA only), so absent analytes there mean not measured, never zero or a real change in the vineyard. The number of collection dates, the analytes measured and the vintages with no maturity sampling are NOT fixed here -- they change as new ETS reports arrive; always read this tool's own returned Coverage note, which is computed from the data on every call. Each result ends with a server-computed Changes note per block and vintage (first to last collection date, change per day, and every step between consecutive dates) -- quote it rather than computing rates yourself. Deliberately does NOT expose the underlying 20-bin Dyostem berry-size histogram -- that's raw instrument detail with no value in a chat answer; berry_volume_variability_pct already carries the same ripening-uniformity signal as one number. Operator access only (customer/pending accounts get no rows, enforced by the view's own RLS, not an application check here). Never gated by real-only mode -- this data has no simulated counterpart to withhold, same as get_labour_summary.",
     input_schema: {
       type: "object",
       properties: {
         vintage: { type: "integer", description: "Vintage (harvest year), e.g. 2024. Omit for all vintages." },
-        block_id: { type: "string", description: "Block id, e.g. 'B2' or 'B3'. Omit for all blocks." },
+        block_id: { type: "string", description: "Block id, e.g. 'B2' or 'B3' (case and surrounding spaces ignored). Omit for all blocks." },
+        start_date: { type: "string", description: "Earliest collection date, 'YYYY-MM-DD' (inclusive). Use with end_date to get the Changes note for exactly the window asked about." },
+        end_date: { type: "string", description: "Latest collection date, 'YYYY-MM-DD' (inclusive)." },
       },
       required: [],
     },
@@ -182,12 +188,13 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_smoke_markers",
     description:
-      "Real smoke-taint marker lab results per sample (the nine free volatile phenols -- guaiacol, 4-methylguaiacol, 4-methylsyringol, m-/o-/p-cresol, cresols (sum), phenol, syringol -- plus the six glycosylated conjugate markers of the same compounds), sourced from ETS Labs. Reads lab_results_current, filtered to just these analytes -- never lab_results directly, which intentionally retains superseded reissue rows (confirmed live: querying it directly for this exact data returned every value twice before this fix). Every row carries result_operator ('=' or '<') separately from result_numeric: a '<' row is a detection-limit censored result (e.g. '< 0.5'), and must be reported as below/under that limit, NEVER as a plain measured number. units differ by sample basis and are NEVER interchangeable: µg/kg is berry-mass basis, µg/L is liquid/juice basis -- always quote the unit given with the value, never convert or compare a µg/kg figure to a µg/L one as if equal. Coverage is concentrated in 2025: two berry-mass-basis samples, two juice-basis samples, and one trial micro-ferment (block unresolved -- see this tool's Coverage note). 2022/2023/2024/2026 have no vineyard-side smoke screening on file. Operator access only (RLS-enforced, not an application check). Never gated by real-only mode -- no simulated counterpart exists for this data.",
+      "Real smoke-taint marker lab results per sample (the nine free volatile phenols -- guaiacol, 4-methylguaiacol, 4-methylsyringol, m-/o-/p-cresol, cresols (sum), phenol, syringol -- plus the six glycosylated conjugate markers of the same compounds), sourced from ETS Labs. Reads lab_results_current, filtered to just these analytes -- never lab_results directly, which intentionally retains superseded reissue rows (confirmed live: querying it directly for this exact data returned every value twice before this fix). Every row carries result_operator ('=' or '<') separately from result_numeric: a '<' row is a detection-limit censored result (e.g. '< 0.5'), and must be reported as below/under that limit, NEVER as a plain measured number. units differ by sample basis and are NEVER interchangeable: µg/kg is berry-mass basis, µg/L is liquid/juice basis -- always quote the unit given with the value, never convert or compare a µg/kg figure to a µg/L one as if equal. Every row carries lab_sample_no and collected_on_source/collected_on_inferred (whether the collection date was recorded or inferred). Which vintages, blocks and sample bases have smoke screening is NOT fixed here (new ETS reports add samples) -- read this tool's returned Coverage note, computed from the data on every call. Operator access only (RLS-enforced, not an application check). Never gated by real-only mode -- no simulated counterpart exists for this data.",
     input_schema: {
       type: "object",
       properties: {
         vintage: { type: "integer", description: "Year, e.g. 2025. Omit for all vintages." },
-        block_id: { type: "string", description: "Block id, e.g. 'B2' or 'B3'. Omit for all blocks -- note the trial micro-ferment sample has no resolved block and is excluded by any block_id filter." },
+        block_id: { type: "string", description: "Block id, e.g. 'B2' or 'B3' (case and surrounding spaces ignored). Omit for all blocks -- note a sample with no resolved block (e.g. a trial micro-ferment) is excluded by any block_id filter." },
+        lab_sample_no: { type: "string", description: "Exact ETS lab sample number, e.g. '508260303'." },
       },
       required: [],
     },
@@ -195,16 +202,18 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_wine_lab_results",
     description:
-      "Real winery lab chemistry from ETS Labs (ethanol, VA, TA, pH, free/total SO2, YAN, ammonia, potassium, malic acid, glucose+fructose, brix, plus specialty QC panels -- microbial safety, heat/cold stability trials, fining trials, conductivity), sourced from the same CSV as get_berry_maturity/get_smoke_markers but covering wine/must/ferment/stability-trial samples instead of vineyard ones. Reads lab_results_current/lab_samples_current only -- never the raw lab_samples/lab_results tables, which intentionally retain superseded reissue rows. sample_description identifies the lot (e.g. 'MA23CS', '25CHMR-LF') -- partial match, and CAUTION: some codes are literal substrings of others in the SAME vintage (e.g. 'MA22CS' also matches 'MA22CSV2' and 'MA22CSV3' -- vintage alone does NOT disambiguate this case, since all three are 2022). The response always states which distinct sample_description values actually matched; read that before assuming a result is about one lot. Every result row carries result_operator ('=' or '<' -- a '<' row is a detection-limit censored result, never report it as a plain number), units, and a reconciliation status against InnoVint's own lot_analyses (lot_match: 'exact' = same lot/date/analyte/value already in lot_analyses, 'value_conflict' = same lot/date/analyte but a DIFFERENT value there, 'date_near' = matched within 3 days not same day, 'ets_only' = no InnoVint counterpart at all -- most rows are 'ets_only', that's expected, not a data quality problem). Date coverage per matched lot is precomputed server-side and spelled out in words in the response -- never infer a lot's date range from counting rows yourself. Operator access only (RLS-enforced). Never gated by real-only mode -- no simulated counterpart exists for this data. Two rows (MA25CH's conductivity-test disclaimer and its Heat Stability Trial protocol note) have result_numeric=null and only a free-text result_raw -- report their content as text, not as a missing number.",
+      "Real winery lab chemistry from ETS Labs, by lab sample: fermentation checks on fermenting must/ferments, finished-wine chemistry (ethanol, VA, TA, pH, free/total SO2, YAN, ammonia, potassium, malic acid, glucose+fructose, brix) and specialty QC panels (microbial safety, heat/cold stability trials, fining trials, conductivity). SOURCE: ETS only -- InnoVint's own per-lot cellar analyses are in get_lot_analyses. Find a sample by lab_sample_no (exact ETS sample number, e.g. '310310429'), by lot_code (exact lot code, also resolving an InnoVint lot_code that maps to an ETS description, e.g. 'MA23CSV3-AP' -> 'MA23CSV3'), or by sample_description (partial match on ETS's description, e.g. 'MA23CS', 'T-7 V-2'; a value that is exactly a sample number also matches that sample). When nothing matches, the response names matching vineyard samples (get_berry_maturity/get_smoke_markers) or InnoVint lots (get_lot_analyses); follow that pointer before asking the user. CAUTION: some descriptions are literal substrings of others in the SAME vintage (e.g. 'MA22CS' also matches 'MA22CSV2' and 'MA22CSV3'); the response always states which distinct sample_description values matched -- use lot_code or lab_sample_no for one lot or sample. The same analyte can be reported at different reference temperatures -- e.g. ethanol_at_20c AND ethanol_at_60f on the same sample: different measurements, never interchangeable; when you filter on one, the response lists every variant on file for those samples, with values. Every result row carries lab_sample_no, collected_on_source/collected_on_inferred (whether the collection date was recorded or inferred), result_operator ('=' or '<' -- a '<' row is a detection-limit censored result, never report it as a plain number), units, and a reconciliation status against InnoVint's own lot_analyses (lot_match: 'exact' = same lot/date/analyte/value already in lot_analyses, 'value_conflict' = same lot/date/analyte but a DIFFERENT value there, 'date_near' = matched within 3 days not same day, 'ets_only' = no InnoVint counterpart at all -- most rows are 'ets_only', that's expected, not a data quality problem). Returns the exact total_count of matching results and a truncated flag; date coverage per matched lot is computed in the database over every matching sample -- never infer a lot's date range from counting rows yourself. Each result ends with a server-computed Changes note per lot and analyte -- quote it rather than computing rates yourself. Some rows (e.g. a conductivity-test disclaimer or a stability-trial protocol note) have result_numeric=null and only a free-text result_raw -- report their content as text, not as a missing number. Operator access only (RLS-enforced). Never gated by real-only mode -- no simulated counterpart exists for this data.",
     input_schema: {
       type: "object",
       properties: {
-        sample_description: { type: "string", description: "Partial match on the ETS/InnoVint lot code, e.g. 'MA23CS' or '25CHMR-LF'. Omit for all winery samples." },
+        lab_sample_no: { type: "string", description: "Exact ETS lab sample number, e.g. '310310429' or '511110861A'." },
+        lot_code: { type: "string", description: "Exact lot code, e.g. 'MA24CS' (matches only that description, not MA24CSV2/V3) or an InnoVint lot_code such as 'MA23CSV3-AP'. Case ignored." },
+        sample_description: { type: "string", description: "Partial match on the ETS sample description, e.g. 'MA23CS', '25CHMR-LF' or 'T-7 V-2'. Omit for all winery samples." },
         vintage: { type: "integer", description: "Year, e.g. 2023. Omit for all vintages." },
         sample_type: { type: "string", enum: ["must", "wine", "ferment", "stability_trial"], description: "Narrow to one sample phase. Omit for all." },
-        analysis_code: { type: "string", description: "Exact analysis code, e.g. 'ethanol_at_20c', 'volatile_acidity_acetic_acid', 'ph'." },
-        start_date: { type: "string", description: "ISO date lower bound on analyzed_at." },
-        end_date: { type: "string", description: "ISO date upper bound on analyzed_at." },
+        analysis_code: { type: "string", description: "Exact analysis code, e.g. 'ethanol_at_20c', 'ethanol_at_60f', 'volatile_acidity_acetic_acid', 'ph' (case ignored). Other temperature variants of the same analyte are listed in the response." },
+        start_date: { type: "string", description: "Lower bound on analyzed_at: a calendar date 'YYYY-MM-DD' (start of that day) or an ISO 8601 timestamp." },
+        end_date: { type: "string", description: "Upper bound on analyzed_at: a calendar date 'YYYY-MM-DD' includes that WHOLE day (start_date = end_date gives one full day); an ISO 8601 timestamp is used exactly, inclusive." },
         limit: { type: "integer", description: "Max rows to return, default 100, max 300." },
       },
       required: [],
@@ -236,6 +245,18 @@ export async function runTool(
   domainReality: DomainReality,
 ): Promise<ToolResult> {
   try {
+    // The gateway validates arguments against the schema (mcp/handler.ts
+    // validateArgs); the in-app path must not silently ignore an unknown one
+    // either. Colin's {lab_sample_no: "608140601"} -- before that parameter
+    // existed -- returned every winery result (93 rows) unfiltered.
+    const tool = TOOLS.find((t) => t.name === name);
+    if (tool) {
+      const known = Object.keys((tool.input_schema as { properties?: Record<string, unknown> }).properties ?? {});
+      const unknown = Object.keys(input ?? {}).filter((k) => !known.includes(k));
+      if (unknown.length) {
+        return { content: `Unknown argument${unknown.length === 1 ? "" : "s"} for ${name}: ${unknown.join(", ")}. Valid arguments: ${known.join(", ")}.`, isError: true };
+      }
+    }
     switch (name) {
       case "get_series":
         return await getSeries(supabase, input, dataMode, domainReality);
@@ -266,9 +287,20 @@ export async function runTool(
 
 // deno-lint-ignore no-explicit-any
 async function getSeries(supabase: any, input: Record<string, unknown>, dataMode: string, domainReality: DomainReality): Promise<ToolResult> {
-  const { metric, block, vintage, start, end, bucket_hours, agg } = input as {
-    metric: string; block?: string; vintage?: number; start: string; end: string; bucket_hours: number; agg?: string;
+  const { metric, vintage, bucket_hours, agg } = input as {
+    metric: string; vintage?: number; bucket_hours: number; agg?: string;
   };
+  // series_bucketed compares block_id with '=' (case-sensitive): 'b2' used to
+  // return all-null buckets, indistinguishable from "no readings".
+  const block = normUpper(input.block);
+  // A bare date is the Pacific (estate) calendar day -- sensor_readings holds
+  // real instants. series_bucketed generates buckets from p_start THROUGH
+  // p_end, so a bare end date D ends 1 ms before D+1's Pacific midnight: the
+  // bucket starting at D+1 00:00 is excluded, every bucket within D included.
+  const start = isBareDate(input.start) ? pacificMidnightUtc(input.start) : input.start as string;
+  const end = isBareDate(input.end)
+    ? new Date(Date.parse(pacificMidnightUtc(addDays(input.end, 1))) - 1).toISOString()
+    : input.end as string;
 
   const startMs = Date.parse(start);
   const endMs = Date.parse(end);
@@ -323,12 +355,36 @@ async function getSeries(supabase: any, input: Record<string, unknown>, dataMode
   // buckets. Round to 2dp, matching this app's own fmt() display convention.
   // deno-lint-ignore no-explicit-any
   const rounded = (data as any[])?.map((row) => ({ ...row, v: row.v == null ? null : Math.round(row.v * 100) / 100 }));
-  return { content: JSON.stringify(rounded), isError: false };
+  const notes = [`(Effective interval: buckets of ${bucket_hours} h starting from ${new Date(startMs).toISOString()} through ${new Date(endMs).toISOString()}${isBareDate(input.start) || isBareDate(input.end) ? " -- bare dates are whole Pacific calendar days (America/Los_Angeles)" : ""}; ${rounded.length} bucket(s), ${rounded.filter((r) => r.v != null).length} with readings.)`];
+  const changes = seriesChanges(rounded.filter((r) => r.v != null).map((r) => ({ t: r.t, v: r.v })), metric);
+  if (changes) notes.push(changes);
+  if (block && rounded.length > 0 && rounded.every((r) => r.v == null)) {
+    notes.push(`(Every bucket is empty for block ${block}: no ${metric} readings in this range for that block -- check the block id and the metric's date coverage.)`);
+  }
+  return { content: JSON.stringify(rounded) + "\n\n" + notes.join(" "), isError: false };
+}
+
+// Server-side summary of a bucketed series, so the model never does this
+// arithmetic itself: first to last non-empty bucket, change per day (elapsed
+// time between bucket starts), min and max.
+function seriesChanges(points: { t: string; v: number }[], metric: string): string | null {
+  if (points.length < 2) return null;
+  const first = points[0], last = points[points.length - 1];
+  const days = (Date.parse(last.t) - Date.parse(first.t)) / 86400000;
+  const change = Math.round((last.v - first.v) * 100) / 100;
+  const min = points.reduce((a, b) => (b.v < a.v ? b : a));
+  const max = points.reduce((a, b) => (b.v > a.v ? b : a));
+  const perDay = days > 0 ? `, ${change >= 0 ? "+" : ""}${Math.round((change / days) * 1000) / 1000}/day over ${Math.round(days * 100) / 100} days` : "";
+  return `(Changes, computed server-side -- quote these, never recompute: ${metric} ${first.v} at ${first.t} -> ${last.v} at ${last.t}: ${change >= 0 ? "+" : ""}${change}${perDay}; min ${min.v} at ${min.t}, max ${max.v} at ${max.t}. A change over time is not evidence of its cause.)`;
 }
 
 // deno-lint-ignore no-explicit-any
 async function getDerivedSeries(supabase: any, input: Record<string, unknown>, dataMode: string, domainReality: DomainReality): Promise<ToolResult> {
   const { vintage, start_date, end_date } = input as { vintage: number; start_date?: string; end_date?: string };
+  // daily_derived.day is a Pacific day label stored at UTC midnight
+  // (wall-clock), so [D 00:00Z, D+1 00:00Z) is exactly day D.
+  const bounds = resolveDateBounds("day", start_date, end_date, "wallclock");
+  if (bounds.error) return { content: bounds.error, isError: true };
 
   // Real-only-data-mode gate (2026-09-13). All five fields are checked
   // (not just gdd) since they're each independently classified by
@@ -359,9 +415,8 @@ async function getDerivedSeries(supabase: any, input: Record<string, unknown>, d
     .select("day, gdd_cumulative_calibrated, dtr_f, vpd_kpa, vpd_peak_kpa, et0_in")
     .eq("vintage", vintage)
     .order("day", { ascending: true })
-    .limit(400);
-  if (start_date) query = query.gte("day", start_date);
-  if (end_date) query = query.lte("day", end_date);
+    .limit(DERIVED_LIMIT + 1);
+  query = applyBounds(query, "day", bounds);
 
   const { data, error } = await query;
   if (error) return formatErrorForModel(error);
@@ -395,7 +450,42 @@ async function getDerivedSeries(supabase: any, input: Record<string, unknown>, d
     vpd_peak_kpa: row.vpd_peak_kpa == null ? null : Math.round(row.vpd_peak_kpa * 100) / 100,
     et0_in: row.et0_in == null ? null : Math.round(row.et0_in * 1000) / 1000,
   }));
-  return { content: JSON.stringify(rounded), isError: false };
+  const truncated = rounded.length > DERIVED_LIMIT;
+  const shown = truncated ? rounded.slice(0, DERIVED_LIMIT) : rounded;
+  const notes = [
+    `(${bounds.label} Returned ${shown.length} day(s); truncated: ${truncated}${truncated ? ` -- more than ${DERIVED_LIMIT} days match; narrow start_date/end_date` : ""}.)`,
+  ];
+  const changes = derivedChanges(shown);
+  if (changes) notes.push(changes);
+  return { content: JSON.stringify(shown) + "\n\n" + notes.join(" "), isError: false };
+}
+
+const DERIVED_LIMIT = 400;
+
+// GDD is cumulative: report what was gained and per day. The other fields are
+// daily values: mean, min and max with their dates. Computed here so the model
+// never sums or differences daily rows itself.
+// deno-lint-ignore no-explicit-any
+function derivedChanges(rows: any[]): string | null {
+  if (rows.length < 2) return null;
+  const day = (r: { day: string }) => String(r.day).slice(0, 10);
+  const parts: string[] = [];
+  const gdd = rows.filter((r) => r.gdd_cumulative_calibrated != null);
+  if (gdd.length >= 2) {
+    const a = gdd[0], b = gdd[gdd.length - 1];
+    const d = Math.round((Date.parse(day(b)) - Date.parse(day(a))) / 86400000);
+    const gained = Math.round((b.gdd_cumulative_calibrated - a.gdd_cumulative_calibrated) * 10) / 10;
+    parts.push(`GDD (calibrated) ${a.gdd_cumulative_calibrated} on ${dayLabel(day(a))} -> ${b.gdd_cumulative_calibrated} on ${dayLabel(day(b))}: +${gained} over ${d} days = +${d > 0 ? Math.round((gained / d) * 10) / 10 : gained}/day`);
+  }
+  for (const [field, dp] of [["vpd_kpa", 2], ["vpd_peak_kpa", 2], ["dtr_f", 2], ["et0_in", 3]] as const) {
+    const vals = rows.filter((r) => r[field] != null);
+    if (vals.length === 0) continue;
+    const min = vals.reduce((x, y) => (y[field] < x[field] ? y : x));
+    const max = vals.reduce((x, y) => (y[field] > x[field] ? y : x));
+    const mean = Math.round((vals.reduce((t, r) => t + r[field], 0) / vals.length) * 10 ** dp) / 10 ** dp;
+    parts.push(`${field} mean ${mean} over ${vals.length} days, min ${min[field]} (${dayLabel(day(min))}), max ${max[field]} (${dayLabel(day(max))})`);
+  }
+  return parts.length ? `(Changes, computed server-side over the rows above -- quote these, never recompute: ${parts.join("; ")}. Climate coinciding with a change elsewhere is not evidence that it caused it.)` : null;
 }
 
 // This tool never passes p_tab, so anomalies_eval() always runs its
@@ -466,17 +556,22 @@ async function fetchSupersededLotMap(supabase: any): Promise<{ map: Map<string, 
 
 // deno-lint-ignore no-explicit-any
 async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
-  const { lot_code, lot_name, analysis_type, start_date, end_date, limit } = input as {
-    lot_code?: string; lot_name?: string; analysis_type?: string; start_date?: string; end_date?: string; limit?: number;
-  };
+  // Stored lot codes are upper case and analysis types lower case (verified
+  // 2026-10-07); 'ma24csv3', ' MA24CSV3 ' and 'Brix' used to return 0 rows.
+  const lot_code = normUpper(input.lot_code);
+  const lot_name = normText(input.lot_name);
+  const analysis_type = normLower(input.analysis_type);
+  const limit = input.limit as number | undefined;
   const cappedLimit = Math.min(limit && limit > 0 ? limit : 50, 200);
+  // recorded_at holds real UTC instants: a bare date is the Pacific day.
+  const bounds = resolveDateBounds("recorded_at", input.start_date, input.end_date, "instant");
+  if (bounds.error) return { content: bounds.error, isError: true };
 
   const superseded = await fetchSupersededLotMap(supabase);
   if ("error" in superseded) return formatErrorForModel(superseded.error);
 
-  // Shared filter conditions -- applied identically to the scope query
-  // (below) and the main display query, so the two can never drift apart
-  // and silently disagree about what "matches."
+  // Shared filter conditions for the display query; chat_lot_analyses_scope
+  // (20261007120000) applies the same ones in SQL.
   // deno-lint-ignore no-explicit-any
   const applyFilters = (q: any) => {
     if (lot_code) {
@@ -492,64 +587,36 @@ async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Pr
       }
     }
     if (analysis_type) q = q.eq("analysis_type", analysis_type);
-    if (start_date) q = q.gte("recorded_at", start_date);
-    if (end_date) q = q.lte("recorded_at", end_date);
-    return q;
+    return applyBounds(q, "recorded_at", bounds);
   };
 
-  // Scope query: EVERY distinct lot_code the filters match, and each
-  // one's true min/max recorded_at -- both computed independently of
-  // the row cap below, for two separate reasons that happen to share
-  // one query:
+  // Scope: EVERY matching lot_code with its exact row count and first/last
+  // recorded_at, the exact total, and every analysis_type on file for those
+  // lots -- one jsonb value from the database, so no row cap applies.
   //
-  // (a) The multi-lot-code warning must be based on the true match set,
-  // not on whichever lot_codes happen to survive the cap. Confirmed
-  // live this distinction is load-bearing, not theoretical:
-  // lot_name='Cabernet Sauvignon, V3' with no date filter returns 100%
-  // MA24CSV3 rows (176 available, all more recent than MA23CSV3's) --
-  // recency ordering plus the default 50-row cap fill the entire
-  // window before MA22CSV3/MA23CSV3's genuinely-matching rows ever
-  // appear, so a check against the returned `data` alone sees exactly
-  // one lot_code and stays silent.
-  //
-  // (b) The per-lot date-RANGE has the identical exposure, and it's
-  // what actually produced a wrong answer live: asked for "the
-  // Cabernet Sauvignon V3 lot's history," Kimi correctly named all
-  // three lots (the fix above), picked MA24CSV3 as primary, but then
-  // separately stated MA23CSV3's own range as "Mar 2023-Jul 2024" --
-  // real end date, wrong start. MA23CSV3 has 80 rows; a follow-up call
-  // with the default 50-row cap and recency ordering would show only
-  // its MOST RECENT 50 rows, silently hiding the true (older) start of
-  // its history -- exactly the shape that produces a plausible-but-
-  // wrong start date instead of an obviously-missing one. Same remedy
-  // this project already applied to labour's arithmetic totals
-  // (labour-totals.ts precomputes backend-side rather than asking the
-  // model to sum capped/possibly-partial rows): compute the date range
-  // server-side from every matching row, not from whatever fits in the
-  // display window.
-  //
-  // lot_analyses is 1,405 rows total; any filtered subset is far
-  // smaller, so one unordered, capped-generously-not-tightly query
-  // (recorded_at only, no full row payload) is cheap regardless of
-  // whether lot_code was given.
-  const scopeQuery = applyFilters(supabase.from("lot_analyses").select("lot_code, lot_name, recorded_at")).limit(1000);
-  const { data: scopeRows, error: scopeError } = await scopeQuery;
+  // This replaced an unordered `.limit(1000)` scan of recorded_at. With 1,264
+  // non-superseded rows that scan was short, and an arbitrary 1,000 rows
+  // decided the "computed from every matching row" ranges: Colin's broad query
+  // reported MA24CSV3 as ending March 27, 2025 while a targeted query showed
+  // February 3, 2026, and every 2026 lot was missing from the lot list. The
+  // two reasons a scope independent of the display cap exists still hold
+  // (docs/SECURITY.md, get_lot_analyses): the multi-lot warning must reflect
+  // the true match set, and a lot's date range must never be derived from the
+  // most-recent-N rows on show.
+  const { data: scope, error: scopeError } = await supabase.rpc("chat_lot_analyses_scope", {
+    p_lot_code: lot_code ?? null,
+    p_lot_name: lot_code ? null : lot_name ?? null,
+    p_analysis_type: analysis_type ?? null,
+    p_start: bounds.gte ?? null,
+    p_end_exclusive: bounds.lt ?? null,
+    p_end_inclusive: bounds.lte ?? null,
+  });
   if (scopeError) return formatErrorForModel(scopeError);
-
-  const lotRanges = new Map<string, { name: string; min: string; max: string }>();
-  // deno-lint-ignore no-explicit-any
-  for (const r of scopeRows as any[]) {
-    const existing = lotRanges.get(r.lot_code);
-    if (!existing) {
-      lotRanges.set(r.lot_code, { name: r.lot_name, min: r.recorded_at, max: r.recorded_at });
-    } else {
-      if (r.recorded_at < existing.min) existing.min = r.recorded_at;
-      if (r.recorded_at > existing.max) existing.max = r.recorded_at;
-    }
-  }
+  const lots: { lot_code: string; lot_name: string; n: number; first_at: string; last_at: string }[] = scope?.lots ?? [];
+  const total = Number(scope?.total ?? 0);
   const rangeLabel = (min: string, max: string) => {
-    const a = dayLabel(min.slice(0, 10));
-    const b = dayLabel(max.slice(0, 10));
+    const a = dayLabel(pacificDate(min));
+    const b = dayLabel(pacificDate(max));
     return a === b ? a : `${a} through ${b}`;
   };
 
@@ -563,30 +630,48 @@ async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Pr
 
   const { data, error } = await query;
   if (error) return formatErrorForModel(error);
+  // deno-lint-ignore no-explicit-any
+  const rows = (data as any[]).map((r) => ({ ...r, recorded_on_pacific: pacificDate(r.recorded_at) }));
 
-  const notes: string[] = [];
+  const truncated = rows.length < total;
+  const notes: string[] = [
+    `(Source: InnoVint lot analyses. ${bounds.label} Result: returned ${rows.length} of ${total} matching row(s), most recent first; truncated: ${truncated}${truncated ? ` -- narrow with lot_code, analysis_type or a date range, or raise limit (max 200)` : ""}. recorded_on_pacific is each reading's estate (Pacific) calendar date.)`,
+  ];
 
   if (lot_code && superseded.map.has(lot_code)) {
     notes.push(`(Note: ${lot_code} is a superseded duplicate lot_code -- InnoVint has two lot objects for this same physical wine. The canonical/complete record is ${superseded.map.get(lot_code)}.)`);
   }
 
-  if (lotRanges.size > 1) {
-    const matchedListing = [...lotRanges.entries()].map(([code, r]) => `${code} (${r.name})`).join(", ");
-    notes.push(`(Note: this lot_name search matches ${lotRanges.size} distinct lots, not one -- ${matchedListing}. Treat these as separate lots/vintages unless you intend a cross-vintage comparison; narrow with lot_code for a single lot.)`);
-
-    // deno-lint-ignore no-explicit-any
-    const returnedLots = new Set((data as any[]).map((r) => r.lot_code));
-    if (returnedLots.size < lotRanges.size) {
-      const returnedListing = [...returnedLots].join(", ") || "none";
-      const missingListing = [...lotRanges.keys()].filter((c) => !returnedLots.has(c)).join(", ");
-      notes.push(`(This capped, most-recent-first result only actually CONTAINS rows from: ${returnedListing}. Rows from ${missingListing} matched the same search but were pushed entirely out of the ${cappedLimit}-row window by more recent data from another lot -- pass lot_code to see one specifically, or narrow analysis_type/date range.)`);
+  if (lots.length > 1) {
+    notes.push(`(Note: this ${lot_name ? "lot_name search" : "query"} matches ${lots.length} distinct lots, not one -- ${lots.map((l) => `${l.lot_code} (${l.lot_name})`).join(", ")}. Treat these as separate lots/vintages unless you intend a cross-vintage comparison; narrow with lot_code for a single lot.)`);
+    const returnedLots = new Set(rows.map((r) => r.lot_code));
+    if (returnedLots.size < lots.length) {
+      const missing = lots.filter((l) => !returnedLots.has(l.lot_code)).map((l) => l.lot_code).join(", ");
+      notes.push(`(This capped, most-recent-first result only actually CONTAINS rows from: ${[...returnedLots].join(", ") || "none"}. Rows from ${missing} matched the same search but were pushed entirely out of the ${cappedLimit}-row window by more recent data from another lot -- pass lot_code to see one specifically, or narrow analysis_type/date range.)`);
     }
+    notes.push(`(Per-lot row counts and date ranges, computed in the database over EVERY matching row, not just the rows shown -- ${lots.map((l) => `${l.lot_code}: ${l.n} row(s), ${rangeLabel(l.first_at, l.last_at)}`).join("; ")}.)`);
+  } else if (lots.length === 1) {
+    const [l] = lots;
+    notes.push(`(${l.lot_code} lab-analysis date range across every matching row (${l.n}, computed in the database): ${rangeLabel(l.first_at, l.last_at)}.)`);
+  } else if ((lot_code || lot_name) && total === 0 && rows.length === 0) {
+    // Source selection (Colin 1a): "T-7 V-2" is an ETS ferment sample
+    // (310310429), not an InnoVint lot. Point at the other source before the
+    // model asks the user.
+    const ets: { lab_sample_no: string; sample_description_raw: string; sample_type: string; vintage: number; collected_on: string; n_results: number; analysis_codes: string | null }[] = scope?.ets_samples ?? [];
+    notes.push(ets.length
+      ? `(No InnoVint lot matches ${lot_code ? `lot_code "${lot_code}"` : `lot_name "${lot_name}"`}, but ETS Labs holds ${ets.length} sample(s) this identifier names -- ${ets.map((e) => `${e.lab_sample_no} "${e.sample_description_raw}" (${e.sample_type}, ${e.vintage}, collected ${dayLabel(e.collected_on)}; ${e.n_results} result(s): ${e.analysis_codes ?? "none"})`).join("; ")}. Call ${ets.some((e) => ["berry_maturity", "berry_smoke", "trial_ferment"].includes(e.sample_type)) ? "get_berry_maturity / get_smoke_markers (vineyard samples) or " : ""}get_wine_lab_results with lab_sample_no for these before asking the user.)`
+      : `(No InnoVint lot matches ${lot_code ? `lot_code "${lot_code}"` : `lot_name "${lot_name}"`}, and no ETS Labs sample description or sample number matches it either -- not simulated, genuinely absent in both sources.)`);
+  }
 
-    const rangeListing = [...lotRanges.entries()].map(([code, r]) => `${code}: ${rangeLabel(r.min, r.max)}`).join("; ");
-    notes.push(`(Date ranges (computed from every matching row, not just what's shown above, so this is reliable even where the row cap isn't) -- ${rangeListing}.)`);
-  } else if (lotRanges.size === 1) {
-    const [[code, r]] = lotRanges;
-    notes.push(`(${code} lab-analysis date range across every matching row: ${rangeLabel(r.min, r.max)}.)`);
+  // Temperature variants (Colin 1b): ethanol-20c and ethanol-60f are
+  // different measurements; a request for one must surface the others.
+  if (analysis_type) {
+    const types: { analysis_type: string; n: number }[] = scope?.analysis_types ?? [];
+    const fam = analyteFamily(analysis_type);
+    const siblings = types.filter((t) => t.analysis_type !== analysis_type && analyteFamily(t.analysis_type) === fam);
+    if (siblings.length) {
+      notes.push(`(${total === 0 ? `No "${analysis_type}" rows match, but the` : "The"} same analyte is also on file for ${lots.length || "these"} lot(s) under ${siblings.map((t) => `"${t.analysis_type}" (${temperatureLabel(t.analysis_type)}, ${t.n} row(s))`).join(", ")}; "${analysis_type}" is ${temperatureLabel(analysis_type)}. These are different reference temperatures -- never interchange them; pass analysis_type to see one.)`);
+    }
   }
 
   // Multi-reading disclosure (2026-09-20): lot_analyses genuinely
@@ -598,25 +683,13 @@ async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Pr
   // on one timestamp) and a distinct `actionId` per reading for a
   // same-day-different-submission case (MA22CS's two 2024-05-01
   // panels) -- both real, separate InnoVint records, not a sync
-  // artifact. lot_analyses stores NEITHER field today (confirmed
-  // against ingest-innovint's own InnoVintAnalysis interface, which
-  // never declared them) -- the real fix is syncing one of them, not
-  // built this round (see docs/SECURITY.md for the recommendation).
-  // Until then, a model reading two identical values on one timestamp
-  // can misread it as a duplicate record (and drop one), or divergent
-  // values as measurement inconsistency (and average or pick one) --
-  // neither matches reality. Disclosed explicitly, computed from the
-  // rows actually returned (what the model can see), not the full
-  // scope -- this is about explaining multiplicity already in the
-  // response, not detecting rows hidden by the cap (the separate
-  // concern the scope query above already covers).
-  // deno-lint-ignore no-explicit-any
+  // artifact. lot_analyses stores NEITHER field today. Grouped by the
+  // reading's Pacific calendar date (was the UTC date, which put afternoon
+  // and evening Pacific readings on the next day).
   const multiReadingGroups = new Map<string, { lot: string; type: string; date: string; values: number[] }>();
-  // deno-lint-ignore no-explicit-any
-  for (const r of data as any[]) {
-    const dateKey = String(r.recorded_at).slice(0, 10);
-    const key = `${r.lot_code}|${r.analysis_type}|${dateKey}`;
-    if (!multiReadingGroups.has(key)) multiReadingGroups.set(key, { lot: r.lot_code, type: r.analysis_type, date: dateKey, values: [] });
+  for (const r of rows) {
+    const key = `${r.lot_code}|${r.analysis_type}|${r.recorded_on_pacific}`;
+    if (!multiReadingGroups.has(key)) multiReadingGroups.set(key, { lot: r.lot_code, type: r.analysis_type, date: r.recorded_on_pacific, values: [] });
     multiReadingGroups.get(key)!.values.push(r.value);
   }
   const multiGroups = [...multiReadingGroups.values()].filter((g) => g.values.length > 1);
@@ -625,31 +698,93 @@ async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Pr
     notes.push(`(Note: this result has more than one reading for the same lot/analyte/date in ${multiGroups.length} case(s) -- ${listing}. lot_analyses has no vessel or sample identifier to label these individually (InnoVint's own API exposes one, not yet synced -- see docs/SECURITY.md), but they are CONFIRMED real, separate InnoVint records -- different vessels or different lab submissions, not duplicate rows. Report every value; never average them, and never drop one as a suspected duplicate.)`);
   }
 
-  const truncated = data.length === cappedLimit;
-  if (truncated) {
-    notes.push(`(Returned the maximum ${cappedLimit} rows -- there may be more. Narrow with lot_code, lot_name, analysis_type, or a date range if this doesn't cover what you need.)`);
-  }
+  const changes = lotChanges(rows, multiReadingGroups, truncated);
+  if (changes) notes.push(changes);
 
-  return { content: JSON.stringify(data) + (notes.length ? "\n\n" + notes.join(" ") : ""), isError: false };
+  return { content: JSON.stringify(rows) + "\n\n" + notes.join(" "), isError: false };
+}
+
+const MAX_CHANGE_SERIES = 40;
+
+// First-to-last change per lot and analysis type over the rows returned, in
+// Pacific calendar days. Never averages: a date with several readings (real,
+// separate vessels/submissions) can't be an endpoint of one change, so such a
+// series reports its readings instead of a rate.
+function lotChanges(
+  // deno-lint-ignore no-explicit-any
+  rows: any[],
+  groups: Map<string, { lot: string; type: string; date: string; values: number[] }>,
+  truncated: boolean,
+): string | null {
+  const series = new Map<string, { lot: string; type: string; unit: string | null; dates: string[] }>();
+  for (const g of groups.values()) {
+    const k = `${g.lot}|${g.type}`;
+    if (!series.has(k)) series.set(k, { lot: g.lot, type: g.type, unit: rows.find((r) => r.lot_code === g.lot && r.analysis_type === g.type)?.unit ?? null, dates: [] });
+    series.get(k)!.dates.push(g.date);
+  }
+  const lines: string[] = [];
+  for (const sr of series.values()) {
+    const dates = [...new Set(sr.dates)].sort();
+    if (dates.length < 2) continue;
+    const first = groups.get(`${sr.lot}|${sr.type}|${dates[0]}`)!, last = groups.get(`${sr.lot}|${sr.type}|${dates[dates.length - 1]}`)!;
+    if (first.values.length > 1 || last.values.length > 1) {
+      lines.push(`${sr.lot} ${sr.type}: not computed -- ${first.values.length > 1 ? dayLabel(first.date) : dayLabel(last.date)} has several separate readings (${(first.values.length > 1 ? first : last).values.join(", ")}), so there is no single endpoint; report the readings`);
+      continue;
+    }
+    const pts: Point[] = [{ date: first.date, value: first.values[0] }, { date: last.date, value: last.values[0] }];
+    lines.push(`${sr.lot} ${sr.type}: ${describeChange(pts, sr.unit ?? "", false)}`);
+  }
+  if (!lines.length) return null;
+  const extra = lines.length > MAX_CHANGE_SERIES ? ` (${lines.length - MAX_CHANGE_SERIES} more series not summarised -- narrow the query)` : "";
+  return `(Changes, computed server-side over the rows returned${truncated ? " -- the result is truncated, so a series' true first reading may be earlier than shown" : ""}; quote these, never recompute: ${lines.slice(0, MAX_CHANGE_SERIES).join("; ")}${extra}. A change is not evidence of its cause.)`;
 }
 
 // deno-lint-ignore no-explicit-any
 async function getVessels(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
-  const { vessel_type, current_lot_name, include_archived } = input as {
-    vessel_type?: string; current_lot_name?: string; include_archived?: boolean;
-  };
+  const { include_archived } = input as { include_archived?: boolean };
+  // vessel_type is stored lower case ('Tank' used to return 0 rows). The
+  // gateway's total_count mirrors this filter via vesselFilters().
+  const { vessel_type, current_lot_name } = vesselFilters(input);
 
+  // Fetch up to the scan cap, show VESSEL_LIMIT: the extra rows only count.
   let query = supabase
     .from("vessels")
     .select("vessel_id, code, vessel_type, capacity_gal, volume_gal, current_lot_name, current_lot_code, block_id, archived")
-    .limit(500);
+    .order("code", { ascending: true })
+    .limit(SCAN_CAP);
   if (!include_archived) query = query.eq("archived", false);
   if (vessel_type) query = query.eq("vessel_type", vessel_type);
   if (current_lot_name) query = query.ilike("current_lot_name", `%${current_lot_name}%`);
 
   const { data, error } = await query;
   if (error) return formatErrorForModel(error);
-  return { content: JSON.stringify(data), isError: false };
+  // deno-lint-ignore no-explicit-any
+  const all = data as any[];
+  const shown = all.slice(0, VESSEL_LIMIT);
+  const totalText = all.length >= SCAN_CAP ? `at least ${SCAN_CAP} (the count itself reached the scan cap, so it is incomplete)` : String(all.length);
+  return {
+    content: JSON.stringify(shown) + `\n\n(Result: returned ${shown.length} of ${totalText} matching vessel(s); truncated: ${shown.length < all.length || all.length >= SCAN_CAP}.)`,
+    isError: false,
+  };
+}
+
+const VESSEL_LIMIT = 500;
+
+// PostgREST's db-max-rows (and the MCP adapter's MAX_ROWS): a read with no
+// explicit limit is silently capped here. Every scan that feeds a count or a
+// coverage statement asks for exactly this many rows and reports itself
+// INCOMPLETE if it gets them all, instead of presenting a partial set as
+// exhaustive.
+export const SCAN_CAP = 1000;
+
+export function vesselFilters(input: Record<string, unknown>): { vessel_type?: string; current_lot_name?: string } {
+  return { vessel_type: normLower(input.vessel_type), current_lot_name: normText(input.current_lot_name) };
+}
+
+function scanIncomplete(rows: unknown[] | null | undefined, what: string): string | null {
+  return (rows?.length ?? 0) >= SCAN_CAP
+    ? `(INCOMPLETE: the ${what} scan reached the ${SCAN_CAP}-row cap, so the coverage and counts below may be missing data -- say so; do not present them as complete.)`
+    : null;
 }
 
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -787,10 +922,7 @@ async function getLabourSummary(supabase: any, input: Record<string, unknown>): 
 // month), so this spells the full date out in words rather than
 // reusing monthLabel() at month grain or falling back to a bare ISO
 // string.
-function dayLabel(isoDate: string): string {
-  const [y, m, d] = isoDate.split("-");
-  return `${MONTH_NAMES[Number(m) - 1]} ${Number(d)}, ${y}`;
-}
+// dayLabel() itself now lives in query-rules.ts (shared with the gateway).
 
 // ETS berry-sampling ingestion (2026-09-20): lab_samples/lab_results/
 // berry_volume_histogram are intentionally lossless (a reissued sample's
@@ -820,31 +952,44 @@ const MATURITY_ANALYTE_KEYS = Object.keys(MATURITY_ANALYTE_LABELS);
 
 // deno-lint-ignore no-explicit-any
 async function getBerryMaturity(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
-  const { vintage, block_id } = input as { vintage?: number; block_id?: string };
+  const { vintage } = input as { vintage?: number };
+  // Block ids are stored upper case: 'b2' used to return 0 rows (Colin 2c).
+  const block_id = normUpper(input.block_id);
+  // collected_on is a date: both bounds inclusive. Lets the Changes note cover
+  // exactly the window asked about (the 2026-10-07 replay: asked for Aug 25 ->
+  // Sep 22, the note covered the whole series, and the model -- correctly,
+  // under the answer rules -- would not compute the window itself).
+  const bounds = resolveDateBounds("collected_on", input.start_date, input.end_date, "date");
+  if (bounds.error) return { content: bounds.error, isError: true };
 
+  // lab_sample_no / collected_on_source / collected_on_inferred: provenance
+  // columns added to the view by 20261007120000 (Colin 4).
   let query = supabase
     .from("berry_maturity_by_block")
-    .select("block_id, collected_on, vintage, brix, ph, titratable_acidity, l_malic_acid, glucose_fructose, berry_weight_g, berry_volume_ml, berry_volume_variability_pct, sugar_per_berry_mg")
+    .select(`block_id, collected_on, vintage, ${MATURITY_ANALYTE_KEYS.join(", ")}, lab_sample_no, collected_on_source, collected_on_inferred`)
     .order("block_id", { ascending: true })
-    .order("collected_on", { ascending: true });
+    .order("collected_on", { ascending: true })
+    .limit(SCAN_CAP);
   if (vintage) query = query.eq("vintage", vintage);
   if (block_id) query = query.eq("block_id", block_id);
+  query = applyBounds(query, "collected_on", bounds);
 
   const { data, error } = await query;
   if (error) return formatErrorForModel(error);
 
   // Coverage is computed from an UNFILTERED read of the same view plus
-  // lab_samples_current's sample_type/vintage columns -- both tiny (12
-  // and 17 rows total) -- so the returned note is honest about every
-  // vintage's actual shape regardless of what this call filtered to,
-  // rather than only describing whatever happened to survive the filter.
+  // lab_samples_current's sample_type/vintage columns -- so the returned note
+  // is honest about every vintage's actual shape regardless of what this call
+  // filtered to. Each read asks for SCAN_CAP rows and says so if it hits it.
   const { data: allMaturity, error: allErr } = await supabase
     .from("berry_maturity_by_block")
-    .select("vintage, collected_on, brix, ph, titratable_acidity, l_malic_acid, glucose_fructose, berry_weight_g, berry_volume_ml, berry_volume_variability_pct, sugar_per_berry_mg");
+    .select(`vintage, collected_on, ${MATURITY_ANALYTE_KEYS.join(", ")}`)
+    .limit(SCAN_CAP);
   if (allErr) return formatErrorForModel(allErr);
   const { data: allSamples, error: samplesErr } = await supabase
     .from("lab_samples_current")
-    .select("vintage, sample_type");
+    .select("vintage, sample_type")
+    .limit(SCAN_CAP);
   if (samplesErr) return formatErrorForModel(samplesErr);
 
   const SAMPLE_TYPE_LABEL: Record<string, string> = {
@@ -856,7 +1001,11 @@ async function getBerryMaturity(supabase: any, input: Record<string, unknown>): 
     const rows = (allMaturity as any[]).filter((r) => r.vintage === v);
     if (rows.length === 0) {
       // deno-lint-ignore no-explicit-any
-      const otherTypes = [...new Set((allSamples as any[]).filter((s) => s.vintage === v).map((s) => s.sample_type))];
+      // Vineyard sample types only: winery samples (wine, must, ferment,
+      // stability_trial) share lab_samples_current since the ETS winery
+      // ingest, and were being reported here as "berry sampling ... see
+      // get_smoke_markers" (seen in the 2026-10-07 replay).
+      const otherTypes = [...new Set((allSamples as any[]).filter((s) => s.vintage === v && s.sample_type in SAMPLE_TYPE_LABEL).map((s) => s.sample_type))];
       coverageLines.push(
         otherTypes.length === 0
           ? `${v}: no berry sampling of any kind -- genuinely absent, not simulated.`
@@ -867,15 +1016,49 @@ async function getBerryMaturity(supabase: any, input: Record<string, unknown>): 
     const dates = [...new Set(rows.map((r) => r.collected_on))].sort();
     const present = MATURITY_ANALYTE_KEYS.filter((k) => rows.some((r) => r[k] != null));
     const absent = MATURITY_ANALYTE_KEYS.filter((k) => !present.includes(k));
-    const dateLabel = dates.length === 1 ? dayLabel(dates[0]) : `${dates.length} dates (${dates.map(dayLabel).join(", ")})`;
+    const dateLabel = dates.length === 1 ? `1 collection date (${dayLabel(dates[0])})` : `${dates.length} collection dates (${dates.map(dayLabel).join(", ")})`;
     coverageLines.push(
       absent.length === 0
         ? `${v}: full nine-analyte panel across ${dateLabel}.`
         : `${v}: only ${present.map((k) => MATURITY_ANALYTE_LABELS[k]).join("/")} measured, across ${dateLabel} -- ${absent.map((k) => MATURITY_ANALYTE_LABELS[k]).join(", ")} NOT measured that vintage (absent because a smaller panel ran, not zero or missing entry).`,
     );
   }
-  const note = `\n\nCoverage (all vintages, regardless of this call's filters): ${coverageLines.join(" ")}`;
-  return { content: JSON.stringify(data ?? []) + note, isError: false };
+  const notes = [
+    scanIncomplete(data, "result"), scanIncomplete(allMaturity, "coverage"), scanIncomplete(allSamples, "sample"),
+    `(Source: ETS Labs berry-maturity samples. ${bounds.label} Result: ${(data ?? []).length} block/date row(s); truncated: ${(data ?? []).length >= SCAN_CAP}. lab_sample_no is the ETS sample number; collected_on_inferred=true means the collection date was inferred from the lab's receipt date, not recorded -- say so when quoting it.)`,
+    `Coverage (all vintages, regardless of this call's filters, computed from the data on this call): ${coverageLines.join(" ")}`,
+    berryChanges(data ?? []),
+  ].filter(Boolean);
+  return { content: JSON.stringify(data ?? []) + "\n\n" + notes.join(" "), isError: false };
+}
+
+const MATURITY_UNITS: Record<string, string> = {
+  brix: "Brix", ph: "", titratable_acidity: "g/L", l_malic_acid: "g/L", glucose_fructose: "g/L",
+  berry_weight_g: "g", berry_volume_ml: "mL", berry_volume_variability_pct: "%", sugar_per_berry_mg: "mg",
+};
+
+// Per block and vintage, per analyte: first to last collection date, change
+// per day, and every step between consecutive dates (Colin 5: 2.4 Brix over
+// 28 days was reported as ~0.3/day; correct 0.086/day).
+// deno-lint-ignore no-explicit-any
+function berryChanges(rows: any[]): string | null {
+  const groups = new Map<string, typeof rows>();
+  for (const r of rows) {
+    const k = `${r.block_id} ${r.vintage}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k)!.push(r);
+  }
+  const lines: string[] = [];
+  for (const [k, rs] of groups) {
+    for (const key of MATURITY_ANALYTE_KEYS) {
+      const pts: Point[] = rs.filter((r) => r[key] != null).map((r) => ({ date: r.collected_on, value: Number(r[key]) }));
+      const d = describeChange(pts, MATURITY_UNITS[key]);
+      if (d) lines.push(`${k} ${MATURITY_ANALYTE_LABELS[key]}: ${d}`);
+    }
+  }
+  return lines.length
+    ? `(Changes, computed server-side -- quote these, never recompute: ${lines.join("; ")}. Inferred collection dates make the day counts approximate. A change is not evidence of its cause.)`
+    : null;
 }
 
 // The nine free volatile phenols (both ETS method-string variants
@@ -904,7 +1087,10 @@ const SMOKE_ANALYSIS_CODES = [
 
 // deno-lint-ignore no-explicit-any
 async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
-  const { vintage, block_id } = input as { vintage?: number; block_id?: string };
+  const { vintage } = input as { vintage?: number };
+  // Stored upper case: 'b2' used to return 0 rows against 30 for 'B2' (Colin 2c).
+  const block_id = normUpper(input.block_id);
+  const lab_sample_no = normUpper(input.lab_sample_no);
 
   // Samples first (not lab_results_current directly): lab_results_current
   // carries no block_id/vintage/collected_on of its own (it's `select
@@ -915,9 +1101,11 @@ async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): P
   // instead, against sample ids resolved from lab_samples_current.
   let sampleQuery = supabase
     .from("lab_samples_current")
-    .select("id, lab_sample_no, sample_description_raw, sample_type, block_id, vintage, collected_on");
+    .select("id, lab_sample_no, sample_description_raw, sample_type, block_id, vintage, collected_on, collected_on_source")
+    .limit(SCAN_CAP);
   if (vintage) sampleQuery = sampleQuery.eq("vintage", vintage);
   if (block_id) sampleQuery = sampleQuery.eq("block_id", block_id);
+  if (lab_sample_no) sampleQuery = sampleQuery.eq("lab_sample_no", lab_sample_no);
   const { data: samples, error: sampleErr } = await sampleQuery;
   if (sampleErr) return formatErrorForModel(sampleErr);
 
@@ -926,13 +1114,16 @@ async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): P
   const sampleIds = [...sampleById.keys()];
 
   let rows: unknown[] = [];
+  let resultsScan: unknown[] = [];
   if (sampleIds.length > 0) {
     const { data: results, error: resultsErr } = await supabase
       .from("lab_results_current")
       .select("sample_id, analysis_name_raw, analysis_code, result_raw, result_numeric, result_operator, units, analyzed_at")
       .in("sample_id", sampleIds)
-      .in("analysis_code", SMOKE_ANALYSIS_CODES);
+      .in("analysis_code", SMOKE_ANALYSIS_CODES)
+      .limit(SCAN_CAP);
     if (resultsErr) return formatErrorForModel(resultsErr);
+    resultsScan = results;
     // deno-lint-ignore no-explicit-any
     rows = (results as any[]).map((r) => {
       const s = sampleById.get(r.sample_id);
@@ -940,6 +1131,8 @@ async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): P
         block_id: s?.block_id ?? null,
         vintage: s?.vintage,
         collected_on: s?.collected_on,
+        collected_on_source: s?.collected_on_source,
+        collected_on_inferred: s?.collected_on_source === "inferred_from_receipt",
         lab_sample_no: s?.lab_sample_no,
         sample_description: s?.sample_description_raw,
         analysis_name_raw: r.analysis_name_raw,
@@ -953,13 +1146,13 @@ async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): P
     });
   }
 
-  // Coverage: unfiltered read of every sample this table has ever seen
-  // (17 rows total via lab_samples_current), so the note is honest about
-  // every vintage's smoke-screening status regardless of this call's own
-  // vintage/block_id filters.
+  // Coverage: unfiltered read of every current sample, so the note is
+  // honest about every vintage's smoke-screening status regardless of this
+  // call's own filters; reported INCOMPLETE if it ever reaches the cap.
   const { data: allSamples, error: allSamplesErr } = await supabase
     .from("lab_samples_current")
-    .select("vintage, block_id, collected_on, sample_type, sample_description_raw");
+    .select("vintage, block_id, collected_on, sample_type, sample_description_raw")
+    .limit(SCAN_CAP);
   if (allSamplesErr) return formatErrorForModel(allSamplesErr);
   const coverageLines: string[] = [];
   for (const v of allVintages()) {
@@ -974,71 +1167,91 @@ async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): P
     );
     coverageLines.push(`${v}: ${parts.join(", ")}.`);
   }
-  const note = `\n\nCoverage (all vintages, regardless of this call's filters): ${coverageLines.join(" ")} Units are basis-specific (µg/kg = berry mass, µg/L = liquid/juice) and are never interchangeable -- always read the units field on each row.`;
-  return { content: JSON.stringify(rows) + note, isError: false };
+  const notes = [
+    scanIncomplete(samples, "sample"), scanIncomplete(resultsScan, "result"), scanIncomplete(allSamples, "coverage"),
+    `(Source: ETS Labs smoke-marker results. Result: ${rows.length} row(s) from ${sampleIds.length} sample(s); truncated: ${resultsScan.length >= SCAN_CAP}.${lab_sample_no && sampleIds.length === 0 ? ` No sample ${lab_sample_no} with these filters -- if it is a berry-maturity or winery sample, use get_berry_maturity or get_wine_lab_results.` : ""})`,
+    `Coverage (all vintages, regardless of this call's filters, computed from the data on this call): ${coverageLines.join(" ")} Units are basis-specific (µg/kg = berry mass, µg/L = liquid/juice) and are never interchangeable -- always read the units field on each row.`,
+  ].filter(Boolean);
+  return { content: JSON.stringify(rows) + "\n\n" + notes.join(" "), isError: false };
 }
-
-const WINERY_SAMPLE_TYPES = ["must", "wine", "ferment", "stability_trial"];
 
 // ETS winery ingestion (2026-09-20): lab_samples/lab_results are the same
 // lossless base tables Phase 1's berry tools already guard against --
-// this tool reads lab_samples_current/lab_results_current for the exact
-// same reason (superseded reissue rows must never resurface). Never
-// gated by real-only mode, same reasoning as the berry tools: no
-// simulated counterpart has ever existed for ETS lab data.
+// this tool reads lab_samples_current/lab_results_current (through
+// chat_ets_winery_scope, which lists the winery sample types) for the exact
+// same reason: superseded reissue rows must never resurface. Never gated by
+// real-only mode, same reasoning as the berry tools: no simulated
+// counterpart has ever existed for ETS lab data.
 //
 // sample_description is a KNOWN substring-collision risk in this exact
 // dataset -- confirmed live: 'MA22CS' is a literal substring of
 // 'MA22CSV2'/'MA22CSV3', and all three are vintage 2022, so `vintage`
-// does NOT disambiguate the way it might look like it should. This is
-// the same class of bug get_lot_analyses had (confirmed live there
-// too, docs/SECURITY.md) -- fixed here from the start rather than
-// discovered later: every matching sample_description_raw is computed
-// from the full (uncapped -- this dataset is 25 samples/93 rows total,
-// nowhere near any row limit) sample set, not from whatever survives
-// the results row cap, and reported explicitly whenever a search
-// matches more than one.
+// does NOT disambiguate. Every matching sample_description_raw comes from
+// the full sample set (one jsonb value from the database, no row cap), never
+// from whatever survives the results row cap, and is reported explicitly
+// whenever a search matches more than one. lot_code and lab_sample_no
+// (2026-10-07) are the exact alternatives.
 // deno-lint-ignore no-explicit-any
 async function getWineLabResults(supabase: any, input: Record<string, unknown>): Promise<ToolResult> {
-  const { sample_description, vintage, sample_type, analysis_code, start_date, end_date, limit } = input as {
-    sample_description?: string; vintage?: number; sample_type?: string; analysis_code?: string;
-    start_date?: string; end_date?: string; limit?: number;
-  };
+  const { vintage, sample_type, limit } = input as { vintage?: number; sample_type?: string; limit?: number };
+  const sample_description = normText(input.sample_description);
+  // Sample numbers and lot codes are stored upper case, analysis codes lower
+  // case (verified 2026-10-07); 'Ethanol_At_20C' used to return 0 rows.
+  const lab_sample_no = normUpper(input.lab_sample_no);
+  const lot_code = normUpper(input.lot_code);
+  const analysis_code = normLower(input.analysis_code);
   const cappedLimit = Math.min(limit && limit > 0 ? limit : 100, 300);
+  // ETS analyzed_at is the lab's wall-clock time marked +00, so a bare date
+  // is [D 00:00Z, D+1 00:00Z) -- the lab's own calendar day.
+  const bounds = resolveDateBounds("analyzed_at", input.start_date, input.end_date, "wallclock");
+  if (bounds.error) return { content: bounds.error, isError: true };
 
-  let sampleQuery = supabase
-    .from("lab_samples_current")
-    .select("id, lab_sample_no, sample_description_raw, sample_type, vintage, collected_on, fruit_source")
-    .in("sample_type", sample_type ? [sample_type] : WINERY_SAMPLE_TYPES);
-  if (sample_description) sampleQuery = sampleQuery.ilike("sample_description_raw", `%${sample_description}%`);
-  if (vintage) sampleQuery = sampleQuery.eq("vintage", vintage);
-  const { data: samples, error: sampleErr } = await sampleQuery;
-  if (sampleErr) return formatErrorForModel(sampleErr);
+  // The full match set, in one jsonb value from the database (20261007120000):
+  // matching samples, the exact result total, and every analysis_code on file
+  // for them. The display query below fetches results for exactly these
+  // sample ids, so display and coverage can never disagree.
+  const { data: scope, error: scopeErr } = await supabase.rpc("chat_ets_winery_scope", {
+    p_sample_type: sample_type ?? null,
+    p_description: sample_description ?? null,
+    p_lab_sample_no: lab_sample_no ?? null,
+    p_lot_code: lot_code ?? null,
+    p_vintage: vintage ?? null,
+    p_analysis_code: analysis_code ?? null,
+    p_start: bounds.gte ?? null,
+    p_end_exclusive: bounds.lt ?? null,
+    p_end_inclusive: bounds.lte ?? null,
+  });
+  if (scopeErr) return formatErrorForModel(scopeErr);
+  const samples: { id: number; lab_sample_no: string; sample_description_raw: string; sample_type: string; vintage: number; collected_on: string; collected_on_source: string; fruit_source: string | null }[] = scope?.samples ?? [];
+  const total = Number(scope?.total ?? 0);
 
-  // deno-lint-ignore no-explicit-any
-  const sampleById = new Map((samples as any[]).map((s) => [s.id, s]));
+  const sampleById = new Map(samples.map((s) => [s.id, s]));
   const sampleIds = [...sampleById.keys()];
 
-  let rows: unknown[] = [];
-  if (sampleIds.length > 0) {
-    let resultQuery = supabase
+  // deno-lint-ignore no-explicit-any
+  const fetchResults = async (codes: string[] | null, max: number): Promise<{ data?: any[]; error?: { message: string } }> => {
+    let q = supabase
       .from("lab_results_current")
       .select("id, sample_id, analysis_name_raw, analysis_code, result_raw, result_numeric, result_operator, units, analyzed_at")
       .in("sample_id", sampleIds)
       .order("analyzed_at", { ascending: false })
-      .limit(cappedLimit);
-    if (analysis_code) resultQuery = resultQuery.eq("analysis_code", analysis_code);
-    if (start_date) resultQuery = resultQuery.gte("analyzed_at", start_date);
-    if (end_date) resultQuery = resultQuery.lte("analyzed_at", end_date);
+      .limit(max);
+    if (codes) q = q.in("analysis_code", codes);
+    q = applyBounds(q, "analyzed_at", bounds);
+    const { data, error } = await q;
+    return error ? { error } : { data };
+  };
 
-    const { data: results, error: resultsErr } = await resultQuery;
-    if (resultsErr) return formatErrorForModel(resultsErr);
+  let rows: Record<string, unknown>[] = [];
+  if (sampleIds.length > 0) {
+    const fetched = await fetchResults(analysis_code ? [analysis_code] : null, cappedLimit);
+    if (fetched.error) return formatErrorForModel(fetched.error);
+    const results = fetched.data!;
 
     // Reconciliation status per result row -- the "flag overlaps" surface
     // the owner chose over skipping duplicated analytes. Fetched by id
     // (the view's own lab_result_id), not re-derived here.
-    // deno-lint-ignore no-explicit-any
-    const resultIds = (results as any[]).map((r) => r.id);
+    const resultIds = results.map((r) => r.id);
     const reconById = new Map<number, { status: string; lot: string | null; value: number | null }>();
     if (resultIds.length > 0) {
       const { data: recon, error: reconErr } = await supabase
@@ -1052,8 +1265,7 @@ async function getWineLabResults(supabase: any, input: Record<string, unknown>):
       }
     }
 
-    // deno-lint-ignore no-explicit-any
-    rows = (results as any[]).map((r) => {
+    rows = results.map((r) => {
       const s = sampleById.get(r.sample_id);
       const recon = reconById.get(r.id);
       return {
@@ -1061,6 +1273,8 @@ async function getWineLabResults(supabase: any, input: Record<string, unknown>):
         sample_type: s?.sample_type,
         vintage: s?.vintage,
         collected_on: s?.collected_on,
+        collected_on_source: s?.collected_on_source,
+        collected_on_inferred: s?.collected_on_source === "inferred_from_receipt",
         fruit_source: s?.fruit_source,
         lab_sample_no: s?.lab_sample_no,
         analysis_name_raw: r.analysis_name_raw,
@@ -1077,37 +1291,105 @@ async function getWineLabResults(supabase: any, input: Record<string, unknown>):
     });
   }
 
-  const notes: string[] = [];
+  const truncated = rows.length < total;
+  const notes: string[] = [
+    `(Source: ETS Labs winery samples. ${bounds.label} Result: returned ${rows.length} of ${total} matching result(s), most recent first; truncated: ${truncated}${truncated ? " -- narrow with lab_sample_no, lot_code, analysis_code or a date range, or raise limit (max 300)" : ""}.)`,
+  ];
+
+  const searched = [
+    lab_sample_no && `lab_sample_no "${lab_sample_no}"`, lot_code && `lot_code "${lot_code}"`,
+    sample_description && `sample_description "${sample_description}"`, vintage && `vintage ${vintage}`, sample_type && `sample_type ${sample_type}`,
+  ].filter(Boolean).join(", ");
 
   // Precomputed per-description date range (dayLabel()-formatted, in
-  // words) -- same "don't let the model derive a range from a row set
-  // it can't fully see" fix as get_lot_analyses, applied from the start
-  // rather than discovered as a live bug.
-  const byDescription = new Map<string, { type: string; vintage: number; dates: string[] }>();
-  // deno-lint-ignore no-explicit-any
-  for (const s of samples as any[]) {
+  // words) over EVERY matching sample -- the sample set comes from the
+  // database in full, never from the capped result rows.
+  const byDescription = new Map<string, { type: string; vintage: number; dates: string[]; nos: string[] }>();
+  for (const s of samples) {
     const key = s.sample_description_raw;
-    if (!byDescription.has(key)) byDescription.set(key, { type: s.sample_type, vintage: s.vintage, dates: [] });
+    if (!byDescription.has(key)) byDescription.set(key, { type: s.sample_type, vintage: s.vintage, dates: [], nos: [] });
     byDescription.get(key)!.dates.push(s.collected_on);
+    byDescription.get(key)!.nos.push(s.lab_sample_no);
   }
   if (byDescription.size === 0) {
-    notes.push(`(No winery samples match this search${sample_description ? ` for sample_description "${sample_description}"` : ""}${vintage ? ` in ${vintage}` : ""} -- not simulated, genuinely absent for this scope.)`);
+    // Source selection: point at the other tool/source before the model asks
+    // the user (Colin 1a).
+    const vineyard: { lab_sample_no: string; sample_description_raw: string; sample_type: string; block_id: string | null; vintage: number; collected_on: string }[] = scope?.vineyard_samples ?? [];
+    const lots: { lot_code: string; lot_name: string; n: number; first_at: string; last_at: string }[] = scope?.innovint_lots ?? [];
+    const pointers: string[] = [];
+    if (vineyard.length) {
+      pointers.push(`ETS vineyard sample(s) match: ${vineyard.map((v) => `${v.lab_sample_no} "${v.sample_description_raw}" (${v.sample_type}, ${v.block_id ?? "block unresolved"}, ${v.vintage}, ${dayLabel(v.collected_on)})`).join("; ")} -- call ${vineyard.some((v) => v.sample_type === "berry_maturity") ? "get_berry_maturity" : ""}${vineyard.some((v) => v.sample_type === "berry_maturity") && vineyard.some((v) => v.sample_type !== "berry_maturity") ? " / " : ""}${vineyard.some((v) => v.sample_type !== "berry_maturity") ? "get_smoke_markers" : ""} for them`);
+    }
+    if (lots.length) {
+      pointers.push(`InnoVint lot(s) match: ${lots.map((l) => `${l.lot_code} (${l.lot_name}, ${l.n} analyses, ${dayLabel(pacificDate(l.first_at))} through ${dayLabel(pacificDate(l.last_at))})`).join("; ")} -- call get_lot_analyses with lot_code for InnoVint's own analyses`);
+    }
+    notes.push(pointers.length
+      ? `(No ETS winery sample matches ${searched || "this search"}. ${pointers.join(". ")}. Do this before asking the user.)`
+      : `(No winery samples match this search${searched ? ` for ${searched}` : ""}, and no ETS vineyard sample or InnoVint lot matches it either -- not simulated, genuinely absent for this scope.)`);
   } else {
     const lines = [...byDescription.entries()].map(([desc, d]) => {
       const sorted = [...new Set(d.dates)].sort();
       const range = sorted.length === 1 ? dayLabel(sorted[0]) : `${dayLabel(sorted[0])} through ${dayLabel(sorted[sorted.length - 1])}`;
-      return `${desc} (${d.type}, ${d.vintage}): ${range}`;
+      return `${desc} (${d.type}, ${d.vintage}; sample(s) ${d.nos.join(", ")}): ${range}`;
     });
     if (byDescription.size > 1) {
-      notes.push(`(Note: this search matches ${byDescription.size} distinct sample_description values, not one -- ${[...byDescription.keys()].join(", ")}. Treat these as separate lots unless a cross-lot comparison is intended.)`);
+      notes.push(`(Note: this search matches ${byDescription.size} distinct sample_description values, not one -- ${[...byDescription.keys()].join(", ")}. Treat these as separate lots unless a cross-lot comparison is intended; pass lot_code or lab_sample_no for one.)`);
     }
-    notes.push(`(Date coverage per matched lot, computed from every matching sample, not just the rows shown -- ${lines.join("; ")}.)`);
+    notes.push(`(Collection-date coverage per matched lot, computed in the database over every matching sample, not just the rows shown -- ${lines.join("; ")}.)`);
   }
 
-  const truncated = rows.length === cappedLimit;
-  if (truncated) {
-    notes.push(`(Returned the maximum ${cappedLimit} rows -- there may be more. Narrow with sample_description, analysis_code, or a date range if this doesn't cover what you need.)`);
+  // Temperature variants (Colin 1b): ethanol_at_20c and ethanol_at_60f are
+  // both on file for 602250939; a request for one must surface the other,
+  // with its values, so a model never reports one as "the" ethanol.
+  const codes: { analysis_code: string; n: number }[] = scope?.analysis_codes ?? [];
+  if (analysis_code && sampleIds.length > 0) {
+    const fam = analyteFamily(analysis_code);
+    const siblings = codes.filter((c) => c.analysis_code !== analysis_code && analyteFamily(c.analysis_code) === fam);
+    if (siblings.length) {
+      const sib = await fetchResults(siblings.map((c) => c.analysis_code), VARIANT_ROWS);
+      if (sib.error) return formatErrorForModel(sib.error);
+      const values = sib.data!.map((r) => `${sampleById.get(r.sample_id)?.lab_sample_no} ${sampleById.get(r.sample_id)?.sample_description_raw}: ${r.analysis_name_raw} ${r.result_operator === "<" ? "< " : ""}${r.result_raw} ${r.units ?? ""}`.trim());
+      notes.push(`(${total === 0 ? `No "${analysis_code}" results match, but the` : "The"} same analyte is also on file for these samples at another reference temperature: ${siblings.map((c) => `${c.analysis_code} (${temperatureLabel(c.analysis_code)}, ${c.n} result(s))`).join(", ")}; ${analysis_code} is ${temperatureLabel(analysis_code)}. Values: ${values.join("; ")}${sib.data!.length >= VARIANT_ROWS ? ` (first ${VARIANT_ROWS} shown)` : ""}. Different reference temperatures -- report each with its own label, never interchange them.)`);
+    } else if (total === 0 && codes.length) {
+      notes.push(`(analysis_code "${analysis_code}" matches nothing for these samples. Codes on file for them: ${codes.map((c) => c.analysis_code).join(", ")}.)`);
+    }
   }
 
-  return { content: JSON.stringify(rows) + (notes.length ? "\n\n" + notes.join(" ") : ""), isError: false };
+  const changes = wineChanges(rows, truncated);
+  if (changes) notes.push(changes);
+
+  return { content: JSON.stringify(rows) + "\n\n" + notes.join(" "), isError: false };
+}
+
+const VARIANT_ROWS = 50;
+
+// Per lot (sample_description) and analysis_code over the rows returned,
+// by collection date. Censored '<' and text-only results are left out (and
+// counted); a date with more than one sample has no single endpoint.
+function wineChanges(rows: Record<string, unknown>[], truncated: boolean): string | null {
+  const series = new Map<string, { desc: string; code: string; units: string; byDate: Map<string, number[]>; censored: number }>();
+  for (const r of rows) {
+    const k = `${r.sample_description}|${r.analysis_code}`;
+    if (!series.has(k)) series.set(k, { desc: String(r.sample_description), code: String(r.analysis_code), units: String(r.units ?? ""), byDate: new Map(), censored: 0 });
+    const sr = series.get(k)!;
+    if (r.result_operator !== "=" || r.result_numeric == null) { sr.censored++; continue; }
+    const d = String(r.collected_on);
+    if (!sr.byDate.has(d)) sr.byDate.set(d, []);
+    sr.byDate.get(d)!.push(Number(r.result_numeric));
+  }
+  const lines: string[] = [];
+  for (const sr of series.values()) {
+    const dates = [...sr.byDate.keys()].sort();
+    if (dates.length < 2) continue;
+    const multi = dates.filter((d) => sr.byDate.get(d)!.length > 1);
+    if (multi.length) {
+      lines.push(`${sr.desc} ${sr.code}: not computed -- ${multi.map(dayLabel).join(", ")} ha${multi.length === 1 ? "s" : "ve"} several samples; report them individually`);
+      continue;
+    }
+    const d = describeChange(dates.map((date) => ({ date, value: sr.byDate.get(date)![0] })), sr.units);
+    lines.push(`${sr.desc} ${sr.code}: ${d}${sr.censored ? ` (${sr.censored} censored or text-only result(s) left out)` : ""}`);
+  }
+  if (!lines.length) return null;
+  const extra = lines.length > MAX_CHANGE_SERIES ? ` (${lines.length - MAX_CHANGE_SERIES} more series not summarised -- narrow the query)` : "";
+  return `(Changes by collection date, computed server-side over the rows returned${truncated ? " -- the result is truncated, so a series may start earlier than shown" : ""}; quote these, never recompute: ${lines.slice(0, MAX_CHANGE_SERIES).join("; ")}${extra}. A change is not evidence of its cause.)`;
 }

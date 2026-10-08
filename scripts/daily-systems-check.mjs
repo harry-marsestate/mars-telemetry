@@ -38,11 +38,14 @@ const SEV_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
 const KNOWN_ISSUES = { 'source.anthropic.model': 'known: Anthropic key pending replacement' };
 // Items that are structurally not checkable; anything else becoming NOT CHECKABLE turns the report YELLOW.
 const EXPECTED_UNCHECKABLE = new Set(['spot.soil_b2']);
-// Lab field lists recorded 2026-09-30; a change is schema drift.
+// Lab field lists recorded 2026-09-30, plus the provenance fields added
+// deliberately on 2026-10-07 (docs/SECURITY.md, "Chat tool findings"):
+// lab_sample_no / collected_on_source / collected_on_inferred. Any other change
+// is schema drift.
 const LAB_FIELDS = {
-  get_berry_maturity: ['berry_volume_ml', 'berry_volume_variability_pct', 'berry_weight_g', 'block_id', 'brix', 'collected_on', 'glucose_fructose', 'l_malic_acid', 'ph', 'sugar_per_berry_mg', 'titratable_acidity', 'vintage'],
-  get_smoke_markers: ['analysis_code', 'analysis_name_raw', 'analyzed_at', 'block_id', 'collected_on', 'lab_sample_no', 'result_numeric', 'result_operator', 'result_raw', 'sample_description', 'units', 'vintage'],
-  get_wine_lab_results: ['analysis_code', 'analysis_name_raw', 'analyzed_at', 'collected_on', 'fruit_source', 'lab_sample_no', 'lot_analyses_lot_code', 'lot_analyses_match', 'lot_analyses_value', 'result_numeric', 'result_operator', 'result_raw', 'sample_description', 'sample_type', 'units', 'vintage'],
+  get_berry_maturity: ['berry_volume_ml', 'berry_volume_variability_pct', 'berry_weight_g', 'block_id', 'brix', 'collected_on', 'collected_on_inferred', 'collected_on_source', 'glucose_fructose', 'l_malic_acid', 'lab_sample_no', 'ph', 'sugar_per_berry_mg', 'titratable_acidity', 'vintage'],
+  get_smoke_markers: ['analysis_code', 'analysis_name_raw', 'analyzed_at', 'block_id', 'collected_on', 'collected_on_inferred', 'collected_on_source', 'lab_sample_no', 'result_numeric', 'result_operator', 'result_raw', 'sample_description', 'units', 'vintage'],
+  get_wine_lab_results: ['analysis_code', 'analysis_name_raw', 'analyzed_at', 'collected_on', 'collected_on_inferred', 'collected_on_source', 'fruit_source', 'lab_sample_no', 'lot_analyses_lot_code', 'lot_analyses_match', 'lot_analyses_value', 'result_numeric', 'result_operator', 'result_raw', 'sample_description', 'sample_type', 'units', 'vintage'],
 };
 
 // ---------- args ----------

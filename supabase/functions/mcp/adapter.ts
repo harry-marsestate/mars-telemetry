@@ -51,7 +51,7 @@ const SELECT_ITEM = /^([a-z_][a-z0-9_]*)(?:::([a-z_][a-z0-9_ ]*))?$/;
 const CATALOG_TYPE = /^[a-z_][a-z0-9_ ]*(\(\d+(,\d+)?\))?(\[\])?$/;
 
 type Filter =
-  | { op: "eq" | "gte" | "lte"; col: string; value: unknown }
+  | { op: "eq" | "gte" | "lt" | "lte"; col: string; value: unknown }
   | { op: "ilike"; col: string; value: string }
   | { op: "in"; col: string; values: unknown[] }
   | { op: "not_in"; col: string; values: string[] };
@@ -118,6 +118,7 @@ class SelectBuilder implements PromiseLike<PgrstResult> {
   }
   eq(col: string, value: unknown): this { this.filters.push({ op: "eq", col, value }); return this; }
   gte(col: string, value: unknown): this { this.filters.push({ op: "gte", col, value }); return this; }
+  lt(col: string, value: unknown): this { this.filters.push({ op: "lt", col, value }); return this; }
   lte(col: string, value: unknown): this { this.filters.push({ op: "lte", col, value }); return this; }
   ilike(col: string, pattern: string): this { this.filters.push({ op: "ilike", col, value: pattern }); return this; }
   in(col: string, values: unknown[]): this { this.filters.push({ op: "in", col, values }); return this; }
@@ -164,6 +165,7 @@ class SelectBuilder implements PromiseLike<PgrstResult> {
         switch (f.op) {
           case "eq": return `${c} = ${p(String(f.value))}::${typeOf(f.col)}`;
           case "gte": return `${c} >= ${p(String(f.value))}::${typeOf(f.col)}`;
+          case "lt": return `${c} < ${p(String(f.value))}::${typeOf(f.col)}`;
           case "lte": return `${c} <= ${p(String(f.value))}::${typeOf(f.col)}`;
           case "ilike": typeOf(f.col); return `${c} ilike ${p(f.value.replace(/\*/g, "%"))}`;
           case "in": return `${c} = any(${p(f.values.map(String))}::${typeOf(f.col)}[])`;
@@ -215,11 +217,22 @@ const SET_RPCS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   anomalies_eval: { p_vintage: "integer", p_as_of: "timestamptz", p_tab: "text" },
 };
 
-// Scalar (jsonb-returning) RPCs: the three gateway health functions.
+// Scalar (jsonb-returning) RPCs: the three gateway health functions, and the
+// two chat-tool scope functions (20261007120000: get_lot_analyses' and
+// get_wine_lab_results' full match sets, counts and date ranges as one value,
+// so no row cap applies).
 const SCALAR_RPCS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   health_system_status: {},
   health_history: { p_days: "integer" },
   health_baselines: {},
+  chat_lot_analyses_scope: {
+    p_lot_code: "text", p_lot_name: "text", p_analysis_type: "text",
+    p_start: "timestamptz", p_end_exclusive: "timestamptz", p_end_inclusive: "timestamptz",
+  },
+  chat_ets_winery_scope: {
+    p_sample_type: "text", p_description: "text", p_lab_sample_no: "text", p_lot_code: "text", p_vintage: "integer",
+    p_analysis_code: "text", p_start: "timestamptz", p_end_exclusive: "timestamptz", p_end_inclusive: "timestamptz",
+  },
 };
 
 export class PostgrestAdapter {

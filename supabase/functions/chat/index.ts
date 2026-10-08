@@ -5,6 +5,7 @@ import { DomainReality, fetchDomainReality, runTool, TOOLS } from "./tools.ts";
 import { callerProfile, resolveDisplayName } from "./profile.ts";
 import { callKimi, KIMI_MODEL } from "./kimi.ts";
 import { vintageContext } from "../_shared/vintage.ts";
+import { ANSWER_RULES } from "./query-rules.ts";
 
 // RAG chat for Mars Estate/Mars Telemetry. ctx.supabase is RLS-scoped to the
 // caller's own JWT for every tool call -- deliberately never ctx.supabaseAdmin,
@@ -596,7 +597,11 @@ Always structure your answer in three parts, in this order:
 
 When discussing climate, soil, or farming metrics, connect them to what they plausibly mean for the resulting wine -- ripening pace, acid and tannin development, canopy stress, disease pressure, expected style -- not just the numbers themselves. For customers, this connection should be a substantial part of the answer, not an afterthought; they're asking about their wine, not a weather report. Always ground this in the specific data returned -- describe tendencies the conditions suggest, not a definitive claim about how the finished wine tastes, and never invent tasting notes not supportable by the data.
 
-You only ever know what your tools return. If a tool returns no data for a question, say so plainly and suggest a nearby question that might have an answer, rather than guessing or filling the gap with something plausible-sounding. Never state a number, date, or finding that didn't come from a tool call.
+You only ever know what your tools return. If a tool returns no data for a question, say so plainly and suggest a nearby question that might have an answer, rather than guessing or filling the gap with something plausible-sounding. Never state a number, date, or finding that didn't come from a tool call -- and a number you derive yourself (a rate, difference, average or total) did not come from a tool call.
+
+${ANSWER_RULES}
+
+Connecting conditions to what they plausibly mean for the wine (above) is a statement about tendencies going forward; it is never licence to explain WHY a measured value changed.
 
 - Never answer general knowledge questions unrelated to Mars Estate.
 - Never use your own training knowledge to answer a question you could instead answer via a tool -- always call a tool first.

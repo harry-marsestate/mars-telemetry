@@ -8570,17 +8570,22 @@ Brix week was Sep 8-15. That is what the proposed check below would catch.
 - **`lot_analyses` vessel/submission id:** still not synced (the existing entry's
   recommendation stands). Same-date readings stay unlabelled and are excluded
   from rates rather than averaged.
-- **RLS on `lot_analyses` and `vessels` is on in production but no migration
-  enables it** (Supabase's automatic RLS on create). P1
-  `security.rls.enabled_on_every_table` guards it live. A one-line migration
-  would make a database rebuilt from migrations safe; left for a decision.
+- **RLS on `lot_analyses` and `vessels`:** on in production (Supabase enabled it
+  on create) but never stated in a migration. A database rebuilt from migrations
+  would have the operator-only policies with RLS off, so any authenticated user
+  could read both tables. Fixed by migration `20261007130000` (ENABLE only, not
+  FORCE, which matches production and is a no-op there). Test:
+  `tests/lot-vessels-rls-sql.test.mjs`, which shows a customer reading both
+  tables before it and nothing after.
 - **`get_series` per-day rates over sub-day spans** are extrapolated (e.g.
   "-1.48/day over 0.75 days"); stated with the span so the scope is visible.
 
 ### After approval (owner)
 
-1. `supabase migration list` and `db push --dry-run` must list only
-   `20261007120000`; then `supabase db push`.
+1. `supabase migration list` and `db push --dry-run` must list exactly
+   `20261007120000` and `20261007130000`; then `supabase db push`. Before and
+   after, `pg_class.relrowsecurity` for `lot_analyses`/`vessels` must be `true`
+   (no change expected from `20261007130000`).
 2. P1 `security.mcp_reader.grants` will fail once: the column-privilege hash
    changes because `berry_maturity_by_block` gained three columns. Re-run
    `check-mcp-boundaries` and re-baseline (`system_health.set_baseline`) guarded

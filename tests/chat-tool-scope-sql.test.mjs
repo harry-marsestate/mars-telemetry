@@ -85,10 +85,9 @@ before(async () => {
   // InnoVint lot tables and RLS.
   await db.exec(between(lv, "create table lot_analyses (", "-- One row per InnoVint vessel"));
   await db.exec(between(migration("20260811231659_lot_names.sql"), "alter table lot_analyses add column", ";") + ";");
-  // RLS is ON for lot_analyses in production (pg_class.relrowsecurity, checked
-  // 2026-10-07) but no migration says so -- Supabase enabled it on create. Its
-  // policy above only means something with it on, so mirror production here.
-  await db.exec("alter table lot_analyses enable row level security;");
+  // RLS on lot_analyses: on in production, stated in a migration only since
+  // 20261007130000 (Supabase had enabled it on create). vessels isn't built here.
+  await db.exec(migration("20261007130000_lot_analyses_vessels_rls.sql").replace("alter table public.vessels enable row level security;", ""));
   await db.exec(between(migration("20260920150000_lot_canonical_map.sql"), "create table lot_canonical_map (", "-- ── Resolved clusters"));
   // mcp_reader's SELECT set for these relations (20260926150000).
   await db.exec(`grant select on lab_samples_current, lab_results_current, berry_maturity_by_block, lot_analyses, lot_canonical_map,

@@ -24,7 +24,8 @@
 // The text content is runTool()'s output byte for byte plus one appended
 // "[gateway]" line; the tags and counts are also in MCP structuredContent.
 // Parity tests compare the text minus that line against the chat path.
-import { currentToolVintage, type DomainReality, type ToolResult } from "../chat/tools.ts";
+import { currentToolVintage, type DomainReality, type ToolResult, vesselFilters } from "../chat/tools.ts";
+import { resolveDateBounds } from "../chat/query-rules.ts";
 
 export const DATA_TOOLS: readonly string[] = ["get_series", "get_derived_series", "get_anomalies", "get_vessels"];
 
@@ -101,23 +102,29 @@ export type Count = (sql: string, params: unknown[]) => Promise<number>;
 
 // Rows the tool's own filters match (under the caller's RLS), ignoring its row
 // cap. Mirrors the filters in chat/tools.ts getDerivedSeries/getVessels (params
-// untyped so Postgres casts them to the column's type, as PostgREST does); the
-// other two tools can't truncate (get_series rejects >500 buckets instead,
+// untyped so Postgres casts them to the column's type, as PostgREST does) by
+// calling the SAME helpers chat uses -- resolveDateBounds() for the bare-date
+// rule, vesselFilters() for case/whitespace normalisation -- so the two can't
+// drift (they did: a bare end_date was `day <= D` here too). The other two
+// tools can't truncate (get_series rejects >500 buckets instead,
 // get_anomalies has no cap), so their total is what they returned.
 async function totalCount(name: string, input: Record<string, unknown>, returned: number, count: Count): Promise<number> {
   if (name === "get_derived_series") {
     const where = ["vintage = $1"];
     const params: unknown[] = [String(input.vintage)];
-    if (input.start_date) { params.push(String(input.start_date)); where.push(`day >= $${params.length}`); }
-    if (input.end_date) { params.push(String(input.end_date)); where.push(`day <= $${params.length}`); }
+    const b = resolveDateBounds("day", input.start_date, input.end_date, "wallclock");
+    if (b.gte) { params.push(b.gte); where.push(`day >= $${params.length}`); }
+    if (b.lt) { params.push(b.lt); where.push(`day < $${params.length}`); }
+    if (b.lte) { params.push(b.lte); where.push(`day <= $${params.length}`); }
     return await count(`select count(*)::int as n from public.daily_derived where ${where.join(" and ")}`, params);
   }
   if (name === "get_vessels") {
     const where: string[] = [];
     const params: unknown[] = [];
+    const f = vesselFilters(input);
     if (!input.include_archived) where.push("archived = false");
-    if (input.vessel_type) { params.push(String(input.vessel_type)); where.push(`vessel_type = $${params.length}`); }
-    if (input.current_lot_name) { params.push(`%${String(input.current_lot_name)}%`.replace(/\*/g, "%")); where.push(`current_lot_name ilike $${params.length}`); }
+    if (f.vessel_type) { params.push(f.vessel_type); where.push(`vessel_type = $${params.length}`); }
+    if (f.current_lot_name) { params.push(`%${f.current_lot_name}%`.replace(/\*/g, "%")); where.push(`current_lot_name ilike $${params.length}`); }
     return await count(`select count(*)::int as n from public.vessels${where.length ? ` where ${where.join(" and ")}` : ""}`, params);
   }
   return returned;

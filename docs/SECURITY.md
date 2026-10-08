@@ -8403,3 +8403,199 @@ The weekly task sends a heartbeat when there is no new report.
   quarantine or run rows.
 - Until the cloud task's first run, P1 `ingestion.ets_report.last_run` warns
   "no successful run recorded". That is expected.
+
+## Chat tool findings: source selection, date bounds, identifiers, coverage, provenance (2026-10-07)
+
+Colin ran agentic tests against the chat tools through the MCP gateway (key
+`mtk_UUxdyhxW`, calls 578-677 in `agent_api_key_calls`, 5 Oct 2026). Each
+finding was reproduced against production before anything changed. Branch
+`fix/chat-tool-findings-colin`. **Not deployed and migration not applied**:
+both wait for the owner's approval (see "After approval").
+
+### How it was verified
+
+- **Tool handlers:** `runTool()` from `origin/main` (`90e505a`) over the real
+  supabase-js, signed in as the synthetic operator
+  (`harry.c+health-operator`) by admin magic link, as in
+  `scripts/mcp-parity.mjs replay`. Colin's exact arguments came from the call
+  log. The log stores arguments, not responses; his saved transcripts were not
+  available, so the assistant behaviour was re-asked rather than compared.
+- **Assistant:** the deployed `chat` function, asked once per question as the
+  same operator (read-only).
+- **Schema and counts:** read-only `psql`.
+
+### Findings
+
+| # | Verdict | Evidence (before) | Cause |
+|---|---|---|---|
+| 1a Source selection | CONFIRMED | 310310429 is ETS ferment sample "T-7 V-2 (fermenting)", 2023, ethanol 8.1 % vol, glucose+fructose 115 g/L; InnoVint has nothing. `get_lot_analyses {lot_name:"T-7 V-2"}` → 0 rows, no hint. The deployed assistant tried `get_wine_lab_results {sample_description:"310310429"}` → 0, then asked the user for a lot code. | No tool said which source holds what; a miss never pointed at the other source; a sample number could not be looked up. |
+| 1b Completeness | PARTLY | 602250939 has `ethanol_at_20c` 15.22 and `ethanol_at_60f` 15.14. 60°F was retrievable only by its exact code; the description named only `ethanol_at_20c`; `analysis_code:"ethanol"` → 0 rows. InnoVint has the same split (`ethanol-20c`, `ethanol-60f`, `ethanol`, `alcohol`). | Variants not described or surfaced. |
+| 2a Same-day bounds | CONFIRMED | `recorded_at`/`analyzed_at` are timestamptz. ETS `26MARCH` start=end=`2026-08-14` → 0 vs 11 for the full day; InnoVint `MA22CS` `2024-05-01` → 0 vs 9. `get_series` with start=end bare date → error. | Bare `end_date` sent to `lte` = midnight. |
+| 2b Lab-sample lookup | CONFIRMED | Only `sample_description_raw` was searchable; `608140601` → 0. In-app, an unknown `lab_sample_no` argument was ignored and returned all 93 winery rows (the gateway rejected it). | No parameter; runTool ignored unknown arguments. |
+| 2c Case | CONFIRMED | smoke `b2` 0 vs `B2` 30; berry `b2` 0 vs 6; `get_series block:"b2"` all-null buckets vs real values; `lot_code:"ma24csv3"`, `" MA24CSV3 "`, `analysis_type:"Brix"`, `analysis_code:"Ethanol_At_20C"`, `vessel_type:"Tank"` → 0. | `eq` on case-sensitive stored values (verified uniform: codes/blocks/sample numbers upper, types/codes/vessel types lower). |
+| 3a Coverage | CONFIRMED | `get_lot_analyses {limit:200}` said MA24CSV3 ends March 27, 2025 and listed 9 lots (no 2026 lots); `{lot_code:"MA24CSV3"}` said February 3, 2026. | Scope = unordered `.limit(1000)` scan of 1,264 rows, labelled "computed from every matching row". Every unlimited read is also capped at 1,000 by PostgREST / the adapter. |
+| 3b Hard-coded counts | CONFIRMED | Berry description: "four collection dates" for 2026; 5 on 5 Oct, 7 now (6 per block). Other counts (smoke sample mix, "Two rows", labour months) correct today but static. | Data counts written into descriptions. |
+| 4 Provenance | CONFIRMED | `berry_maturity_by_block` grouped by block/date, dropping `lab_sample_no` and `collected_on_source` (10 of 16 dates `inferred_from_receipt`). | View omitted them. |
+| 5 Answer support | PARTLY | "0.3/day" not reproduced in one re-run (it said 0.086). Reproduced: causal claims ("drove faster sugar loading", canopy water stress) with no event evidence, and misread tool data (TA "8.2→7.5 over the window", actual 6.1; prior-week GDD "+81", actual +73.9). | Prompt asked for interpretation, had no causal rule, and "number from a tool" did not cover derived numbers; no tool computed changes. Gateway agents never see the system prompt. |
+| Truncation | risk | Lot/wine flagged only rows == limit, no total; vessels (500) and derived (400) had no flag; berry/smoke/coverage reads unlimited (silently 1,000). | |
+| Similar lot names | risk | Substring matches were already disclosed, but 3a hid lots outside the scanned rows; no exact ETS lookup by lot code. | |
+
+### What changed
+
+- **`chat/query-rules.ts` (new):** one implementation of the date rule, identifier
+  normalisation, Pacific day labels, analyte families, change arithmetic and the
+  answer rules, shared by `tools.ts`, the gateway (`data-tools.ts`, `handler.ts`)
+  and the system prompt.
+- **Dates:** a bare date is the estate's calendar day. InnoVint `recorded_at`
+  and `sensor_readings` (real instants): `[D 00:00 America/Los_Angeles, D+1)`.
+  ETS `analyzed_at` and `daily_derived.day` (wall clock marked +00):
+  `[D 00:00Z, D+1 00:00Z)`. `lab_samples.collected_on` (date): both inclusive.
+  Explicit timestamps are used as given. Empty or invalid intervals are errors.
+  Every result states its effective interval. Lot readings carry
+  `recorded_on_pacific`, and labels and multi-reading groups use the Pacific
+  date (214 of 1,469 rows fall on a different UTC date). The gateway's
+  `get_derived_series` count uses the same rule.
+- **Identifiers:** block ids, lot codes, sample numbers, analysis types/codes and
+  vessel types are trimmed and normalised to their stored case before `eq`
+  (gateway vessel count too). `get_wine_lab_results` gains `lab_sample_no` and
+  `lot_code` (exact, or an InnoVint code via `ets_lot_bridge`); a sample number
+  passed as `sample_description` also matches. `get_smoke_markers` gains
+  `lab_sample_no`. runTool rejects unknown arguments in-app, as the gateway does.
+- **Coverage:** migration `20261007120000` adds `chat_lot_analyses_scope()` and
+  `chat_ets_winery_scope()`: SECURITY INVOKER, `search_path` pinned, one jsonb
+  value each (no row cap), EXECUTE for `authenticated`, `service_role`,
+  `mcp_reader`, never anon/PUBLIC. They return exact totals, per-lot counts and
+  ranges, every analysis type/code on file, and the cross-source pointers. The
+  `.limit(1000)` scan is gone. Remaining scans request exactly 1,000 rows and
+  say INCOMPLETE if they reach it. Lot, wine and vessel results state
+  `returned N of M` and `truncated`; derived states its row count.
+- **Descriptions:** say which source holds what, point across, name the
+  temperature variants, and carry no data counts (berry, smoke, wine, labour).
+  Coverage notes are computed per call. Fixed on the way: the berry Coverage
+  note reported winery samples as a vintage's "berry sampling".
+- **Provenance:** the view gains `lab_sample_no`, `collected_on_source` and
+  `collected_on_inferred` (appended; existing columns unchanged;
+  `security_invoker` kept). Smoke and wine rows carry the same two fields.
+- **Source selection and variants:** an InnoVint miss lists ETS samples the
+  identifier names; an ETS miss lists vineyard samples and InnoVint lots, each
+  with the tool to call "before asking the user". A filter on one temperature
+  variant lists the others (ETS with values).
+- **Answer support:** server-computed Changes notes. Berry: first to last and
+  every consecutive step, per block/vintage/analyte, with a new
+  `start_date`/`end_date` window. Wine: by collection date. Lots: first to last,
+  never averaging same-date readings. Series: first/last, per day, min/max.
+  Derived: GDD gained and per day, mean/min/max of the rest. `ANSWER_RULES`
+  (quote tool rates, never compute; no causal explanation without a supporting
+  event in a tool result; name the source and sample number and whether a date
+  was inferred; follow cross-source pointers; never present a truncated result
+  as complete) goes into the system prompt and, new, into the MCP server's
+  `initialize` instructions.
+- **Adapter/allowlist:** `lt()` added; the two functions are allowlisted scalar
+  RPCs with typed named arguments. `mcp_reader` needs no new table grants (it
+  already reads every relation they read).
+- **`scripts/daily-systems-check.mjs`:** the recorded lab field lists include the
+  three new fields.
+
+Behaviour kept: units, censored `<` results, canonical lot mapping and
+superseded exclusion, reissue handling (`*_current` only), RLS (invoker
+functions; a customer gets empty sets, tested).
+
+### Tests
+
+- `tests/chat-tool-findings.test.mjs`, 24 Node tests, at least one per
+  confirmed item: pointers, variants (incl. a check over every production code
+  that only the ethanol family groups), bounds (PDT/PST/DST), lookups, unknown
+  arguments, normalisation, scope-derived ranges and totals, INCOMPLETE scans,
+  no drifting counts, provenance, server-side rates (+0.086 Brix/day, TA 8.2→6.1,
+  GDD +73.9), prompt and gateway rules, pagination, Pacific labels.
+- `tests/chat-tool-scope-sql.test.mjs`, 11 PGlite tests on the real lab/lot DDL
+  and RLS: no cap (1,302 rows), superseded handling, Pacific and wall-clock
+  bounds against the old bound, pointers, exact/bridged lookups, variants, view
+  columns and `security_invoker`, customer RLS, privileges, `mcp_reader` path.
+- Deno: adapter `lt` and scope RPCs; handler sends the instructions; gateway
+  vessel count normalises; the derived count expectation updated (it pinned the
+  old `day <= D`).
+- Full suite: **Node 133/133** (98 before), **Deno 96/96** (94 before),
+  `check-mcp-boundaries` PASS, `deno lint` only the two findings already on main.
+  Note: Deno 2 needs `--allow-read` for `ingest-climate-window` and
+  `ingest-ets-report`; their documented commands lack it.
+
+### Before / after (Colin's cases)
+
+After-runs for tools needing the migration used a local PGlite replica:
+production rows copied read-only, real DDL/RLS, migration applied, tools through
+the MCP adapter as `mcp_reader` with an operator's claims. Main on the replica
+reproduced every production "before" number, so the replica is faithful.
+Production was not written.
+
+| Case | Before (main) | After (branch) |
+|---|---|---|
+| `get_lot_analyses lot_name "T-7 V-2"` | 0 rows, no hint | 0 rows + "ETS holds 310310429 … call get_wine_lab_results" |
+| `get_wine_lab_results sample_description "310310429"` | 0, "genuinely absent" | 2 rows |
+| Assistant: T-7 V-2 sample 310310429 | asked the user for a lot code | `lab_sample_no` call; 8.1 % vol ethanol, 115 g/L glucose+fructose, date flagged inferred |
+| `ethanol_at_20c` for MA24CS | silent on 60°F | lists `ethanol_at_60f` 15.14 / 14.77 / 14.74 |
+| ETS `26MARCH` same day | 0 | 11 |
+| InnoVint `MA22CS` same day | 0 | 9 |
+| `get_series` same-day bare dates (prod) | error | 4 buckets of that Pacific day |
+| `608140601` as description / `lab_sample_no` | 0 / 93 unfiltered | 11 / 11 |
+| smoke `b2` / berry `b2` | 0 / 0 | 30 / 6 |
+| `ma24csv3`, `Brix`, `Ethanol_At_20C`, `Tank` | 0, 0, 0, 0 | 5, 5, 3, 3 |
+| Broad `get_lot_analyses` MA24CSV3 end | March 27, 2025; 9 lots | February 3, 2026; 15 lots; "200 of 1264, truncated" |
+| Berry 2026 dates | "four" (description) | computed: 7 dates (6 per block) |
+| Assistant: B2 brix Aug 25 → Sep 22 | 0.086/day plus causal claims, TA and GDD misread | "+2.4 Brix over 28 days = +0.086/day" quoted, sample numbers and inferred dates named, climate "a coincidence to note, not a proven driver" |
+
+Residual in that last answer: it called the final week's acid decline
+"consistent with the Brix acceleration in that same window", but the fastest
+Brix week was Sep 8-15. That is what the proposed check below would catch.
+
+### Proposed, not built: post-answer check
+
+1. **Deterministic number check (every answer, ~0 cost, <50 ms):** every number in
+   the answer must appear in, or round from, a tool result or a Changes note in
+   the same turn; flag the rest. Would have caught "0.3/day", "+81" and "7.5".
+2. **Model check (only when step 1 flags, or the answer contains causal
+   language):** one extra call with the tool results and the answer, asking for
+   unsupported claims as structured output. Input ~6-15K tokens, output ~300.
+   - Claude Haiku 4.5 ($1 / $5 per MTok): about $0.008-0.017 per checked answer.
+   - Claude Sonnet 5 ($2 / $10): about $0.015-0.033.
+   - Latency: an extra non-streamed call after the answer, roughly 1-3 s (Haiku)
+     or 2-5 s (Sonnet). These are estimates to measure, not measurements.
+     Running it after streaming finishes and appending a correction keeps
+     time-to-first-token unchanged.
+
+### Not fixed, and why
+
+- **Answer-level reasoning slips** (the residual above): prompt rules reduce but
+  can't eliminate them; that is what the proposed check is for.
+- **`lot_analyses` vessel/submission id:** still not synced (the existing entry's
+  recommendation stands). Same-date readings stay unlabelled and are excluded
+  from rates rather than averaged.
+- **RLS on `lot_analyses` and `vessels`:** on in production (Supabase enabled it
+  on create) but never stated in a migration. A database rebuilt from migrations
+  would have the operator-only policies with RLS off, so any authenticated user
+  could read both tables. Fixed by migration `20261007130000` (ENABLE only, not
+  FORCE, which matches production and is a no-op there). Test:
+  `tests/lot-vessels-rls-sql.test.mjs`, which shows a customer reading both
+  tables before it and nothing after.
+- **`get_series` per-day rates over sub-day spans** are extrapolated (e.g.
+  "-1.48/day over 0.75 days"); stated with the span so the scope is visible.
+
+### After approval (owner)
+
+1. `supabase migration list` and `db push --dry-run` must list exactly
+   `20261007120000` and `20261007130000`; then `supabase db push`. Before and
+   after, `pg_class.relrowsecurity` for `lot_analyses`/`vessels` must be `true`
+   (no change expected from `20261007130000`).
+2. P1 `security.mcp_reader.grants` will fail once: the column-privilege hash
+   changes because `berry_maturity_by_block` gained three columns. Re-run
+   `check-mcp-boundaries` and re-baseline (`system_health.set_baseline`) guarded
+   to exactly those three columns.
+3. Deploy `chat` and `mcp` (both import `chat/tools.ts` and
+   `chat/query-rules.ts`). Download each into an isolated `--workdir` and diff
+   against the branch: expect zero lines.
+4. Re-run `scripts/mcp-parity.mjs` record/replay. The new scope RPCs go through
+   both the adapter and PostgREST.
+5. Re-run Colin's cases live through the gateway and compare with the table above.
+6. The Codex daily check will report the three new lab fields once as MEDIUM
+   schema drift (it compares with its own last BASELINES). Expected; it
+   re-baselines on that run.

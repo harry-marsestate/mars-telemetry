@@ -87,6 +87,8 @@ export const RPCS: Readonly<Record<string, string>> = {
   domain_reality: "SECURITY DEFINER, caller-independent real/simulated classification; resolved exactly as chat does.",
   series_bucketed: "SECURITY INVOKER time-bucketed sensor series (get_series); caller's RLS applies.",
   anomalies_eval: "SECURITY INVOKER anomaly rule evaluation (get_anomalies); caller's RLS applies.",
+  chat_lot_analyses_scope: "SECURITY INVOKER (20261007120000): get_lot_analyses' full match set -- per-lot counts/ranges, total, analysis types, ETS pointer -- as one jsonb value; reads lot_analyses, lot_canonical_map, lab_samples_current, lab_results_current, ets_lot_bridge under the caller's RLS.",
+  chat_ets_winery_scope: "SECURITY INVOKER (20261007120000): get_wine_lab_results' full match set -- samples, result total, analysis codes, vineyard/InnoVint pointers -- as one jsonb value; reads lab_samples_current, lab_results_current, ets_lot_bridge, lot_analyses under the caller's RLS.",
   health_system_status: "SECURITY DEFINER, operator accounts only: latest run per producer + the P4 self-check (get_system_health). EXECUTE for mcp_reader only.",
   health_history: "SECURITY DEFINER, operator accounts only: runs in the last 1-30 days (get_health_history). EXECUTE for mcp_reader only.",
   health_baselines: "SECURITY DEFINER, operator accounts only: every P1 baseline (get_health_baselines). EXECUTE for mcp_reader only.",

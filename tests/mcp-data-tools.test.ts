@@ -92,7 +92,9 @@ Deno.test("get_derived_series: real only if all five fields are real for the vin
   assert(s.rows.every((x) => x.data_status === "real"));
   assertEquals([s.total_count, s.truncated], [450, true]);
   assertMatch(r.content, /TRUNCATED/);
-  assertEquals(seen, [["select count(*)::int as n from public.daily_derived where vintage = $1 and day >= $2 and day <= $3", ["2024", "2024-04-01", "2025-04-01"]]]);
+  // A bare end_date includes that whole day (docs/SECURITY.md, "Chat tool
+  // findings"): day < the next day's UTC midnight, the same rule chat applies.
+  assertEquals(seen, [["select count(*)::int as n from public.daily_derived where vintage = $1 and day >= $2 and day < $3", ["2024", "2024-04-01T00:00:00.000Z", "2025-04-02T00:00:00.000Z"]]]);
   const r23 = await runDataTool("get_derived_series", { vintage: 2023 }, ok(rows.slice(0, 1)), { dataMode: "all", reality, count: () => Promise.resolve(1) });
   assertEquals((r23.structuredContent as { rows: { data_status: string }[] }).rows[0].data_status, "mock");
 });
@@ -106,6 +108,11 @@ Deno.test("get_vessels count mirrors the tool's filters (archived default, type,
     ["select count(*)::int as n from public.vessels where archived = false", []],
     ["select count(*)::int as n from public.vessels where vessel_type = $1 and current_lot_name ilike $2", ["tank", "%CS%23%"]],
   ]);
+  // Same case/whitespace normalisation as chat's getVessels (vesselFilters()):
+  // 'Tank' returned 0 rows there, so the count must not say otherwise.
+  seen.length = 0;
+  await runDataTool("get_vessels", { vessel_type: " Tank ", current_lot_name: "  " }, ok([]), { dataMode: "all", reality, count });
+  assertEquals(seen, [["select count(*)::int as n from public.vessels where archived = false and vessel_type = $1", ["tank"]]]);
 });
 
 Deno.test("tool errors pass through untouched; unreadable output is an error, never raw", async () => {

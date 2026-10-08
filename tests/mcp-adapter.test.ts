@@ -158,3 +158,27 @@ Deno.test("runAsKeyOwner: read-only, claims, role switch, then asserts before ru
     assertEquals(ran, false);
   }
 });
+
+// docs/SECURITY.md, "Chat tool findings" (2026-10-07): a bare end_date is an
+// exclusive next-day bound (lt), and the two scope functions are scalar jsonb
+// RPCs with typed, named arguments -- no row cap applies to one value.
+Deno.test("lt is a typed exclusive bound", async () => {
+  const db = fakeDb();
+  await db.adapter.from("lot_analyses").select("lot_code").gte("recorded_at", "2024-05-01T07:00:00.000Z").lt("recorded_at", "2024-05-02T07:00:00.000Z");
+  const [q] = db.main();
+  assertMatch(q.text, /"recorded_at" >= \$1::timestamp with time zone and "recorded_at" < \$2::timestamp with time zone/);
+  assertEquals(q.params, ["2024-05-01T07:00:00.000Z", "2024-05-02T07:00:00.000Z"]);
+});
+
+Deno.test("chat scope functions: scalar jsonb RPCs, named typed arguments, nulls passed through, unknown arguments refused", async () => {
+  const db = fakeDb({ total: 3, lots: [] });
+  const r = await db.adapter.rpc("chat_lot_analyses_scope", { p_lot_code: "MA24CSV3", p_lot_name: null, p_start: "2024-05-01T07:00:00.000Z", p_end_exclusive: "2024-05-02T07:00:00.000Z" });
+  assertEquals(r, { data: { total: 3, lots: [] }, error: null });
+  const [q] = db.main();
+  assertEquals(q.text, "select public.chat_lot_analyses_scope(p_lot_code => $1::text, p_lot_name => $2::text, p_start => $3::timestamptz, p_end_exclusive => $4::timestamptz)::text as body");
+  assertEquals(q.params, ["MA24CSV3", null, "2024-05-01T07:00:00.000Z", "2024-05-02T07:00:00.000Z"]);
+  const db2 = fakeDb({ samples: [] });
+  await db2.adapter.rpc("chat_ets_winery_scope", { p_lab_sample_no: "310310429", p_vintage: 2023 });
+  assertEquals(db2.main()[0].text, "select public.chat_ets_winery_scope(p_lab_sample_no => $1::text, p_vintage => $2::integer)::text as body");
+  await assertRejects(() => db2.adapter.rpc("chat_ets_winery_scope", { p_sample_ids: [1] }), Error, "unsupported");
+});

@@ -128,7 +128,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_lot_analyses",
     description:
-      "Real winery lab analyses recorded in InnoVint per lot (Brix, pH, TA, VA, SO2, YAN, malic, temperature, ethanol and other cellar chemistry), keyed by InnoVint lot_code/lot_name. SOURCE: InnoVint only. ETS Labs results by lab sample number (fermentation checks, wine chemistry, stability trials) are in get_wine_lab_results, not here -- a sample number (9 digits, e.g. '310310429') or an ETS sample description (e.g. 'T-7 V-2') will not match an InnoVint lot. When nothing matches, the response names any ETS samples the same identifier matches; follow that pointer before asking the user. Operator access only -- returns no rows for customer or pending accounts. Returns at most 200 rows, most recent first, with the exact total_count of matching rows and a truncated flag; per-lot row counts and first/last dates are computed in the database over every matching row (never from the capped rows). Dates are labelled in the estate's Pacific calendar day. InnoVint contains genuine duplicate lot objects for the same physical wine for a few 2023 lots (byte-identical chemistry under two or three different lot_codes) -- pass lot_code when you already know it (exact match, case-insensitive, unambiguous); a lot_name search (partial match) automatically excludes the known-superseded duplicates and, if it still matches more than one distinct lot_code (e.g. a name that's also a substring of a different vintage's lot name), says so explicitly rather than silently blending them. Querying a superseded lot_code directly still works (its own rows, not redirected) but the result notes which lot_code is canonical. The same analyte can be recorded at different reference temperatures (ethanol-20c, ethanol-60f, plus plain ethanol/alcohol) -- different measurements, never interchangeable; when you filter on one, the response lists the variants on file. Each result ends with a server-computed Changes note per lot and analysis type (first to last reading, change per day) -- quote it rather than computing rates yourself.",
+      "Real winery lab analyses recorded in InnoVint per lot (Brix, pH, TA, VA, SO2, YAN, malic, temperature, ethanol and other cellar chemistry), keyed by InnoVint lot_code/lot_name. SOURCE: InnoVint only. ETS Labs results by lab sample number (fermentation checks, wine chemistry, stability trials) are in get_wine_lab_results, not here -- a sample number (9 digits, e.g. '310310429') or an ETS sample description (e.g. 'T-7 V-2') will not match an InnoVint lot. When nothing matches, the response names any ETS samples the same identifier matches; follow that pointer before asking the user. Operator access only -- returns no rows for customer or pending accounts. Returns at most 200 rows, most recent first, with the exact total_count of matching rows and a truncated flag; per-lot row counts and first/last dates are computed in the database over every matching row (never from the capped rows). Dates are labelled in the estate's Pacific calendar day. InnoVint contains genuine duplicate lot objects for the same physical wine for a few 2023 lots (byte-identical chemistry under two or three different lot_codes) -- pass lot_code when you already know it (exact match, case-insensitive, unambiguous); a lot_name search (partial match) automatically excludes the known-superseded duplicates and, if it still matches more than one distinct lot_code (e.g. a name that's also a substring of a different vintage's lot name), says so explicitly rather than silently blending them. Querying a superseded lot_code directly still works (its own rows, not redirected) but the result notes which lot_code is canonical. The same analyte can be recorded at different reference temperatures (ethanol-20c, ethanol-60f, plus plain ethanol/alcohol) -- different measurements, never interchangeable; when you filter on one, the response lists the variants on file in InnoVint AND the matching ETS Labs results for the same lot (e.g. ethanol_at_20c / ethanol_at_60f), with values. When nothing matches, the response also names a superseded ETS sample number's reissue, or the vessel a lot code is assigned to (get_vessels). Each result ends with a server-computed Changes note per lot and analysis type (first to last reading, change per day) -- quote it rather than computing rates yourself.",
     input_schema: {
       type: "object",
       properties: {
@@ -202,7 +202,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_wine_lab_results",
     description:
-      "Real winery lab chemistry from ETS Labs, by lab sample: fermentation checks on fermenting must/ferments, finished-wine chemistry (ethanol, VA, TA, pH, free/total SO2, YAN, ammonia, potassium, malic acid, glucose+fructose, brix) and specialty QC panels (microbial safety, heat/cold stability trials, fining trials, conductivity). SOURCE: ETS only -- InnoVint's own per-lot cellar analyses are in get_lot_analyses. Find a sample by lab_sample_no (exact ETS sample number, e.g. '310310429'), by lot_code (exact lot code, also resolving an InnoVint lot_code that maps to an ETS description, e.g. 'MA23CSV3-AP' -> 'MA23CSV3'), or by sample_description (partial match on ETS's description, e.g. 'MA23CS', 'T-7 V-2'; a value that is exactly a sample number also matches that sample). When nothing matches, the response names matching vineyard samples (get_berry_maturity/get_smoke_markers) or InnoVint lots (get_lot_analyses); follow that pointer before asking the user. CAUTION: some descriptions are literal substrings of others in the SAME vintage (e.g. 'MA22CS' also matches 'MA22CSV2' and 'MA22CSV3'); the response always states which distinct sample_description values matched -- use lot_code or lab_sample_no for one lot or sample. The same analyte can be reported at different reference temperatures -- e.g. ethanol_at_20c AND ethanol_at_60f on the same sample: different measurements, never interchangeable; when you filter on one, the response lists every variant on file for those samples, with values. Every result row carries lab_sample_no, collected_on_source/collected_on_inferred (whether the collection date was recorded or inferred), result_operator ('=' or '<' -- a '<' row is a detection-limit censored result, never report it as a plain number), units, and a reconciliation status against InnoVint's own lot_analyses (lot_match: 'exact' = same lot/date/analyte/value already in lot_analyses, 'value_conflict' = same lot/date/analyte but a DIFFERENT value there, 'date_near' = matched within 3 days not same day, 'ets_only' = no InnoVint counterpart at all -- most rows are 'ets_only', that's expected, not a data quality problem). Returns the exact total_count of matching results and a truncated flag; date coverage per matched lot is computed in the database over every matching sample -- never infer a lot's date range from counting rows yourself. Each result ends with a server-computed Changes note per lot and analyte -- quote it rather than computing rates yourself. Some rows (e.g. a conductivity-test disclaimer or a stability-trial protocol note) have result_numeric=null and only a free-text result_raw -- report their content as text, not as a missing number. Operator access only (RLS-enforced). Never gated by real-only mode -- no simulated counterpart exists for this data.",
+      "Real winery lab chemistry from ETS Labs, by lab sample: fermentation checks on fermenting must/ferments, finished-wine chemistry (ethanol, VA, TA, pH, free/total SO2, YAN, ammonia, potassium, malic acid, glucose+fructose, brix) and specialty QC panels (microbial safety, heat/cold stability trials, fining trials, conductivity). SOURCE: ETS only -- InnoVint's own per-lot cellar analyses are in get_lot_analyses. Find a sample by lab_sample_no (exact ETS sample number, e.g. '310310429'), by lot_code (exact lot code, also resolving an InnoVint lot_code that maps to an ETS description, e.g. 'MA23CSV3-AP' -> 'MA23CSV3'), or by sample_description (partial match on ETS's description, e.g. 'MA23CS', 'T-7 V-2'; a value that is exactly a sample number also matches that sample). When nothing matches, the response names matching vineyard samples (get_berry_maturity/get_smoke_markers) or InnoVint lots (get_lot_analyses); follow that pointer before asking the user. CAUTION: some descriptions are literal substrings of others in the SAME vintage (e.g. 'MA22CS' also matches 'MA22CSV2' and 'MA22CSV3'); the response always states which distinct sample_description values matched -- use lot_code or lab_sample_no for one lot or sample. The same analyte can be reported at different reference temperatures -- e.g. ethanol_at_20c AND ethanol_at_60f on the same sample: different measurements, never interchangeable; when you filter on one, the response lists every variant on file for those samples, with values, plus InnoVint's readings of the same analyte for the matching lot (get_lot_analyses). A superseded sample number (e.g. 511110861) is answered with its reissue (511110861A). Every result row carries lab_sample_no, collected_on_source/collected_on_inferred (whether the collection date was recorded or inferred), result_operator ('=' or '<' -- a '<' row is a detection-limit censored result, never report it as a plain number), units, and a reconciliation status against InnoVint's own lot_analyses (lot_match: 'exact' = same lot/date/analyte/value already in lot_analyses, 'value_conflict' = same lot/date/analyte but a DIFFERENT value there, 'date_near' = matched within 3 days not same day, 'ets_only' = no InnoVint counterpart at all -- most rows are 'ets_only', that's expected, not a data quality problem). Returns the exact total_count of matching results and a truncated flag; date coverage per matched lot is computed in the database over every matching sample -- never infer a lot's date range from counting rows yourself. Each result ends with a server-computed Changes note per lot and analyte -- quote it rather than computing rates yourself. Some rows (e.g. a conductivity-test disclaimer or a stability-trial protocol note) have result_numeric=null and only a free-text result_raw -- report their content as text, not as a missing number. Operator access only (RLS-enforced). Never gated by real-only mode -- no simulated counterpart exists for this data.",
     input_schema: {
       type: "object",
       properties: {
@@ -660,7 +660,12 @@ async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Pr
     const ets: { lab_sample_no: string; sample_description_raw: string; sample_type: string; vintage: number; collected_on: string; n_results: number; analysis_codes: string | null }[] = scope?.ets_samples ?? [];
     notes.push(ets.length
       ? `(No InnoVint lot matches ${lot_code ? `lot_code "${lot_code}"` : `lot_name "${lot_name}"`}, but ETS Labs holds ${ets.length} sample(s) this identifier names -- ${ets.map((e) => `${e.lab_sample_no} "${e.sample_description_raw}" (${e.sample_type}, ${e.vintage}, collected ${dayLabel(e.collected_on)}; ${e.n_results} result(s): ${e.analysis_codes ?? "none"})`).join("; ")}. Call ${ets.some((e) => ["berry_maturity", "berry_smoke", "trial_ferment"].includes(e.sample_type)) ? "get_berry_maturity / get_smoke_markers (vineyard samples) or " : ""}get_wine_lab_results with lab_sample_no for these before asking the user.)`
-      : `(No InnoVint lot matches ${lot_code ? `lot_code "${lot_code}"` : `lot_name "${lot_name}"`}, and no ETS Labs sample description or sample number matches it either -- not simulated, genuinely absent in both sources.)`);
+      : await (async () => {
+        const extra = [await reissuePointer(supabase, lot_code ?? lot_name), await vesselPointer(supabase, lot_code, lot_code ? undefined : lot_name)].filter(Boolean);
+        return extra.length
+          ? `(No InnoVint lot matches ${lot_code ? `lot_code "${lot_code}"` : `lot_name "${lot_name}"`}, and no current ETS sample description or sample number matches it.) ${extra.join(" ")}`
+          : `(No InnoVint lot matches ${lot_code ? `lot_code "${lot_code}"` : `lot_name "${lot_name}"`}, and no ETS Labs sample description or sample number matches it either -- not simulated, genuinely absent in both sources.)`;
+      })());
   }
 
   // Temperature variants (Colin 1b): ethanol-20c and ethanol-60f are
@@ -696,6 +701,19 @@ async function getLotAnalyses(supabase: any, input: Record<string, unknown>): Pr
   if (multiGroups.length > 0) {
     const listing = multiGroups.map((g) => `${g.lot} ${g.type} on ${dayLabel(g.date)} has ${g.values.length} readings (${g.values.join(", ")})`).join("; ");
     notes.push(`(Note: this result has more than one reading for the same lot/analyte/date in ${multiGroups.length} case(s) -- ${listing}. lot_analyses has no vessel or sample identifier to label these individually (InnoVint's own API exposes one, not yet synced -- see docs/SECURITY.md), but they are CONFIRMED real, separate InnoVint records -- different vessels or different lab submissions, not duplicate rows. Report every value; never average them, and never drop one as a suspected duplicate.)`);
+  }
+
+  // Across sources (identifier sweep): InnoVint has only "alcohol" for MA24CS
+  // while ETS has ethanol_at_20c 15.22 and ethanol_at_60f 15.14 for the same
+  // lot -- a request for one must name the other source's values too.
+  if (analysis_type) {
+    const lotCodes = lot_code ? [lot_code] : lots.map((l) => l.lot_code);
+    // Auxiliary: a failure here notes itself rather than discarding the
+    // InnoVint rows this call exists to return.
+    const cross = await etsFamilyForLots(supabase, lotCodes, analyteFamily(analysis_type));
+    if (cross.error) notes.push(`(Could not check ETS Labs for the same analyte: ${cross.error.message}. Call get_wine_lab_results with lot_code to check.)`);
+    if (cross.lines.length) notes.push(crossSourceNote("ETS Labs (get_wine_lab_results)", cross.lines));
+    if (lotCodes.length > CROSS_SOURCE_LOTS) notes.push(`(Cross-source check covered the first ${CROSS_SOURCE_LOTS} of ${lotCodes.length} lots; pass lot_code for one.)`);
   }
 
   const changes = lotChanges(rows, multiReadingGroups, truncated);
@@ -786,6 +804,138 @@ function scanIncomplete(rows: unknown[] | null | undefined, what: string): strin
     ? `(INCOMPLETE: the ${what} scan reached the ${SCAN_CAP}-row cap, so the coverage and counts below may be missing data -- say so; do not present them as complete.)`
     : null;
 }
+
+// ── Cross-tool pointers (identifier sweep, 2026-10-08) ─────────────────
+// docs/SECURITY.md, "Identifier sweep: cross-source pointers".
+
+const SAMPLE_TYPE_TOOL: Record<string, string> = {
+  berry_maturity: "get_berry_maturity", berry_smoke: "get_smoke_markers", trial_ferment: "get_smoke_markers",
+  must: "get_wine_lab_results", wine: "get_wine_lab_results", ferment: "get_wine_lab_results", stability_trial: "get_wine_lab_results",
+};
+
+// A superseded ETS sample number (e.g. 511110861) is excluded from every
+// *_current view, so an exact lookup found nothing and said nothing. Its
+// reissue carries reissue_of = the old number IN lab_samples_current, so this
+// names it without reading the base table.
+// deno-lint-ignore no-explicit-any
+async function reissuePointer(supabase: any, ident: unknown): Promise<string | null> {
+  const no = normUpper(ident);
+  if (!no) return null;
+  const { data, error } = await supabase
+    .from("lab_samples_current")
+    .select("lab_sample_no, sample_type, sample_description_raw, vintage, collected_on, reissue_of")
+    .eq("reissue_of", no)
+    .limit(20);
+  if (error) return `(Could not check whether ${no} was reissued: ${error.message}.)`;
+  // deno-lint-ignore no-explicit-any
+  const rows = (data ?? []) as any[];
+  if (!rows.length) return null;
+  return `(${no} is a superseded ETS sample number: ETS reissued it as ${rows.map((r) => `${r.lab_sample_no} ("${r.sample_description_raw}", ${r.sample_type}, ${r.vintage}, collected ${dayLabel(r.collected_on)})`).join("; ")}. Superseded results are kept but never served -- look up ${rows.map((r) => `lab_sample_no "${r.lab_sample_no}" with ${SAMPLE_TYPE_TOOL[r.sample_type] ?? "get_wine_lab_results"}`).join(", ")} before asking the user.)`;
+}
+
+// A lot code that exists only as a vessel's current lot (e.g. XMAWHITELEES on
+// TD-08) has no lab analyses in either source; point at get_vessels instead of
+// calling it absent.
+// deno-lint-ignore no-explicit-any
+async function vesselPointer(supabase: any, lotCode: string | undefined, lotName?: string): Promise<string | null> {
+  if (!lotCode && !lotName) return null;
+  let q = supabase
+    .from("vessels")
+    .select("code, vessel_type, current_lot_name, current_lot_code, archived")
+    .order("code", { ascending: true })
+    .limit(20);
+  q = lotCode ? q.eq("current_lot_code", lotCode) : q.ilike("current_lot_name", `%${lotName}%`);
+  const { data, error } = await q;
+  if (error) return `(Could not check vessels for this lot: ${error.message}.)`;
+  // deno-lint-ignore no-explicit-any
+  const rows = (data ?? []) as any[];
+  if (!rows.length) return null;
+  const names = [...new Set(rows.map((r) => r.current_lot_name).filter(Boolean))];
+  return `(${lotCode ? `Lot code ${lotCode}` : `Lot name "${lotName}"`} has no lab analyses in InnoVint or ETS, but it is the current lot of ${rows.length} vessel(s): ${rows.map((r) => `${r.code} (${r.vessel_type}${r.archived ? ", archived" : ""}, current lot ${r.current_lot_code ?? "?"} "${r.current_lot_name ?? ""}")`).join("; ")}. Call get_vessels${names.length === 1 ? ` with current_lot_name "${names[0]}"` : ""}${rows.some((r) => r.archived) ? " and include_archived true" : ""} for its inventory.)`;
+}
+
+const CROSS_SOURCE_LOTS = 5;
+const CROSS_SOURCE_ROWS = 20;
+
+// InnoVint -> ETS: for these InnoVint lot codes, every ETS winery result in
+// the same analyte family (ethanol_at_20c / ethanol_at_60f for alcohol/
+// ethanol). Lot -> ETS sample resolution is chat_ets_winery_scope's own
+// p_lot_code rule (exact description, or ets_lot_bridge), so this and
+// get_wine_lab_results lot_code can never disagree.
+// deno-lint-ignore no-explicit-any
+async function etsFamilyForLots(supabase: any, lotCodes: string[], family: string): Promise<{ lines: string[]; error?: { message: string } }> {
+  const lines: string[] = [];
+  for (const code of lotCodes.slice(0, CROSS_SOURCE_LOTS)) {
+    const { data: scope, error } = await supabase.rpc("chat_ets_winery_scope", { p_lot_code: code });
+    if (error) return { lines, error };
+    const samples: { id: number; lab_sample_no: string; sample_description_raw: string; sample_type: string; collected_on: string }[] = scope?.samples ?? [];
+    const famCodes = ((scope?.analysis_codes ?? []) as { analysis_code: string }[]).map((c) => c.analysis_code).filter((c) => analyteFamily(c) === family);
+    if (!samples.length || !famCodes.length) continue;
+    const byId = new Map(samples.map((s) => [s.id, s]));
+    const { data: res, error: resErr } = await supabase
+      .from("lab_results_current")
+      .select("sample_id, analysis_code, analysis_name_raw, result_raw, result_operator, units")
+      .in("sample_id", [...byId.keys()])
+      .in("analysis_code", famCodes)
+      .order("analysis_code", { ascending: true })
+      .limit(CROSS_SOURCE_ROWS);
+    if (resErr) return { lines, error: resErr };
+    const perSample = new Map<number, string[]>();
+    // deno-lint-ignore no-explicit-any
+    for (const r of (res ?? []) as any[]) {
+      if (!perSample.has(r.sample_id)) perSample.set(r.sample_id, []);
+      perSample.get(r.sample_id)!.push(`${r.analysis_code} (${temperatureLabel(r.analysis_code)}) ${r.result_operator === "<" ? "< " : ""}${r.result_raw}${r.units ? ` ${r.units}` : ""}`);
+    }
+    for (const [sid, values] of perSample) {
+      const s = byId.get(sid)!;
+      lines.push(`InnoVint ${code} <-> ETS ${s.lab_sample_no} "${s.sample_description_raw}" (${s.sample_type}, collected ${dayLabel(s.collected_on)}): ${values.join(", ")}`);
+    }
+  }
+  return { lines };
+}
+
+// ETS -> InnoVint: for these ETS descriptions, every InnoVint reading in the
+// same analyte family. Description -> lot code is the same rule reversed
+// (exact code, or ets_lot_bridge); superseded duplicate lot codes are dropped
+// (their chemistry is byte-identical to the canonical lot's).
+// deno-lint-ignore no-explicit-any
+async function innovintFamilyForDescriptions(supabase: any, descriptions: string[], family: string): Promise<{ lines: string[]; error?: { message: string } }> {
+  const descs = [...new Set(descriptions)].slice(0, CROSS_SOURCE_LOTS);
+  const { data: bridge, error: bridgeErr } = await supabase
+    .from("ets_lot_bridge")
+    .select("ets_description, lot_analyses_lot_code")
+    .in("ets_description", descs);
+  if (bridgeErr) return { lines: [], error: bridgeErr };
+  const superseded = await fetchSupersededLotMap(supabase);
+  if ("error" in superseded) return { lines: [], error: superseded.error };
+  const pairs = new Map<string, string>(); // lot code -> description
+  for (const d of descs) pairs.set(d.toUpperCase(), d);
+  // deno-lint-ignore no-explicit-any
+  for (const b of (bridge ?? []) as any[]) pairs.set(b.lot_analyses_lot_code, b.ets_description);
+  for (const dup of superseded.map.keys()) pairs.delete(dup);
+  const lines: string[] = [];
+  for (const [code, desc] of pairs) {
+    const { data: scope, error } = await supabase.rpc("chat_lot_analyses_scope", { p_lot_code: code });
+    if (error) return { lines, error };
+    const types = ((scope?.analysis_types ?? []) as { analysis_type: string }[]).map((t) => t.analysis_type).filter((t) => analyteFamily(t) === family);
+    if (!types.length) continue;
+    const { data: rows, error: rowsErr } = await supabase
+      .from("lot_analyses")
+      .select("lot_code, analysis_type, value, unit, recorded_at")
+      .eq("lot_code", code)
+      .in("analysis_type", types)
+      .order("recorded_at", { ascending: false })
+      .limit(CROSS_SOURCE_ROWS);
+    if (rowsErr) return { lines, error: rowsErr };
+    // deno-lint-ignore no-explicit-any
+    const values = ((rows ?? []) as any[]).map((r) => `${r.analysis_type} (${temperatureLabel(r.analysis_type)}) ${r.value}${r.unit ? ` ${r.unit}` : ""} on ${dayLabel(pacificDate(r.recorded_at))}`);
+    if (values.length) lines.push(`ETS "${desc}" <-> InnoVint ${code}: ${values.join(", ")}`);
+  }
+  return { lines };
+}
+
+const crossSourceNote = (other: string, lines: string[]) =>
+  `(The same analyte is also on file in ${other} for the matching lot(s), all dates: ${lines.join("; ")}${lines.length >= CROSS_SOURCE_ROWS ? ` (first ${CROSS_SOURCE_ROWS} per lot)` : ""}. Different source and possibly a different reference temperature -- report each value with its source and label; never merge, average or interchange them.)`;
 
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 // first_month/last_month/period_month are each the 1ST OF that calendar
@@ -1000,11 +1150,11 @@ async function getBerryMaturity(supabase: any, input: Record<string, unknown>): 
     // deno-lint-ignore no-explicit-any
     const rows = (allMaturity as any[]).filter((r) => r.vintage === v);
     if (rows.length === 0) {
-      // deno-lint-ignore no-explicit-any
       // Vineyard sample types only: winery samples (wine, must, ferment,
       // stability_trial) share lab_samples_current since the ETS winery
       // ingest, and were being reported here as "berry sampling ... see
       // get_smoke_markers" (seen in the 2026-10-07 replay).
+      // deno-lint-ignore no-explicit-any
       const otherTypes = [...new Set((allSamples as any[]).filter((s) => s.vintage === v && s.sample_type in SAMPLE_TYPE_LABEL).map((s) => s.sample_type))];
       coverageLines.push(
         otherTypes.length === 0
@@ -1167,9 +1317,10 @@ async function getSmokeMarkers(supabase: any, input: Record<string, unknown>): P
     );
     coverageLines.push(`${v}: ${parts.join(", ")}.`);
   }
+  const reissue = lab_sample_no && sampleIds.length === 0 ? await reissuePointer(supabase, lab_sample_no) : null;
   const notes = [
-    scanIncomplete(samples, "sample"), scanIncomplete(resultsScan, "result"), scanIncomplete(allSamples, "coverage"),
-    `(Source: ETS Labs smoke-marker results. Result: ${rows.length} row(s) from ${sampleIds.length} sample(s); truncated: ${resultsScan.length >= SCAN_CAP}.${lab_sample_no && sampleIds.length === 0 ? ` No sample ${lab_sample_no} with these filters -- if it is a berry-maturity or winery sample, use get_berry_maturity or get_wine_lab_results.` : ""})`,
+    scanIncomplete(samples, "sample"), scanIncomplete(resultsScan, "result"), scanIncomplete(allSamples, "coverage"), reissue,
+    `(Source: ETS Labs smoke-marker results. Result: ${rows.length} row(s) from ${sampleIds.length} sample(s); truncated: ${resultsScan.length >= SCAN_CAP}.${lab_sample_no && sampleIds.length === 0 && !reissue ? ` No sample ${lab_sample_no} with these filters -- if it is a berry-maturity or winery sample, use get_berry_maturity or get_wine_lab_results.` : ""})`,
     `Coverage (all vintages, regardless of this call's filters, computed from the data on this call): ${coverageLines.join(" ")} Units are basis-specific (µg/kg = berry mass, µg/L = liquid/juice) and are never interchangeable -- always read the units field on each row.`,
   ].filter(Boolean);
   return { content: JSON.stringify(rows) + "\n\n" + notes.join(" "), isError: false };
@@ -1320,6 +1471,13 @@ async function getWineLabResults(supabase: any, input: Record<string, unknown>):
     if (vineyard.length) {
       pointers.push(`ETS vineyard sample(s) match: ${vineyard.map((v) => `${v.lab_sample_no} "${v.sample_description_raw}" (${v.sample_type}, ${v.block_id ?? "block unresolved"}, ${v.vintage}, ${dayLabel(v.collected_on)})`).join("; ")} -- call ${vineyard.some((v) => v.sample_type === "berry_maturity") ? "get_berry_maturity" : ""}${vineyard.some((v) => v.sample_type === "berry_maturity") && vineyard.some((v) => v.sample_type !== "berry_maturity") ? " / " : ""}${vineyard.some((v) => v.sample_type !== "berry_maturity") ? "get_smoke_markers" : ""} for them`);
     }
+    const reissue = await reissuePointer(supabase, lab_sample_no ?? sample_description);
+    const clause = (note: string) => note.slice(1, -1).replace(/ before asking the user\.$/, "").replace(/\.$/, "");
+    if (reissue) pointers.push(clause(reissue));
+    if (!lots.length) {
+      const vessel = await vesselPointer(supabase, lot_code ?? normUpper(sample_description));
+      if (vessel) pointers.push(clause(vessel));
+    }
     if (lots.length) {
       pointers.push(`InnoVint lot(s) match: ${lots.map((l) => `${l.lot_code} (${l.lot_name}, ${l.n} analyses, ${dayLabel(pacificDate(l.first_at))} through ${dayLabel(pacificDate(l.last_at))})`).join("; ")} -- call get_lot_analyses with lot_code for InnoVint's own analyses`);
     }
@@ -1353,6 +1511,14 @@ async function getWineLabResults(supabase: any, input: Record<string, unknown>):
     } else if (total === 0 && codes.length) {
       notes.push(`(analysis_code "${analysis_code}" matches nothing for these samples. Codes on file for them: ${codes.map((c) => c.analysis_code).join(", ")}.)`);
     }
+  }
+
+  // Across sources (identifier sweep): the InnoVint readings of the same
+  // analyte family for the matching lot(s), via ets_lot_bridge.
+  if (analysis_code && samples.length > 0) {
+    const cross = await innovintFamilyForDescriptions(supabase, samples.map((s) => s.sample_description_raw), analyteFamily(analysis_code));
+    if (cross.error) notes.push(`(Could not check InnoVint for the same analyte: ${cross.error.message}. Call get_lot_analyses with lot_code to check.)`);
+    if (cross.lines.length) notes.push(crossSourceNote("InnoVint (get_lot_analyses)", cross.lines));
   }
 
   const changes = wineChanges(rows, truncated);

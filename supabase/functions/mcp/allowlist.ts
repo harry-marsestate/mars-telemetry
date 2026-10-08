@@ -52,6 +52,8 @@ export const TABLES_AND_VIEWS: Readonly<Record<string, string>> = {
     "Base table, exception: InnoVint lab rows have no reissue/superseded concept, so there is no *_current view to prefer; operator-only RLS. Duplicate lot objects are handled via lot_canonical_map instead (docs/SECURITY.md, 'get_lot_analyses duplicate-lot bug').",
   lot_canonical_map:
     "Base table, exception: the dedup map itself (duplicate_lot_code -> canonical_lot_code) that get_lot_analyses uses to exclude superseded InnoVint duplicates; no *_current counterpart by construction.",
+  ets_lot_bridge:
+    "Base table, exception (2026-10-08, identifier sweep): the static ETS description -> InnoVint lot_code mapping, read directly by get_wine_lab_results to name InnoVint readings of the same analyte (cross-source variants). Open-read RLS (using true) and already SELECT-granted to mcp_reader as a dependency of ets_lot_analyses_reconciliation (20260926150000) -- no new grant; no *_current counterpart by construction.",
   daily_derived: "security_invoker view (get_derived_series, and the gateway's total_count); column-level grant only (20260930040000).",
   vessels: "Base table, operator-only RLS (get_vessels, and the gateway's total_count); column-level grant only, no capacity_suspect/current_lot_id.",
 };
@@ -64,7 +66,6 @@ export const VIEW_DEPENDENCIES: Readonly<Record<string, string>> = {
   lab_samples: "Beneath lab_samples_current, lab_results_current, berry_maturity_by_block, ets_lot_analyses_reconciliation.",
   lab_results: "Beneath lab_results_current, berry_maturity_by_block, ets_lot_analyses_reconciliation.",
   labour_actuals: "Beneath labour_actuals_by_category, labour_actuals_by_month, labour_vintage_coverage.",
-  ets_lot_bridge: "Beneath ets_lot_analyses_reconciliation.",
   ets_analyte_bridge: "Beneath ets_lot_analyses_reconciliation.",
   daily_weather: "Beneath daily_derived (all its columns are read by the view's first CTE); column-level grant.",
   vintage_climate_calibration: "Beneath daily_derived (vintage, scalar only).",

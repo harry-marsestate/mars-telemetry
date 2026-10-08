@@ -336,3 +336,88 @@ test("5: get_berry_maturity takes a collection-date window, so the Changes note 
   assert.match(r.content, /Effective interval: collected_on >= 2026-08-25 and collected_on <= 2026-09-22 \(calendar dates, both inclusive\)/);
   assert.match(r.content, /B2 2026 brix: 23 \(August 25, 2026\) -> 25\.4 \(September 22, 2026\): \+2\.4 Brix over 28 days = \+0\.086 Brix\/day/);
 });
+
+// ── identifier sweep (2026-10-08): cross-source variants, reissues, vessels ──
+const MA24_SAMPLE = [sample(1, "602250939", "MA24CS", "wine", 2024, "2026-02-25")];
+const ETS_ETHANOL = [result(10, 1, "ethanol_at_20c", "15.22", "2026-02-25T15:39:00+00:00"), result(11, 1, "ethanol_at_60f", "15.14", "2026-02-25T15:56:00+00:00"), result(12, 1, "ph", "3.7", "2026-02-25T15:00:00+00:00", "")];
+
+test("sweep 1: an InnoVint alcohol/ethanol result names ETS ethanol_at_20c and ethanol_at_60f for the same lot", async () => {
+  const lotRows = [{ lot_name: "2024 Mars Estate", lot_code: "MA24CS", block_id: null, analysis_type: "alcohol", value: 15.22, unit: "%", recorded_at: "2026-02-25T18:00:00Z" }];
+  const db = fake({ lot_canonical_map: [], lot_analyses: lotRows, lab_results_current: ETS_ETHANOL }, {
+    chat_lot_analyses_scope: lotScope({ total: 1, lots: [{ lot_code: "MA24CS", lot_name: "2024 Mars Estate", n: 1, first_at: "2026-02-25T18:00:00Z", last_at: "2026-02-25T18:00:00Z" }], analysis_types: [{ analysis_type: "alcohol", n: 1 }] }),
+    chat_ets_winery_scope: (p) => p.p_lot_code === "MA24CS" ? etsScope({ samples: MA24_SAMPLE, analysis_codes: [{ analysis_code: "ethanol_at_20c", n: 1 }, { analysis_code: "ethanol_at_60f", n: 1 }, { analysis_code: "ph", n: 1 }] }) : etsScope(),
+  });
+  const r = await run(db, "get_lot_analyses", { lot_code: "MA24CS", analysis_type: "Alcohol" });
+  assert.match(r.content, /also on file in ETS Labs \(get_wine_lab_results\) .*InnoVint MA24CS <-> ETS 602250939 "MA24CS" \(wine, collected February 25, 2026\): ethanol_at_20c \(20°C\) 15\.22 % vol, ethanol_at_60f \(60°F\) 15\.14 % vol/);
+  assert.doesNotMatch(r.content, /ph \(no stated/, "only the same analyte family is named");
+  assert.deepEqual(db.calls.filter((c) => c[0] === "rpc" && c[1] === "chat_ets_winery_scope").map((c) => c[2]), [{ p_lot_code: "MA24CS" }]);
+  // A different analyte family: no cross-source note.
+  const ph = await run(db, "get_lot_analyses", { lot_code: "MA24CS", analysis_type: "brix" });
+  assert.doesNotMatch(ph.content, /also on file in ETS/);
+});
+
+test("sweep 1: an ETS ethanol result names InnoVint's alcohol/ethanol for the bridged lot, never a superseded duplicate", async () => {
+  const s3 = [sample(3, "312211153", "MA23CSV3", "wine", 2023, "2023-12-21")];
+  const lotRows = [
+    { lot_code: "MA23CSV3", analysis_type: "alcohol", value: 14.58, unit: "%", recorded_at: "2023-12-22T19:00:00Z" },
+    { lot_code: "MA23CSV3", analysis_type: "ethanol", value: 14.63, unit: "%", recorded_at: "2023-12-22T19:00:00Z" },
+    { lot_code: "MA23CSV3-AP", analysis_type: "alcohol", value: 14.58, unit: "%", recorded_at: "2023-12-22T19:00:00Z" },
+  ];
+  const db = fake({
+    lab_results_current: [result(30, 3, "ethanol_at_20c", "14.63", "2023-12-22T10:00:00+00:00")], ets_lot_analyses_reconciliation: [], lot_analyses: lotRows,
+    ets_lot_bridge: [{ ets_description: "MA23CSV3", lot_analyses_lot_code: "MA23CSV3" }, { ets_description: "MA23CSV3", lot_analyses_lot_code: "MA23CSV3-AP" }, { ets_description: "MA23CSV3", lot_analyses_lot_code: "MA23CSV322" }],
+    lot_canonical_map: [{ duplicate_lot_code: "MA23CSV3-AP", canonical_lot_code: "MA23CSV3" }, { duplicate_lot_code: "MA23CSV322", canonical_lot_code: "MA23CSV3" }],
+  }, {
+    chat_ets_winery_scope: etsScope({ samples: s3, total: 1, analysis_codes: [{ analysis_code: "ethanol_at_20c", n: 1 }] }),
+    chat_lot_analyses_scope: (p) => lotScope({ analysis_types: p.p_lot_code === "MA23CSV3" ? [{ analysis_type: "alcohol", n: 1 }, { analysis_type: "ethanol", n: 1 }, { analysis_type: "brix", n: 9 }] : [] }),
+  });
+  const r = await run(db, "get_wine_lab_results", { lab_sample_no: "312211153", analysis_code: "ethanol_at_20c" });
+  assert.match(r.content, /also on file in InnoVint \(get_lot_analyses\) .*ETS "MA23CSV3" <-> InnoVint MA23CSV3: alcohol \(no stated reference temperature\) 14\.58 % on December 22, 2023, ethanol \(no stated reference temperature\) 14\.63 % on December 22, 2023/);
+  assert.doesNotMatch(r.content, /InnoVint MA23CSV3-AP|InnoVint MA23CSV322/);
+  assert.deepEqual(db.calls.filter((c) => c[0] === "rpc" && c[1] === "chat_lot_analyses_scope").map((c) => c[2].p_lot_code), ["MA23CSV3"]);
+});
+
+const REISSUE = [{ id: 9, lab_sample_no: "511110861A", reissue_of: "511110861", sample_type: "trial_ferment", sample_description_raw: "BUCKET FERMENT", vintage: 2025, collected_on: "2025-11-11", block_id: null, collected_on_source: "inferred_from_receipt" }];
+test("sweep 2: a superseded lab_sample_no names its reissue, in every tool that takes a sample number", async () => {
+  const want = /511110861 is a superseded ETS sample number: ETS reissued it as 511110861A \("BUCKET FERMENT", trial_ferment, 2025, collected November 11, 2025\)\. .*lab_sample_no "511110861A" with get_smoke_markers/;
+  const smoke = await run(fake({ lab_samples_current: REISSUE, lab_results_current: [] }), "get_smoke_markers", { lab_sample_no: "511110861" });
+  assert.match(smoke.content, want);
+  assert.doesNotMatch(smoke.content, /if it is a berry-maturity or winery sample/);
+  const wine = await run(fake({ lab_samples_current: REISSUE, vessels: [] }, { chat_ets_winery_scope: etsScope() }), "get_wine_lab_results", { lab_sample_no: "511110861" });
+  assert.match(wine.content, want);
+  assert.doesNotMatch(wine.content, /\.\. /, "no doubled punctuation");
+  const lot = await run(fake({ lot_canonical_map: [], lot_analyses: [], lab_samples_current: REISSUE, vessels: [] }, { chat_lot_analyses_scope: lotScope() }), "get_lot_analyses", { lot_code: "511110861" });
+  assert.match(lot.content, want);
+  // The reissue itself is a normal current sample: no pointer.
+  const current = await run(fake({ lab_samples_current: REISSUE, lab_results_current: [] }), "get_smoke_markers", { lab_sample_no: "511110861A" });
+  assert.doesNotMatch(current.content, /superseded ETS sample number/);
+});
+
+test("sweep 3: a lot code that exists only on a vessel points to get_vessels; a truly unknown code is still absent", async () => {
+  const vessels = [{ code: "TD-08", vessel_type: "tank", current_lot_name: "WHITE LEES", current_lot_code: "XMAWHITELEES", archived: false }];
+  const want = /Lot code XMAWHITELEES has no lab analyses in InnoVint or ETS, but it is the current lot of 1 vessel\(s\): TD-08 \(tank, current lot XMAWHITELEES "WHITE LEES"\)\. Call get_vessels with current_lot_name "WHITE LEES"/;
+  const lot = await run(fake({ lot_canonical_map: [], lot_analyses: [], lab_samples_current: [], vessels }, { chat_lot_analyses_scope: lotScope() }), "get_lot_analyses", { lot_code: "xmawhitelees" });
+  assert.match(lot.content, want);
+  assert.doesNotMatch(lot.content, /genuinely absent/);
+  const wine = await run(fake({ lab_samples_current: [], vessels }, { chat_ets_winery_scope: etsScope() }), "get_wine_lab_results", { lot_code: "XMAWHITELEES" });
+  assert.match(wine.content, want);
+  const unknown = await run(fake({ lot_canonical_map: [], lot_analyses: [], lab_samples_current: [], vessels }, { chat_lot_analyses_scope: lotScope() }), "get_lot_analyses", { lot_code: "NO-SUCH-LOT" });
+  assert.match(unknown.content, /genuinely absent in both sources/);
+});
+
+test("sweep: descriptions tell the model about cross-source variants, reissues and vessel pointers", () => {
+  assert.match(desc("get_lot_analyses"), /the matching ETS Labs results for the same lot/);
+  assert.match(desc("get_lot_analyses"), /vessel a lot code is assigned to \(get_vessels\)/);
+  assert.match(desc("get_wine_lab_results"), /plus InnoVint's readings of the same analyte for the matching lot/);
+  assert.match(desc("get_wine_lab_results"), /superseded sample number \(e\.g\. 511110861\) is answered with its reissue \(511110861A\)/);
+});
+
+test("sweep 1: a failed cross-source lookup is noted, never discards the primary result", async () => {
+  const db = fake({ lab_results_current: MA24_RESULTS, ets_lot_analyses_reconciliation: [] }, {
+    chat_ets_winery_scope: etsScope({ samples: MA24, total: 2, analysis_codes: [{ analysis_code: "ethanol_at_20c", n: 2 }] }),
+  }); // chat_lot_analyses_scope is not provided, so the InnoVint side of the lookup errors
+  const r = await run(db, "get_wine_lab_results", { sample_description: "MA24CS", analysis_code: "ethanol_at_20c" });
+  assert.equal(r.isError, false);
+  assert.equal(rowsOf(r).length, 2);
+  assert.match(r.content, /Could not check InnoVint for the same analyte: no rpc chat_lot_analyses_scope/);
+});

@@ -8599,3 +8599,90 @@ Brix week was Sep 8-15. That is what the proposed check below would catch.
 6. The Codex daily check will report the three new lab fields once as MEDIUM
    schema drift (it compares with its own last BASELINES). Expected; it
    re-baselines on that run.
+
+## Identifier sweep: cross-source pointers (2026-10-08)
+
+A read-only sweep through the live gateway (v21, owner key `mtk_jvOeHpCG`)
+looked up every ETS `lab_sample_no` (47: 46 current, 1 superseded) and every
+lot code (19: 18 in `lot_analyses`, 1 only on a vessel), both by exact
+identifier and through a deliberately wrong-source query. Branch
+`fix/cross-source-pointers`; **not deployed**.
+
+### What it found (before)
+
+| Finding | Identifiers | Before |
+|---|---|---|
+| Superseded number dead-ends | `511110861` (reissued as `511110861A`) | Winery, smoke and InnoVint lookups all returned nothing and did not name the reissue. |
+| Vessel-only lot code | `XMAWHITELEES` (tank TD-08, "WHITE LEES") | "genuinely absent in both sources", with no pointer to `get_vessels`. |
+| Variants not surfaced across sources | 11 lots, 12 ETS samples (43 lookups) | e.g. InnoVint `MA24CS` has only `alcohol`, while ETS has `ethanol_at_20c` 15.22 and `ethanol_at_60f` 15.14 for the same lot. A request on one side named nothing from the other. |
+
+Everything else passed: exact lookups, same-source variants, and the
+wrong-source pointers for every current sample and InnoVint lot. Not changed,
+by decision: `get_berry_maturity` still has no `lab_sample_no` parameter. Its
+16 samples are found by number through the winery tool's pointer.
+
+### What changed
+
+- **Cross-source variants:**
+  - **InnoVint → ETS.** `get_lot_analyses` with an `analysis_type` lists ETS
+    results in the same analyte family for each matched lot (first 5 lots,
+    20 values each). Lot → sample uses `chat_ets_winery_scope`'s own
+    `p_lot_code` rule (exact description or `ets_lot_bridge`), so it can't
+    disagree with `get_wine_lab_results lot_code`.
+  - **ETS → InnoVint.** `get_wine_lab_results` with an `analysis_code` lists
+    InnoVint readings in the same family for the matching lots. Description →
+    lot code is the same rule reversed (exact code or `ets_lot_bridge`).
+    Superseded duplicate lot codes are dropped, since their chemistry is
+    identical to the canonical lot's.
+  - Values are labelled with source and reference temperature, never merged.
+    A failure on the other source is noted, never discarding the primary
+    result.
+- **Reissues:** a superseded sample number is answered with its reissue and
+  the tool to use, in `get_wine_lab_results`, `get_smoke_markers` and
+  `get_lot_analyses`. It reads `reissue_of` from `lab_samples_current`, never
+  the base table.
+- **Vessel-only lot codes:** `get_lot_analyses` and `get_wine_lab_results`
+  name the vessel(s) and its current lot name, and point to `get_vessels`. A
+  genuinely unknown code is still reported as absent in both sources.
+- **Descriptions:** both tools mention the cross-source variants, reissues and
+  vessel pointers.
+- **Allowlist (boundary change for review):** `ets_lot_bridge` moves from
+  `VIEW_DEPENDENCIES` to `TABLES_AND_VIEWS`, because tool code now reads it.
+  It already had `mcp_reader` SELECT (20260926150000) and open-read RLS (static
+  mapping, same class as `lot_canonical_map`). The set of grants is unchanged;
+  `check-mcp-boundaries` passes.
+- **Lint:** fixed a misplaced `deno-lint-ignore` from the previous round (the
+  coverage-note fix); `deno lint` is back to the two findings that predate it.
+
+**No migration is needed.** Everything reads relations `mcp_reader` and
+`authenticated` can already read (`lab_samples_current.reissue_of`; `vessels`
+code, type, current lot code and name, archived; `ets_lot_bridge`) and calls the
+existing scope functions.
+
+### Tests and sweep
+
+- `tests/chat-tool-findings.test.mjs` has 6 new tests: both cross-source
+  directions (values, family-only, superseded duplicates excluded, which RPCs
+  are called), failure degrades to a note, reissue named in all three tools
+  (and not for the reissue itself), vessel pointer in both tools while an
+  unknown code stays absent, and the description text.
+- Full suite: **Node 141/141**, **Deno 96/96**, boundary check PASS.
+- Sweep (`scratchpad/probe/sweep2.mjs`; 228 lookups including the
+  cross-source checks):
+
+| Run | Dead ends (no match, no pointer) | Missing cross-source sibling | Data observation |
+|---|---|---|---|
+| Before: deployed gateway v21 | 5 | 43 | 1 |
+| Before: main's code run locally (as the synthetic operator) | 5 | 43 | 1 |
+| After: branch code run locally | **0** | **0** | 1 |
+
+The two "before" runs agree finding for finding, so running locally is a
+faithful stand-in for the gateway. The data observation is that `310310429`
+has only `ethanol_at_20c` on file.
+
+### After approval
+
+Deploy `chat` and `mcp` (both import `chat/tools.ts`), then download each and
+diff against main. Re-run `mcp-parity.mjs` (it now also exercises
+`ets_lot_bridge` and `vessels` reads) and the sweep through the gateway,
+expecting 0 / 0 / 1.

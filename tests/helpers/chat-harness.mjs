@@ -75,7 +75,9 @@ export function loadChat({ extra = '', invoke, from, globals = {}, transform = (
   const calls = [];
   const sb = {
     functions: { invoke: (name, opts) => { calls.push({ name, opts }); return invoke(name, opts); } },
-    from: from ?? (() => { throw new Error('unexpected sb.from'); }),
+    // chat_events inserts (usage events) succeed silently by default; any
+    // other table is unexpected unless the test supplies `from`.
+    from: from ?? ((table) => { if (table === 'chat_events') return { insert: async () => ({ error: null }) }; throw new Error('unexpected sb.from ' + table); }),
   };
   const ctx = {
     $, $$: () => [], sb, console,

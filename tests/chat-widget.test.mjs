@@ -285,8 +285,10 @@ test('model and user text is escaped in every view', async () => {
   }
 });
 
-test('usage events are off by default: no writes, no rating controls', async () => {
-  const { t, last } = setup({ from: () => { throw new Error('no chat_events writes while the flag is off'); } });
+test('with the events flag off: no writes, no rating controls (and main ships it on)', async () => {
+  assert.match(HTML, /^const CHAT_EVENTS_ENABLED = true;$/m);
+  const { t, last } = setup({ from: () => { throw new Error('no chat_events writes while the flag is off'); },
+    transform: (s) => s.replace('const CHAT_EVENTS_ENABLED = true;', 'const CHAT_EVENTS_ENABLED = false;') });
   t.cwOpenWin();
   t.ask('q', { surface: 'widget' });
   await tick();

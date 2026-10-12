@@ -84,6 +84,6 @@ test('resetChat clears history, role, draft and suggestions', async () => {
 
 test('runSessionGate resets the chat on sign-out and on any user change', () => {
   const gate = HTML.slice(HTML.indexOf('async function runSessionGate'), HTML.indexOf("$('#pending-signout')"));
-  assert.match(gate, /if\(!session\)\{ resetChat\(\);/);
-  assert.match(gate, /if\(session\.user\.id !== chatUserId\)\{ resetChat\(\); chatUserId=null;/);
+  assert.match(gate, /if\(!session\)\{ resetChat\(\); resetUserDom\(\);/);
+  assert.match(gate, /if\(session\.user\.id !== chatUserId\)\{ resetChat\(\); resetUserDom\(\); chatUserId=null;/);
 });

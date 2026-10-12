@@ -8727,4 +8727,36 @@ contents; plus a static check on `runSessionGate`. Against main 5 of 6 fail;
 with the fix 6 of 6 pass. Full suite: Node 147/147 (was 141), Deno 96/96,
 boundary check PASS.
 
+**Rendered dashboard DOM (added to this fix, 2026-10-12).** Same class of
+defect, outside the chat: `resetTabViews()` drops the render cache on a user
+change, not the DOM. After an operator opened Winery and signed out, the
+next user's page still held the operator's cellar, lot, vessel and fruit
+panels in the hidden Winery tab until first opened. Confirmed on main with
+the synthetic operator then HEALTH-CUST-B2 (`#body-winery` panels:
+`anom-w, cellart, cellarh, ferm, tanks, fruit`).
+
+`resetUserDom()` now runs beside `resetChat()` on sign-out and on any user
+change. It clears:
+- both data tab bodies and filter bars;
+- the User Management lists (pending users' emails, accounts, API keys);
+- a one-time API key still on screen (`clearOneTimeKey`);
+- the tooltip.
+
+It also sets `dashboardBooted = false` and unsubscribes overview Realtime, so
+the visible tab is re-rendered for the new user even when the user changes
+without a sign-out in between. After the fix, the same sequence leaves
+`#body-winery` empty.
+
+`tests/user-dom-reset.test.mjs` runs `resetUserDom()` itself against a fake
+DOM and checks `runSessionGate` calls it on both paths, before any role
+branch. Node 149/149. `p3-frontend.mjs --dry-run --users operator,customer_b2`
+is unchanged: 13 pass, and the 4 gateway checks need `P3_MCP_KEY`.
+
+**Residual, not fixed:** a tab render already in flight when the user
+changes can still finish into the cleared host. It would paint rows fetched
+under the previous user's token, and only if the switch lands mid-render.
+Closing it needs a generation check like `chatGen` across `renderTab`'s
+awaits; this is noted rather than done here because it touches every panel
+render path.
+
 **Deploy.** Frontend only (`web/index.html`); no Edge Function or migration.

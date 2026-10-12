@@ -5787,6 +5787,27 @@ $$('.logo-img').forEach(img=>img.src=LOGO_SRC);
 /* §10 ── SESSION GATE (Phase 6.4/6.5) ─────────────────── */
 let dashboardBooted=false;
 
+// What one signed-in user's session left rendered in the page, cleared on
+// sign-out and on any user change (docs/SECURITY.md, "Chat history is never
+// carried across users"). resetTabViews() only drops the render CACHE: a tab
+// the new user has not opened yet kept the previous user's panels -- cellar,
+// lots, vessels, fruit for an operator -- in its hidden DOM, readable in
+// DevTools on a shared computer, until first opened. The same goes for the
+// User Management lists (pending users' emails, accounts, API keys,
+// including a one-time key still on screen). Each host is rebuilt from
+// scratch the next time it is shown (renderTab, the queue loaders).
+function resetUserDom(){
+  ['#body-vineyard','#body-winery','#f-vineyard','#f-winery',
+   '#queue-list','#accounts-list','#keys-once','#keys-create','#keys-table']
+    .forEach(s=>{ const e=$(s); if(e) e.innerHTML=''; });
+  if(clearOneTimeKey) clearOneTimeKey();
+  hideTip();
+  // Re-render the tab on screen for whoever signs in next, even when the
+  // user changes without a sign-out in between.
+  dashboardBooted=false;
+  unsubscribeOverviewRealtime();
+}
+
 // Central place to update if the customer/operator labels change again --
 // role itself stays 'operator'/'customer' everywhere in the database and
 // RLS; this only maps how it's displayed.
@@ -5863,14 +5884,14 @@ function showFinishProfileOnly(prefill){
 let sessionMetaFingerprint = null; // what the last gate pass read, see sessionMetaVersion
 async function runSessionGate(){
   const { data: { session } } = await sb.auth.getSession();
-  if(!session){ resetChat(); chatUserId=null; THRESHOLDS=null; thresholdsPromise=null; invalidateDataCache(); showAuthOnly(); return; }
+  if(!session){ resetChat(); resetUserDom(); chatUserId=null; THRESHOLDS=null; thresholdsPromise=null; invalidateDataCache(); showAuthOnly(); return; }
   _userRolePromise=null; /* always re-check fresh, not a stale cached role from a prior session */
   // Another account's cached readings must never be shown to this one
   // (RLS differs per user): drop every cache on a user change.
   // The chat goes too, at once -- not only when the next approved user's
   // initChat() runs further down, which a pending or unnamed account never
   // reaches.
-  if(session.user.id !== chatUserId){ resetChat(); chatUserId=null; invalidateDataCache(); resetTabViews(); _latestPatternsCache = null; _accessibleBlocksPromise = null; }
+  if(session.user.id !== chatUserId){ resetChat(); resetUserDom(); chatUserId=null; invalidateDataCache(); resetTabViews(); _latestPatternsCache = null; _accessibleBlocksPromise = null; }
 
   // Gated for EVERY role/status/provider, checked every login, ahead of
   // even the pending-approval screen -- a not-yet-approved signup with no

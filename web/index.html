@@ -1944,6 +1944,7 @@ async function latestFetch(spec, vintage, asOf){
 /* §3 ── STATE ──────────────────────────────────────── */
 const state = {
   tab:'vineyard',
+  lastDataTab:'vineyard',
   vineyard:{vintages:[CURRENT], blocks:[...ALL_IDS]},
   winery:  {vintages:[CURRENT], blocks:[...ALL_IDS]},
   range:{},
@@ -2211,14 +2212,21 @@ const SECTIONS = [
   // model (docs/SECURITY.md, "Climate rows were labelled ERA5 but came from
   // ECMWF IFS"); wind, solar and UV have no real source and stay simulated.
   {tab:'vineyard', id:'climate', label:'Climate',      note:'Open-Meteo ECMWF IFS model · wind, solar & UV simulated'},
-  {tab:'vineyard', id:'soil',    label:'Soil & water', note:'Vineyard sensors'},
+  // Not on-site sensors: real soil is the ERA5-Land model's surface layer,
+  // estate-wide (no per-block values); per-block probes exist only as
+  // simulated data. Weather inputs (precipitation, VPD, ET0) are the ECMWF
+  // IFS model, as in Climate.
+  {tab:'vineyard', id:'soil',    label:'Soil & water',
+   note:(c)=> isRealClimateVintage('soil_moisture', c.primary)
+     ? 'Open-Meteo models (ERA5-Land soil, ECMWF IFS weather) · estate-wide, not on-site sensors'
+     : 'Simulated soil probes · weather from the Open-Meteo ECMWF IFS model'},
   // Function-valued like harvest's note above -- reality now varies by
   // vintage (real for 2023/2024/2026, absent for 2022/2025), so a single
   // static string would misdescribe most vintages.
   {tab:'vineyard', id:'labour',  label:'Labour',
    note:(c)=> c.compare ? 'Mars labor & invoice records — coverage varies by vintage shown below'
      : REAL_LABOUR_VINTAGES.has(c.primary) ? 'Mars labor & invoice records' : 'No labour records for this vintage'},
-  {tab:'winery',   id:'cellar',  label:'Cellar',       note:'Cellar HVAC sensors'},
+  {tab:'winery',   id:'cellar',  label:'Cellar',       note:'Simulated building sensors · no real cellar feed yet'},
   {tab:'winery',   id:'ferm',    label:'Fermentation', note:'InnoVint winery data'},
   // The only function-valued note: harvest's source flips with vintage, and a
   // static "Simulated weigh-tag record" contradicted the fruit panel's own
@@ -2256,7 +2264,10 @@ const DATA_SOURCES = {
   soil_moisture:     {kind:'sensor', detail:'probes at 18 in'},
   soil_temp:         {kind:'sensor', detail:'probes at 18 in'},
   precipitation:     {kind:'weather'},
-  irrigation_volume: {kind:'weather'},
+  // Was {kind:'weather'}, which labelled simulated flow-meter values
+  // "Regional weather data (Howell Mountain)". Real vintages return the
+  // farm-records label in getDataSourceLabel before this is reached.
+  irrigation_volume: {kind:'simulated', detail:'Simulated flow-meter reading · no farm irrigation records for this vintage'},
   cellar_temp:       {kind:'building'},
   cellar_rh:         {kind:'building'},
   // Key deliberately names the CALIBRATED column, matching what the GDD
@@ -2270,7 +2281,7 @@ const DATA_SOURCES = {
   // dtr_f, because the live dtr_low threshold is tuned to the raw scale.
   dtr_f:             {kind:'derived', detail:'from air temperature (daily max − min)'},
   vpd_kpa:           {kind:'derived', detail:'from air temperature and humidity'},
-  et0_in:            {kind:'derived', detail:'from temperature, humidity, wind, and solar radiation'},
+  et0_in:            {kind:'derived', detail:'Hargreaves formula from air temperature only'},
   lot_analyses:      {kind:'real', detail:'InnoVint lab analyses'},
   vessels:           {kind:'real', detail:'InnoVint vessel inventory'},
   solar:             {kind:'procedural', detail:'Simulated pyranometer + UV reading'},
@@ -2669,7 +2680,7 @@ function getDataSourceLabel(metricKey, vintage){
   if((metricKey==='air_temp' || metricKey==='humidity' || metricKey==='precipitation') && isRealClimateVintage(metricKey, vintage))
     return OPEN_METEO_IFS_LABEL;
   if((metricKey==='soil_moisture' || metricKey==='soil_temp') && isRealClimateVintage(metricKey, vintage))
-    return 'Open-Meteo · ERA5-Land reanalysis, surface 0-7cm';
+    return 'Open-Meteo · ERA5-Land model (reanalysis), surface 0–7 cm · estate-wide, not per block';
   // GDD and DTR were one branch, both claiming Grapegrowers calibration.
   // Only GDD actually reads a calibrated column, so the shared claim was
   // false for DTR -- split rather than left overclaiming for one metric.
@@ -2723,6 +2734,13 @@ function getDataSourceLabel(metricKey, vintage){
   if(s.kind==='sensor') return vintage===CURRENT
     ? `Simulated ${s.detail} · on-site sensors pending`
     : `Simulated ${s.detail}`;
+  if(s.kind==='simulated') return s.detail;
+  // ET0 is the Hargreaves formula over daily air temperature with a fixed
+  // radiation term (daily_derived's view definition): it takes no wind,
+  // humidity or solar input, whatever the old label said.
+  if(metricKey==='et0_in') return isRealClimateVintage(metricKey, vintage)
+    ? `Estimated · Hargreaves formula from ${OPEN_METEO_IFS_LABEL} air temperature only (no wind, humidity or solar input)`
+    : 'Estimated · Hargreaves formula from simulated air temperature only';
   if(s.kind==='derived')  return `Derived metric · ${s.detail}`;
   return s.detail; // 'real' and 'procedural' are static, vintage-independent strings
 }
@@ -2848,7 +2866,7 @@ const PANELS = [
  render:(b,c)=>renderWind(b,c)},
 
 {id:'solar', tab:'vineyard', sect:'climate', span:'s12', minRole:'all', title:'Solar insolation & UV', unit:'W/m² · UV index',
- sub:(c)=>getDataSourceLabel('solar',c.primary)+' · measured against clear-sky expectation', range:'1D',
+ sub:(c)=>getDataSourceLabel('solar',c.primary)+' · compared with a clear-sky curve', range:'1D',
  info:"Higher means more radiation reaching the canopy: faster photosynthesis and sugar accumulation, with more heat load and sunburn risk. Lower means slower ripening, and combined with high humidity, more mildew pressure. Compare against the clear-sky line, not against a fixed number — the ceiling falls through the season.",
  render:(b,c)=>renderSolar(b,c)},
 
@@ -3088,6 +3106,86 @@ const PANELS = [
  render:(b,c)=>renderFruit(b,c)}
 ];
 
+/* ── Dashboard guide (what each panel means, for the chat) ──────────────
+   One entry per panel, keyed by PANELS id, plus DASHBOARD_EXTRAS for the
+   panels built outside PANELS (map, insights, "at a glance" tiles).
+   scripts/build-dashboard-guide.mjs reads these together with PANELS,
+   SECTIONS, getDataSourceLabel(), each panel's info text and HARVEST_BAND,
+   and writes supabase/functions/_shared/dashboard-guide.generated.ts, which
+   the chat function serves to the model. Titles, units, roles, provenance
+   labels and threshold numbers are therefore never written twice; only the
+   short `what` text below is hand-written (REVIEW: owner to check wording).
+   tests/dashboard-guide.test.mjs fails if a panel has no entry here or the
+   generated file is stale.
+
+   what     plain-language description: what it shows and how to read it
+   domain   domain_reality() key that decides real vs simulated per vintage
+            (null: not vintage-dependent)
+   tool     the chat tool that returns this panel's data, or null
+   noTool   what to say when tool is null */
+const PANEL_GUIDE = {
+  airtemp:  {domain:'air_temp', tool:'get_series metric=air_temp (estate-wide; omit block)',
+    what:'Hourly air temperature for the whole estate, in °F. One estate-wide series, not per block; selecting several vintages overlays them.'},
+  gdd:      {domain:'gdd_cumulative_calibrated', tool:'get_derived_series (gdd_cumulative_calibrated)',
+    what:'Growing degree days: heat banked since 1 April, base 50 °F, summed day by day. The line only ever rises; the shaded band is the normal harvest window for this site ({{HARVEST_BAND}} GDD), and approaching it means berry sampling should begin.'},
+  dtr:      {domain:'dtr_f', tool:'get_derived_series (dtr_f)',
+    what:'Diurnal temperature range: each day\'s high minus low, in °F. Wide swings (cool nights) favour colour and acid retention; narrow swings mean warm nights.'},
+  rh:       {domain:'humidity', tool:'get_series metric=humidity (estate-wide; omit block)',
+    what:'Hourly relative humidity for the estate, in %. High humidity, especially with warmth, raises mildew pressure.'},
+  wind:     {domain:'wind_speed', tool:null,
+    noTool:'No tool returns the wind on this panel: it is generated in the browser, and the only wind in the database is simulated too (get_series labels it simulated). Say there is no measured wind for this site; do not quote figures as real.',
+    what:'Wind speed (mph) and direction. Simulated: there is no wind measurement for this site, so the values are demonstration data.'},
+  solar:    {domain:'solar', tool:null,
+    noTool:'No tool returns the series this panel plots: it is generated in the browser. (Modelled ECMWF solar radiation is stored for 2022-2025, but this panel does not plot it, so do not present those numbers as what the user sees.)',
+    what:'Solar insolation (W/m²) and UV index across the day, compared with a clear-sky curve; the readout gives the share of clear sky, today\'s peak and daily total. Simulated: there is no pyranometer or UV sensor at the estate.'},
+  soilmoist:{domain:'soil_moisture', tool:'get_series metric=soil_moisture (real data is estate-wide: omit block)',
+    what:'Soil water content, % by volume. Where real, it is the ERA5-Land model\'s surface layer (0-7 cm) for the whole estate, not a probe in each block, so there are no real per-block values; per-block lines appear only for simulated vintages. The shaded band is the deficit-irrigation target. ERA5-Land is published about five days late, so the newest real value trails other climate data.'},
+  soiltemp: {domain:'soil_temp', tool:'get_series metric=soil_temp (real data is estate-wide: omit block)',
+    what:'Soil temperature in °F. Where real, it is the ERA5-Land model\'s surface layer (0-7 cm), estate-wide; per-block lines appear only for simulated vintages. Published about five days late.'},
+  vpd:      {domain:'vpd_kpa', tool:'get_derived_series (vpd_kpa)',
+    what:'Vapour pressure deficit, daily average, in kPa: how strongly the air draws water from the leaves, computed from modelled air temperature and humidity. The shaded band is the productive range; a daily average under-represents afternoon peaks.'},
+  et0:      {domain:'et0_in', tool:'get_derived_series (et0_in)',
+    what:'Reference evapotranspiration, inches per day: an estimate of how much water a reference crop would use. Estimated with the Hargreaves formula from daily air temperature only, with a fixed radiation term; it does not use wind, humidity or solar data.'},
+  precip:   {domain:'precipitation', tool:'get_series metric=precipitation agg=sum (estate-wide; omit block)',
+    what:'Precipitation in inches, estate-wide, from the ECMWF IFS model.'},
+  irrig:    {domain:'irrigation_volume', tool:'get_series metric=irrigation_volume agg=sum',
+    what:'Irrigation water applied, in gallons. Real for vintages with Mars Vineyard Farming records; otherwise simulated flow-meter values.'},
+  irrigblk: {domain:'irrigation_volume', tool:'get_series metric=irrigation_volume agg=sum, per block',
+    what:'Irrigation per block: gallons, gallons per acre and inches, from Mars Vineyard Farming records. 2025 has annual totals only, 2022 has no records, and the current vintage is still being collected.'},
+  labhours: {domain:'labour', tool:'get_labour_summary',
+    what:'Vineyard labour hours by operation category (canopy, harvest, irrigation...), from Mars labour and invoice records. Coverage differs by vintage; some vintages have no records.'},
+  labcost:  {domain:'labour', tool:'get_labour_summary',
+    what:'Vineyard labour cost by operation category and cost per hour, from the same records as labour hours. Expenses folded into some categories carry cost but no hours.'},
+  cellart:  {domain:'cellar_temp', tool:'get_series metric=cellar_temp (simulated)',
+    what:'Barrel-room temperature in °F against its target band. Simulated building sensor: there is no real cellar feed yet.'},
+  cellarh:  {domain:'cellar_rh', tool:'get_series metric=cellar_rh (simulated)',
+    what:'Barrel-room relative humidity in % against its target band. Simulated building sensor: there is no real cellar feed yet.'},
+  ferm:     {domain:'lot_analyses', tool:'get_lot_analyses',
+    what:'Lab history for one lot from InnoVint: Brix, pH, TA, temperature and other analyses over time. Pick a lot from the selector.'},
+  tanks:    {domain:'vessels', tool:'get_vessels',
+    what:'Vessel inventory from InnoVint: each tank and barrel, its volume and the lot currently in it.'},
+  fruit:    {domain:'harvest_receipts', tool:null,
+    noTool:'No chat tool returns harvest receipts; describe the panel from this guide only.',
+    what:'Fruit received by lot: InnoVint grower receipts (weigh-tag intake) where real; simulated weigh tags for other vintages.'},
+};
+const DASHBOARD_EXTRAS = [
+  {id:'map', tab:'vineyard', sect:'overview', minRole:'all', title:'Block map', unit:'acres', domain:null, tool:null,
+   provenance:'Survey outline of the estate', noTool:'It is a map; no data tool applies.',
+   what:'Map of the three blocks (B1, B2, B3) traced from the estate survey, with acreage. Clicking a block filters the whole page to it.'},
+  {id:'ov-vineyard', tab:'vineyard', sect:'overview', minRole:'all', title:'Estate at a glance', unit:'', domain:null, tool:'the same tools as the panels each tile summarises',
+   provenance:'Each tile carries the provenance of the panel it summarises',
+   what:'Latest values for air temperature, humidity, GDD to date, soil moisture, VPD and diurnal range, each with a short status. Each tile is the newest point of the matching panel below.'},
+  {id:'anom-v', tab:'vineyard', sect:'overview', minRole:'all', title:'Insights and Anomalies', unit:'AI-enabled', domain:null, tool:'get_anomalies (the "Now" list)',
+   provenance:'Rules evaluated on the panels\' data; the wind rule runs on simulated wind. Patterns come from the weekly insights scan.',
+   what:'"Now" lists rules currently triggered against the estate\'s thresholds (heat, humidity, soil, VPD, diurnal range, wind). "Patterns" lists relationships across seasons found by a weekly scan; they are directional and based on small samples, not established causes.'},
+  {id:'ov-winery', tab:'winery', sect:'overview', minRole:'all', title:'Cellar at a glance', unit:'', domain:'cellar_temp', tool:null,
+   provenance:'Simulated building sensors', noTool:'Operators can use get_series metric=cellar_temp / cellar_rh (simulated).',
+   what:'Latest cellar temperature and humidity. Simulated building sensors: there is no real cellar feed yet.'},
+  {id:'anom-w', tab:'winery', sect:'overview', minRole:'operator', title:'Insights and Anomalies', unit:'AI-enabled', domain:null, tool:null,
+   provenance:'Rules over simulated cellar and fermentation-monitoring data', noTool:'get_anomalies covers vineyard rules only; winery rules have no tool.',
+   what:'Winery rules for the current vintage: cellar conditions and fermentation monitoring. Fermentation monitoring is simulated.'},
+];
+
 /* Build the series list for an estate-level metric, honouring compare mode.
    Merges align:c.align into opts (caller's explicit opts.align wins if
    given) so every vSets-based panel gets compare-mode calendar alignment
@@ -3289,7 +3387,7 @@ function renderSolar(box, ctx){
 
   const sets = ctx.compare
     ? ctx.vintages.map(y=>({name:String(y),color:VCOLOR[y],pts:buildSeries((d,vv)=>sample('solar','estate',d,vv),y,ctx.range,{align:true})}))
-    : [{name:'Measured',color:METRICS.solar.color,pts:buildSeries((d,vv)=>sample('solar','estate',d,vv),v,ctx.range,{align:ctx.align,latestRaw:true})},
+    : [{name:'Simulated',color:METRICS.solar.color,pts:buildSeries((d,vv)=>sample('solar','estate',d,vv),v,ctx.range,{align:ctx.align,latestRaw:true})},
        {name:'Clear-sky expected',color:'#655F55',pts:buildSeries((d)=>clearSky(d),v,ctx.range,{align:ctx.align,latestRaw:true})}];
   legendFor(box.parentElement, sets);
   lineChart(cwrap, sets, {unit:'W/m²',dec:0,h:196,zero:true});
@@ -4901,7 +4999,7 @@ async function renderTab(tab){
   } else {
     const ov=el('div','panel');
     ov.innerHTML=`<div class="ov-hd"><div class="ov-ttl">Cellar at a glance</div>
-      <div class="ov-note">Live building sensors<br>updates instantly</div></div>
+      <div class="ov-note">Simulated building sensors<br>no real cellar feed yet</div></div>
       <div class="ov-grid duo" id="ovg-winery"></div>`;
     left.appendChild(ov);
     pending.push(()=>paintOverviewW());
@@ -5067,6 +5165,7 @@ function renderTabPreserveScroll(tab){
 /* Tabs */
 $$('.tab').forEach(t=>t.onclick=()=>{
   state.tab=t.dataset.tab;
+  if(state.tab==='vineyard' || state.tab==='winery') state.lastDataTab=state.tab; // the Chat tab's "last viewed" context
   $$('.tab').forEach(x=>x.classList.toggle('on', x===t));
   $$('.view').forEach(v=>v.classList.toggle('on', v.id==='view-'+state.tab));
   hideTip();
@@ -5460,7 +5559,7 @@ function chatSyncAllInputs(){
 
 function chatSendFrom(v){
   if(chatBusy || !chatDraft.trim()) return;
-  ask(chatDraft, {surface:v.surface, ctx: v.surface==='widget' ? cwContextForSend() : null});
+  ask(chatDraft, {surface:v.surface, ctx: v.surface==='widget' ? cwContextForSend() : chatTabContext()});
 }
 
 function chatWho(m){
@@ -5805,7 +5904,7 @@ function renderChipPanel(groups){
     const grid=el('div','chip-grid');
     g.items.forEach(s=>{
       const card=el('button','chip-card',s);
-      card.onclick=()=>ask(s); // clicked chip text sent as-is, no name-prefixing
+      card.onclick=()=>ask(s, {surface:'tab', ctx:chatTabContext()}); // clicked chip text sent as-is, no name-prefixing
       grid.appendChild(card);
     });
     section.appendChild(grid);
@@ -5844,14 +5943,17 @@ async function ask(q, {surface='tab', ctx=null}={}){
   if(!q || chatBusy) return;
   if(chipsExpanded) setChipsExpanded(false); // collapses on every send, not just the first -- toggle stays reachable
 
-  // Context rides as a visible first line of the user's own turn: it is in
-  // history, shown on the bubble, and grants nothing -- every tool call still
-  // runs on the caller's JWT under RLS, exactly as if they had typed it.
-  const content = ctx ? `[Viewing: ${ctx.label}]\n${q}` : q;
+  // The question goes as typed. What the user is looking at travels
+  // separately as ctx.wire; the chat function validates it against the
+  // caller's role and blocks, writes the context text itself, attaches it to
+  // this turn and returns the turn in `done` (user_turn), which is what
+  // history keeps. The label is only for the bubble's chip.
+  const content = q;
   const turn = chatMsgs.filter(m=>m.who==='u').length;
   const um = {id:++chatMsgSeq, who:'u', text:q, ctx:ctx?.label||null};
   const am = {id:++chatMsgSeq, who:'a', state:'pending', text:'', status:'', turn,
-              retry:{q, surface, ctx}, panelId:ctx?.panelId||null, question:content};
+              retry:{q, surface, ctx}, panelId:ctx?.panelId||null,
+              question: ctx ? `[Viewing: ${ctx.label}]\n${q}` : q}; // the text a "This was wrong" report carries
   chatMsgs.push(um, am);
   chatDraft = '';
   chatChanged(um); chatChanged(am);
@@ -5888,7 +5990,7 @@ async function chatStream(am, pending, gen, ac){
   const paint = ()=>{ frame=null; chatChanged(am); };
   const schedule = ()=>{ if(frame===null) frame=requestAnimationFrame(paint); };
 
-  const {data, error} = await sb.functions.invoke('chat', {body:{messages:pending, modelProvider:chatModelProvider}, signal:ac.signal});
+  const {data, error} = await sb.functions.invoke('chat', {body:{messages:pending, modelProvider:chatModelProvider, context:am.retry.ctx?.wire ?? null}, signal:ac.signal});
   if(gen!==chatGen) return; // signed out, another user, or New chat, while waiting
   if(error){
     const err = await chatClassifyError(error);
@@ -5936,8 +6038,12 @@ async function chatStream(am, pending, gen, ac){
   if(frame!==null){ cancelAnimationFrame(frame); frame=null; }
   if(gen!==chatGen) return; // the read that threw may have been resetChat()'s abort
   if(done && !failed){
-    // The ONLY success path, and the only place chatHistory is written.
-    chatHistory = pending.concat(done.appended||[]);
+    // The ONLY success path, and the only place chatHistory is written. The
+    // question turn is the server's own copy when it sent one (it carries the
+    // validated dashboard context the model saw); otherwise ours.
+    const turn = done.user_turn;
+    const asSent = turn && turn.role==='user' && Array.isArray(turn.content) ? [...pending.slice(0,-1), turn] : pending;
+    chatHistory = asSent.concat(done.appended||[]);
     // `done.provider` is the model that ACTUALLY answered -- set server-side
     // after the fact, never the requested `chatModelProvider` -- so a Kimi
     // request that silently fell back to Claude correctly reads "Sonnet 5",
@@ -6084,23 +6190,31 @@ const CW_RANGE_WORDS = {'1D':'1-day view', '5D':'5-day view', '30D':'30-day view
 // PANELS list -- never free text -- and only from what this user can see: a
 // panel is named only if it is on the current tab and their role renders it.
 // It is a hint for the model, not a permission (see ask()).
-function cwPageContext(panelId){
-  const tab = state.tab;
+function cwPageContext(panelId, tab=state.tab){
   if(tab!=='vineyard' && tab!=='winery') return null;
   const blocks = selB(tab).filter(b=>ALL_IDS.includes(b) && (!cwBlocksAccess?.length || cwBlocksAccess.includes(b)));
   const vintages = selV(tab).filter(v=>Number.isInteger(v) && v>=FIRST_VINTAGE && v<=CURRENT);
   const parts = [tab==='vineyard' ? 'Vineyard Data' : 'Winery Data',
     blocks.length===ALL_IDS.length ? 'all blocks' : (blocks.length===1 ? 'block ' : 'blocks ')+blocks.join(', ')];
   if(vintages.length) parts.push((vintages.length===1 ? 'vintage ' : 'vintages ')+vintages.join(', '));
-  let pid = null;
+  let pid = null, rng = null, back = 0;
   const p = panelId && PANELS.find(x=>x.id===panelId && x.tab===tab && (x.minRole!=='operator' || chatRole==='operator'));
   if(p){
     pid = p.id;
-    const rng = state.range[p.id] || p.range, back = state.scrollDays[p.id] || 0;
+    rng = state.range[p.id] || p.range || null; back = state.scrollDays[p.id] || 0;
     // The panel leads: it is what the question is about.
     parts.unshift(p.title + (rng ? ` (${CW_RANGE_WORDS[rng]||rng}${back ? `, scrolled back ${back} days` : ''})` : ''));
   }
-  return {label:parts.join(' · '), panelId:pid};
+  // `wire` is what the server receives and re-validates (dashboard-context.ts).
+  return {label:parts.join(' · '), panelId:pid,
+    wire:{tab, blocks, vintages, panel:pid, range:rng, scrollDays:back, surface:'widget', lastViewed:false}};
+}
+// From the Chat tab: the data tab the user last viewed, with its filters,
+// labelled "last viewed" both on the bubble and in what the server is told.
+function chatTabContext(){
+  if(typeof state==='undefined' || !state.lastDataTab) return null;
+  const c = cwPageContext(null, state.lastDataTab);
+  return c && {...c, label:'Last viewed: '+c.label, wire:{...c.wire, surface:'tab', lastViewed:true}};
 }
 function cwContextForSend(){
   return cwCtxMode==='none' ? null : cwPageContext(cwCtxMode==='panel' ? cwPanelId : null);

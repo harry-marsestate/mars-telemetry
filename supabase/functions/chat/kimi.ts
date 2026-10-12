@@ -233,7 +233,7 @@ export async function callKimi(
   apiKey: string,
   system: string,
   messages: Anthropic.MessageParam[],
-  opts: { model?: string; maxTokens?: number; reasoningEffort?: string } = {},
+  opts: { model?: string; maxTokens?: number; reasoningEffort?: string; tools?: Anthropic.Tool[] } = {},
 ): Promise<KimiTurn> {
   let res: Response;
   try {
@@ -249,7 +249,7 @@ export async function callKimi(
         max_tokens: opts.maxTokens ?? KIMI_MAX_TOKENS,
         reasoning_effort: opts.reasoningEffort ?? KIMI_REASONING_EFFORT,
         messages: toOpenAIMessages(system, messages),
-        tools: toOpenAITools(),
+        tools: toOpenAITools(opts.tools),
       }),
     });
   } catch (err) {

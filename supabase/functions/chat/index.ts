@@ -4,9 +4,16 @@ import Anthropic from "@anthropic-ai/sdk";
 import { DomainReality, fetchDomainReality, runTool, TOOLS } from "./tools.ts";
 import { callerProfile, resolveDisplayName } from "./profile.ts";
 import { callKimi, KIMI_MODEL } from "./kimi.ts";
-import { vintageContext } from "../_shared/vintage.ts";
+import { currentVintage, vintageContext } from "../_shared/vintage.ts";
 import { ANSWER_RULES } from "./query-rules.ts";
 import { checkChatInput, checkContentLength } from "./input-caps.ts";
+import { DASHBOARD_RULES, dashboardMap, GUIDE_TOOL, runGuideTool, type ThresholdRow } from "./dashboard-guide.ts";
+import { contextText, validateContext } from "./dashboard-context.ts";
+
+// The chat's own tools: the shared data tools (also served by the MCP
+// gateway) plus the dashboard guide, which is chat-only.
+type RunAny = (name: string, input: Record<string, unknown>) => Promise<{ content: string; isError: boolean }>;
+const CHAT_TOOLS: Anthropic.Tool[] = [...TOOLS, GUIDE_TOOL];
 
 // RAG chat for Mars Estate/Mars Telemetry. ctx.supabase is RLS-scoped to the
 // caller's own JWT for every tool call -- deliberately never ctx.supabaseAdmin,
@@ -46,13 +53,11 @@ type KimiAttempt =
   | { ok: false; reason: string };
 
 async function attemptKimi(
-  supabase: Parameters<typeof runTool>[0],
+  run: RunAny,
   kimiApiKey: string,
   systemPrompt: string,
   conversation: Anthropic.MessageParam[],
   maxIterations: number,
-  dataMode: string,
-  domainReality: DomainReality,
 ): Promise<KimiAttempt> {
   const events: Record<string, unknown>[] = [];
   const newTurns: Anthropic.MessageParam[] = [];
@@ -60,7 +65,7 @@ async function attemptKimi(
 
   try {
     for (let i = 0; i < maxIterations; i++) {
-      const turn = await callKimi(kimiApiKey, systemPrompt, [...conversation, ...newTurns]);
+      const turn = await callKimi(kimiApiKey, systemPrompt, [...conversation, ...newTurns], { tools: CHAT_TOOLS });
       console.log("chat: usage " + JSON.stringify({
         turn: i,
         provider: "kimi",
@@ -90,7 +95,7 @@ async function attemptKimi(
 
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
         for (const block of toolUses) {
-          const result = await runTool(supabase, block.name, block.input as Record<string, unknown>, dataMode, domainReality);
+          const result = await run(block.name, block.input as Record<string, unknown>);
           toolResults.push({
             type: "tool_result",
             tool_use_id: block.id,
@@ -124,7 +129,7 @@ export default {
       // browser tell "start a new chat" apart from "shorten the question".
       const lengthCap = checkContentLength(req.headers.get("content-length"));
       if (!lengthCap.ok) return Response.json({ error: lengthCap.error, code: lengthCap.code }, { status: lengthCap.status });
-      const { messages, modelProvider } = await req.json();
+      const { messages, modelProvider, context: rawContext } = await req.json();
       const inputCap = checkChatInput(messages);
       if (!inputCap.ok) return Response.json({ error: inputCap.error, code: inputCap.code }, { status: inputCap.status });
 
@@ -192,8 +197,42 @@ export default {
 
       const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY") });
 
-      const systemPrompt = buildSystemPrompt(role, displayName, dataMode);
-      const conversation: Anthropic.MessageParam[] = messages;
+      // anomaly_thresholds, read as the caller (the dashboard reads the same
+      // table), only when a guide entry is actually rendered this request.
+      let thresholdsP: Promise<ThresholdRow[] | null> | null = null;
+      const loadThresholds = () => thresholdsP ??= Promise.resolve(
+        ctx.supabase.from("anomaly_thresholds").select("rule_key, operator, threshold, rule_group, display_label, tooltip_phrase"),
+      ).then(({ data, error }: { data: ThresholdRow[] | null; error: unknown }) => {
+        if (error) console.error("chat: could not read anomaly_thresholds", error);
+        return error ? null : data;
+      });
+      const run: RunAny = (name, input) => name === GUIDE_TOOL.name
+        ? runGuideTool(input, role, domainReality, loadThresholds)
+        : runTool(ctx.supabase, name, input, dataMode, domainReality);
+
+      const systemPrompt = buildSystemPrompt(role, displayName, dataMode, domainReality);
+      const conversation: Anthropic.MessageParam[] = messages.slice();
+
+      // Dashboard context (dashboard-context.ts): validated against role and
+      // accessible_blocks(), rendered here, and attached to THIS question as a
+      // second text block. The question turn as sent is returned in `done` so
+      // the browser's history holds exactly what the model saw.
+      if (rawContext) {
+        const { data: blockRows, error: blocksErr } = await ctx.supabase.rpc("accessible_blocks");
+        if (blocksErr) console.error("chat: accessible_blocks failed; no blocks named in context", blocksErr);
+        const accessible = blocksErr ? null : ((blockRows ?? []) as unknown[]).map((r) => typeof r === "string" ? r : (r as { accessible_blocks: string }).accessible_blocks);
+        const valid = validateContext(rawContext, role, accessible);
+        if (valid) {
+          const last = conversation[conversation.length - 1];
+          const text = typeof last.content === "string" ? last.content
+            : (last.content as Anthropic.ContentBlockParam[]).filter((b) => b.type === "text").map((b) => (b as Anthropic.TextBlockParam).text).join("\n");
+          conversation[conversation.length - 1] = { role: "user", content: [
+            { type: "text", text },
+            { type: "text", text: contextText(valid, role, domainReality, await loadThresholds()) },
+          ] };
+        }
+      }
+      const userTurn = conversation[conversation.length - 1];
       const newTurns: Anthropic.MessageParam[] = [];
 
       // Bounds cost/latency on a single chat turn -- six round trips is far
@@ -215,13 +254,11 @@ export default {
           try {
             if (provider === "kimi") {
               const attempt = await attemptKimi(
-                ctx.supabase,
+                run,
                 kimiApiKey as string,
                 systemPrompt,
                 conversation,
                 MAX_TOOL_ITERATIONS,
-                dataMode,
-                domainReality,
               );
               if (attempt.ok) {
                 for (const e of attempt.events) send(e);
@@ -230,7 +267,7 @@ export default {
                 // real outcome, never the requested `modelProvider`, which is
                 // exactly why this is set here rather than echoed back from
                 // the request body.
-                send({ type: "done", appended: attempt.appended, truncated: false, provider: "kimi" });
+                send({ type: "done", appended: attempt.appended, truncated: false, provider: "kimi", user_turn: userTurn });
                 return;
               }
 
@@ -287,7 +324,7 @@ export default {
                 // too shallow. The honest-fallback below stays as the backstop.
                 max_tokens: 4000,
                 system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
-                tools: TOOLS,
+                tools: CHAT_TOOLS,
                 messages: withCacheBreakpoint([...conversation, ...newTurns]),
               };
 
@@ -380,7 +417,7 @@ export default {
 
                 const toolResults: Anthropic.ToolResultBlockParam[] = [];
                 for (const block of toolUses) {
-                  const result = await runTool(ctx.supabase, block.name, block.input as Record<string, unknown>, dataMode, domainReality);
+                  const result = await run(block.name, block.input as Record<string, unknown>);
                   toolResults.push({
                     type: "tool_result",
                     tool_use_id: block.id,
@@ -437,6 +474,7 @@ export default {
                 appended: newTurns,
                 truncated: stopReason === "max_tokens",
                 provider: "claude",
+                user_turn: userTurn,
               });
               return;
             }
@@ -480,6 +518,7 @@ const TOOL_LABELS: Record<string, string> = {
   get_berry_maturity: "berry maturity data",
   get_smoke_markers: "smoke-taint markers",
   get_wine_lab_results: "winery lab results",
+  get_dashboard_guide: "the dashboard guide",
 };
 const METRIC_LABELS: Record<string, string> = {
   air_temp: "air temperature",
@@ -590,7 +629,7 @@ function withCacheBreakpoint(msgs: Anthropic.MessageParam[]): Anthropic.MessageP
   return out;
 }
 
-function buildSystemPrompt(role: string, displayName: string | null, dataMode: string): string {
+function buildSystemPrompt(role: string, displayName: string | null, dataMode: string, domainReality: DomainReality): string {
   const shared = `You are a professional winemaker and viticulturist speaking on behalf of Mars Estate, a 7.35-acre Cabernet Sauvignon-dominant estate at roughly 2,200 ft on Howell Mountain, Napa Valley. You help estate operators and customers understand the vineyard and winery's real data -- climate, soil, irrigation, fermentation, lab chemistry, and harvest records -- by answering their questions using the tools available to you.
 
 Always structure your answer in three parts, in this order:
@@ -636,5 +675,10 @@ Connecting conditions to what they plausibly mean for the wine (above) is a stat
   // The date and current vintage come from the harvest-year rule at request
   // time (_shared/vintage.ts), so "which vintage is current" is never a year
   // written into this prompt.
-  return `${shared}\n\n${vintageContext()}\n\n${toneBlock}${accessNote}${realOnlyNote}`;
+  // Dashboard guide (dashboard-guide.ts): the rules for explaining a panel,
+  // and the map of panels THIS role can see with each one's provenance. Role
+  // is the JWT-derived one resolved above; operator-only panels never appear
+  // in a customer's prompt.
+  const dashboard = `\n\n${DASHBOARD_RULES}\n\nDashboard map (current vintage ${currentVintage()}):\n${dashboardMap(role, domainReality)}`;
+  return `${shared}\n\n${vintageContext()}\n\n${toneBlock}${accessNote}${realOnlyNote}${dashboard}`;
 }

@@ -1,5 +1,6 @@
 import { labourResult } from "./labour-totals.ts";
 import { currentVintage, vintagesThrough } from "../_shared/vintage.ts";
+import { DASHBOARD_GUIDE } from "../_shared/dashboard-guide.generated.ts";
 import {
   analyteFamily, applyBounds, dayLabel, describeChange, isBareDate, normLower, normText, normUpper,
   pacificDate, pacificMidnightUtc, addDays, type Point, resolveDateBounds, temperatureLabel,
@@ -79,16 +80,25 @@ function realOnlyBlockedResult(description: string): ToolResult {
   };
 }
 
+// Vintages whose GDD is calibrated, read from the dashboard's own GDD
+// labels (CALIBRATED_GDD_VINTAGES in web/index.html, via the generated
+// guide), so this description never hard-codes a second copy.
+const CALIBRATED_GDD_TEXT = (() => {
+  const gdd = DASHBOARD_GUIDE.panels.find((p) => p.id === "gdd");
+  const vs = DASHBOARD_GUIDE.vintages.filter((v) => /calibrated to/.test(gdd?.provenance[String(v)]?.real ?? ""));
+  return vs.length ? vs.join(", ") : "none currently";
+})();
+
 export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_series",
     description:
-      "Time-bucketed real IoT sensor readings for vineyard blocks (air_temp, soil_moisture, soil_temp, humidity, wind, etc.). Averages (or sums, for precipitation/irrigation) readings into buckets across a time range. Block-scoped: a customer only sees blocks they have access to; RLS silently returns no data for inaccessible blocks rather than erroring. The response ends with the effective interval used and a server-computed Changes note (first to last non-empty bucket, change per day, min/max) -- quote those figures rather than computing them.",
+      "Time-bucketed readings from the estate's stored series, averaged (or summed, for precipitation/irrigation) into buckets across a time range. These are NOT on-site IoT sensors. air_temp, humidity and precipitation are Open-Meteo ECMWF IFS model output; soil_moisture and soil_temp are Open-Meteo ERA5-Land modelled surface soil (0-7 cm, published about five days late). Both are estate-wide, with no per-block values, so omit block for them. irrigation_volume is Mars Vineyard Farming records for some vintages and simulated otherwise. wind_speed, wind_dir, uv, cellar_temp, cellar_rh and per-block soil probes are simulated demonstration data. Every response states its source per vintage, in the dashboard's own words; repeat it, and never present simulated values as measurements. Block ids are B1, B2 and B3. Block-scoped: a customer only sees blocks they have access to; RLS silently returns no data for inaccessible blocks rather than erroring. The response ends with the effective interval used and a server-computed Changes note (first to last non-empty bucket, change per day, min/max) -- quote those figures rather than computing them.",
     input_schema: {
       type: "object",
       properties: {
-        metric: { type: "string", description: "Metric key, e.g. 'air_temp', 'soil_moisture', 'soil_temp', 'humidity', 'wind_speed', 'precip'." },
-        block: { type: "string", description: "Block id, e.g. 'B1' (case and surrounding spaces ignored). Omit for all accessible blocks." },
+        metric: { type: "string", description: "Metric key: 'air_temp', 'humidity', 'precipitation', 'soil_moisture', 'soil_temp', 'irrigation_volume', 'wind_speed', 'wind_dir', 'uv', 'cellar_temp', 'cellar_rh'." },
+        block: { type: "string", description: "Block id: 'B1', 'B2' or 'B3' (case and surrounding spaces ignored). Omit for all accessible blocks -- and always omit it for estate-wide model data (air_temp, humidity, precipitation, soil_moisture, soil_temp), which has no per-block values." },
         vintage: { type: "integer", description: "Vintage (harvest year), e.g. 2024. Omit for all vintages." },
         start: { type: "string", description: "ISO 8601 start timestamp, or a calendar date 'YYYY-MM-DD' meaning the start of that Pacific (estate) day." },
         end: { type: "string", description: "ISO 8601 end timestamp, or a calendar date 'YYYY-MM-DD' meaning through the END of that Pacific day (start and end may be the same date)." },
@@ -101,7 +111,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_derived_series",
     description:
-      "Real derived daily climate metrics for a vintage: cumulative growing degree days (gdd_cumulative_calibrated -- calibrated per-vintage against the Napa Valley Grapegrowers Growing Conditions Report figures for Angwin, and the authoritative GDD figure to quote), average-based vapor pressure deficit (vpd_kpa), peak-hour vapor pressure deficit (vpd_peak_kpa), uncalibrated diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in). One row per day. Defaults to the vintage's growing-season range if start_date/end_date are omitted; a bare end_date includes that whole day. The response ends with the effective interval and a server-computed Changes note (GDD gained and per day, min/max/mean of each other field) -- quote those figures rather than computing them.",
+      `Derived daily climate metrics for a vintage, computed from Open-Meteo ECMWF IFS modelled air temperature and humidity (model output, not on-site measurement): cumulative growing degree days (gdd_cumulative_calibrated -- calibrated against the Napa Valley Grapegrowers Growing Conditions Report figures for Angwin for vintages that have such a report (${CALIBRATED_GDD_TEXT}), uncalibrated for any other vintage, such as one without a report yet; say which when you quote it), average-based vapor pressure deficit (vpd_kpa), peak-hour vapor pressure deficit (vpd_peak_kpa), uncalibrated diurnal temperature range (dtr_f), and reference evapotranspiration (et0_in -- a Hargreaves estimate from air temperature alone with a fixed radiation term; it uses no wind, humidity or solar data). One row per day. Defaults to the vintage's growing-season range if start_date/end_date are omitted; a bare end_date includes that whole day. The response ends with the effective interval and a server-computed Changes note (GDD gained and per day, min/max/mean of each other field) -- quote those figures rather than computing them.`,
     input_schema: {
       type: "object",
       properties: {
@@ -115,7 +125,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_anomalies",
     description:
-      "Real-time evaluation of vineyard anomaly rules (soil moisture, DTR, VPD, humidity, wind) against current sensor and climate data, as of a given snapshot. Only vineyard-tab rules are wired to real data; winery/tank anomalies are not covered by this tool. Defaults to the current vintage (see the date line in your instructions) as of its live snapshot -- pass vintage/as_of explicitly to check an archived vintage (e.g. 'were there issues in 2022?').",
+      "Evaluation of vineyard anomaly rules (soil moisture, DTR, VPD, humidity, wind) against the stored climate data (Open-Meteo model output; the wind rule runs on simulated wind, so treat a wind result as demonstration only), as of a given snapshot. Only vineyard-tab rules are wired to real data; winery/tank anomalies are not covered by this tool. Defaults to the current vintage (see the date line in your instructions) as of its live snapshot -- pass vintage/as_of explicitly to check an archived vintage (e.g. 'were there issues in 2022?').",
     input_schema: {
       type: "object",
       properties: {
@@ -358,10 +368,41 @@ async function getSeries(supabase: any, input: Record<string, unknown>, dataMode
   const notes = [`(Effective interval: buckets of ${bucket_hours} h starting from ${new Date(startMs).toISOString()} through ${new Date(endMs).toISOString()}${isBareDate(input.start) || isBareDate(input.end) ? " -- bare dates are whole Pacific calendar days (America/Los_Angeles)" : ""}; ${rounded.length} bucket(s), ${rounded.filter((r) => r.v != null).length} with readings.)`];
   const changes = seriesChanges(rounded.filter((r) => r.v != null).map((r) => ({ t: r.t, v: r.v })), metric);
   if (changes) notes.push(changes);
+  const years = vintage != null ? [vintage] : Array.from(
+    { length: new Date(endMs).getUTCFullYear() - new Date(startMs).getUTCFullYear() + 1 },
+    (_, i) => new Date(startMs).getUTCFullYear() + i,
+  );
+  notes.push(seriesSourceNote(metric, years, domainReality, block ?? null));
   if (block && rounded.length > 0 && rounded.every((r) => r.v == null)) {
     notes.push(`(Every bucket is empty for block ${block}: no ${metric} readings in this range for that block -- check the block id and the metric's date coverage.)`);
   }
   return { content: JSON.stringify(rounded) + "\n\n" + notes.join(" "), isError: false };
+}
+
+// Where a get_series result really comes from, in the dashboard's own words
+// (DASHBOARD_GUIDE is generated from web/index.html's panel labels), so the
+// chat never calls model output or simulated rows "sensor readings" while the
+// screen says otherwise. domain_reality() decides real vs simulated per year,
+// as it does for the dashboard; an unknown answer is said to be unknown.
+const ESTATE_WIDE_REAL = new Set(["air_temp", "humidity", "precipitation", "soil_moisture", "soil_temp"]);
+export function seriesSourceNote(metric: string, years: number[], reality: DomainReality, block: string | null): string {
+  if (metric === "solar") {
+    return "(Source: solar rows are ECMWF IFS modelled radiation where the model was ingested and simulated otherwise; this tool does not say which applies to a bucket. The dashboard's Solar panel does NOT plot these rows -- it shows simulated values -- so never present them as what the panel shows.)";
+  }
+  const panel = DASHBOARD_GUIDE.panels.find((p) => p.domain === metric);
+  const set = reality.get(metric);
+  const parts = years.map((y) => {
+    const label = panel?.provenance[String(y)];
+    if (!set) return `${y}: source not confirmed`;
+    return set.has(y)
+      ? `${y}: ${label?.real || "real records"}`
+      : `${y}: SIMULATED demonstration data, not a measurement${label?.notReal ? ` (dashboard label: "${label.notReal}")` : ""}`;
+  });
+  let note = `(Source, as the dashboard labels it -- ${parts.join("; ")}.)`;
+  if (block && ESTATE_WIDE_REAL.has(metric) && years.some((y) => set?.has(y))) {
+    note += ` (Real ${metric} data is estate-wide model output with no per-block values: a block filter returns no real readings, so omit block.)`;
+  }
+  return note;
 }
 
 // Server-side summary of a bucketed series, so the model never does this

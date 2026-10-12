@@ -138,7 +138,16 @@ async function signOutMidAnswer(page) {
 // fails the run, so a broken mock can never spend real questions unnoticed.
 // Page-level routes (the 413 case) take precedence over this one.
 let allowReal = false, realAsked = 0, offlineNow = false;
+// chat_events writes are intercepted the same way (recorded, answered 201,
+// nothing written) unless `allowEvents` is set for a step that means to write.
+let allowEvents = false;
+const interceptedEvents = [];
 async function guardChat(context) {
+  await context.route("**/rest/v1/chat_events*", (route) => {
+    if (allowEvents) return route.continue();
+    interceptedEvents.push(route.request().postData());
+    return route.fulfill({ status: 201, body: "" });
+  });
   await context.route("**/functions/v1/chat", (route) => {
     if (offlineNow) return route.abort("internetdisconnected"); // the offline test: never reaches the network anyway
     if (allowReal) { realAsked++; return route.continue(); }
@@ -401,5 +410,5 @@ try {
   await browser.close();
 }
 const bad = results.filter((r) => !r.ok).length;
-console.log(`\n${results.length} checks, ${bad} failed; real chat requests sent: ${realAsked}`);
+console.log(`\n${results.length} checks, ${bad} failed; real chat requests sent: ${realAsked}; chat_events writes intercepted (not written): ${interceptedEvents.length}`);
 process.exit(bad ? 1 : 0);

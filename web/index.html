@@ -5757,18 +5757,22 @@ function chatOnLogClick(e, v){
   }
 }
 
-// Usage events (supabase/migrations/20261012120000_chat_events.sql). OFF
-// until that migration is approved and applied: with the flag off nothing is
+// Usage events (supabase/migrations/20261012120000_chat_events.sql), ON
+// since that migration was applied (2026-10-12). With the flag off nothing is
 // written and no rating controls are drawn. No question or answer text is
 // ever sent except on a confirmed "This was wrong".
-const CHAT_EVENTS_ENABLED = false;
+const CHAT_EVENTS_ENABLED = true;
 function chatEvent(event, surface, extra={}){
   if(!CHAT_EVENTS_ENABLED) return Promise.resolve(false);
   const row = {surface, event};
   for(const k in extra) if(extra[k]!=null) row[k] = extra[k];
-  return sb.from('chat_events').insert(row).then(
-    ({error})=>{ if(error){ console.warn('chat_events: insert failed', error.message); return false; } return true; },
-    ()=>false);
+  // Never lets a logging failure reach the chat: a rejected promise or a
+  // synchronous throw both resolve to false.
+  try{
+    return Promise.resolve(sb.from('chat_events').insert(row)).then(
+      ({error})=>{ if(error){ console.warn('chat_events: insert failed', error.message); return false; } return true; },
+      ()=>false);
+  }catch(e){ console.warn('chat_events: insert failed', e?.message); return Promise.resolve(false); }
 }
 /* Escape FIRST, then transform -- markdown syntax is matched and wrapped on
    the already-escaped string, so raw '<'/'>' from the model or a user can

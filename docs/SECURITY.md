@@ -8874,15 +8874,43 @@ recorded in-app chat use: the function logs token counts only.
   disappears with the dashboard.
 - **Visibility:** hidden on the Chat tab (`body[data-tab="chat"]`), which
   already is the chat; the window state is kept for the return. Hidden in
-  print (`@media print`), including the "Ask about this" icons. `.wrap`'s
-  existing 90px bottom padding keeps the last panel scrollable clear of the
-  52px button.
+  print (`@media print`), including the hover label and the "Ask about this"
+  icons. `.wrap`'s bottom padding keeps the last panel scrollable clear of
+  the button: 90px on desktop for the 52px button; at ≤860px it was 60px,
+  less than the 62px the phone button needs, and is now 80px.
+- **Phone overflow (fixed here, pre-existing):** a `nowrap` section note
+  (`.sect-n`) made a 390px phone's layout 455px wide. Mobile browsers then
+  widen the layout viewport, so fixed elements, the launcher included, sat
+  partly off-screen. The note now wraps at ≤860px; the browser check asserts
+  the page is no wider than the viewport.
 - **Desktop:** 400px wide, `min(620px, 100dvh − 160px)` tall, non-modal
   (`role="dialog"`, `aria-modal="false"`). Panel controls outside it stay
   clickable (checked in a browser).
-- **Phone (≤640px):** a bottom sheet at 88dvh with a ✕. The launcher steps
-  aside while the sheet is open. Safe-area insets apply to the launcher, the
+- **Phone (≤640px):** a bottom sheet at 88dvh with a ✕, sliding up and down.
+  The launcher steps aside while the sheet is open. Safe-area insets apply to the launcher, the
   window and the input row.
+- **Empty state:** the window shows a short intro ("Ask about what you're
+  looking at, or anything about the estate's data. Answers are
+  AI-generated."), not starter prompts. The intro goes after the first
+  question and returns on New chat. The greeting bubble stays on the Chat tab
+  only: it points at the Chat tab's suggestion chips, which are unchanged.
+- **AI labelling:**
+  - the launcher has a sparkle icon, and its aria-label reads "Ask Mars
+    Telemetry AI assistant";
+  - the window header has an "AI" badge, and the dialog's name includes it;
+  - every reply is attributed "Mars Telemetry AI", plus the model for
+    operators, in both views;
+  - one note under both inputs: "AI-generated answers from Mars Estate's live
+    data · check anything important against the dashboard". That replaces
+    the Chat tab's old "verify anything safety-critical" line, so the two
+    views now say the same thing;
+  - the Chat tab title also has the "AI" badge.
+- **Hover label:** a styled label to the left of the launcher, shown on hover
+  and on keyboard focus (`:focus-visible`), not a native `title`. It has
+  `pointer-events:none`, is `aria-hidden` (the aria-label says the same), and
+  is hidden while the window is open. On touch screens (`hover: none`) it is
+  shown once for 3.5s the first time the launcher is on screen in a page
+  session. That flag is in memory only; nothing is stored.
 - **Keyboard and screen readers:**
   - labelled launcher with `aria-expanded`;
   - focus moves to the input on open (fine pointers only, so a phone keyboard
@@ -8893,8 +8921,19 @@ recorded in-app chat use: the function logs token counts only.
   - a polite live region announces each finished answer once, never streamed
     tokens.
 - **Contrast:** small text uses `--muted`, not `--muted-2`, for AA.
-- **Motion:** the existing reduced-motion rule applies. Messages in the window
-  don't fade in, because the animation would restart (blank) on every reopen.
+- **Motion:** opening and minimising animate the window container only, over
+  about 200–220ms. On desktop it fades and scales from the bottom-right
+  corner; on phones the sheet slides.
+  - The closed state is `opacity:0` + `visibility:hidden` + `pointer-events:none`,
+    not `display:none`, and the window is `inert` and `aria-hidden` while
+    closed.
+  - Visibility flips at the start of an open (so focus can move in at once)
+    and at the end of a close.
+  - Reversing mid-way is just another CSS transition, with no JS timers, so
+    rapid toggling cannot get stuck.
+  - The existing reduced-motion rule makes it instant.
+  - Messages never animate: a fade would restart, and blank the conversation,
+    on every reopen.
 - **Unread:** an answer or error that lands while no chat view is on screen
   puts a dot on the launcher, and the launcher's label says so.
 - **Performance:** the window DOM, its listeners and its accessible-blocks
@@ -8938,6 +8977,38 @@ recorded in-app chat use: the function logs token counts only.
   - The deployed `chat` function served these. The input caps above are not
     deployed, so the browser's 413 was test-served; the server side is
     covered by unit tests.
+
+### Follow-up round (2026-10-12): starters removed, AI labelling, hover label, animation
+
+- Node **181/181**, Deno **96/96**, boundary check PASS. `tests/chat-widget.test.mjs`
+  gained 4 cases: no window starters while the Chat tab keeps its chips;
+  intro until the first question and back on New chat; inert/aria-hidden
+  while closed; AI attribution and the shared note.
+- `scripts/chat-launcher-check.mjs`: **74 checks, 0 failed, 0 real chat
+  requests**. New checks cover:
+  - no starters in the window, chips still on the Chat tab;
+  - hover and keyboard-focus label (left of the button, never takes clicks,
+    hidden while open);
+  - the intro and its removal;
+  - transition running at the start of open and close, with a frozen
+    mid-transition frame;
+  - inert, aria-hidden and unfocusable while closed;
+  - reduced motion is instant;
+  - rapid x5 toggle and mid-flight reversals settle correctly;
+  - touch-screen peek shown once;
+  - phone sheet slides, and the page is no wider than the viewport.
+- **Mock incident, recorded so it is not repeated.** The check's first
+  in-page chat mock patched `sb.functions.invoke` on an instance, but
+  `sb.functions` is a getter that returns a new client on every access. The
+  patch never applied, and every "mocked" question went to the deployed
+  `chat` function as the two synthetic users: roughly 8 per run over 7 runs
+  of this round, about 39–55 real questions against an allowance of one.
+  Read-only; nothing was written. The mock now patches the client's
+  prototype and fails fast if it is not installed. A context-level route
+  aborts any request to `functions/v1/chat` the script did not explicitly
+  allow and records a FAIL. The final run sent 0 real requests, and the
+  optional `--real-question` was not used, because the allowance was already
+  spent.
 
 ### Found while doing this, not changed here
 

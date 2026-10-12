@@ -632,7 +632,12 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   .hdr{grid-template-columns:1fr auto; gap:12px; padding:12px 16px}
   .tabs{order:3; grid-column:1/-1; width:100%; justify-content:center}
   .clock{display:none}
-  .wrap{padding:18px 14px 60px}
+  .wrap{padding:18px 14px 80px} /* bottom: clear of the 48px chat launcher at 14px */
+  /* Section notes wrap instead of widening the page: a nowrap note pushed a
+     390px phone's layout to 455px, so mobile browsers zoomed out and every
+     fixed element (the chat launcher) sat partly off-screen. */
+  .sect{flex-wrap:wrap; row-gap:6px}
+  .sect-n{white-space:normal; min-width:0}
   .s3,.s4,.s5,.s6,.s7,.s8,.s9{grid-column:span 12}
   .fmeta{align-items:flex-start}
   .ov-grid.duo{grid-template-columns:1fr}
@@ -643,8 +648,8 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
    sticky header (100) and chart tooltip (200), below every full-screen
    .out view (400). Hidden on the Chat tab, which already is the chat. */
 .chat-hd-row{display:flex; align-items:flex-start; justify-content:space-between; gap:12px}
-.chat-new,.cw-ib,.msg-btn,.cw-ctx button,.cw-start{font-family:var(--mono); font-size:10px; letter-spacing:.08em; background:none; border:1px solid var(--line-2); border-radius:3px; color:var(--muted); cursor:pointer; padding:5px 9px; transition:border-color .16s,color .16s}
-.chat-new:hover,.cw-ib:hover,.msg-btn:hover,.cw-ctx button:hover,.cw-start:hover{border-color:var(--gold-dim); color:var(--gold)}
+.chat-new,.cw-ib,.msg-btn,.cw-ctx button{font-family:var(--mono); font-size:10px; letter-spacing:.08em; background:none; border:1px solid var(--line-2); border-radius:3px; color:var(--muted); cursor:pointer; padding:5px 9px; transition:border-color .16s,color .16s}
+.chat-new:hover,.cw-ib:hover,.msg-btn:hover,.cw-ctx button:hover{border-color:var(--gold-dim); color:var(--gold)}
 .chat-new:disabled{opacity:.4; cursor:default; border-color:var(--line); color:var(--muted)}
 .chat-confirm{display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:12px; color:var(--cream); padding:9px 11px; margin-top:10px; border:1px solid var(--line-2); border-radius:3px; background:var(--ink-3)}
 .chat-confirm[hidden]{display:none}
@@ -666,23 +671,46 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 .fb-confirm p{margin:0 0 9px}
 .fb-confirm .msg-btn{margin-right:6px}
 .sr-only{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0}
-.chat-new:focus-visible,.cw-ib:focus-visible,.msg-btn:focus-visible,.fb-b:focus-visible,.cw-ctx button:focus-visible,.cw-start:focus-visible,.cw-launch:focus-visible,.send:focus-visible,.p-ask:focus-visible{outline:2px solid var(--gold); outline-offset:2px}
+.chat-new:focus-visible,.cw-ib:focus-visible,.msg-btn:focus-visible,.fb-b:focus-visible,.cw-ctx button:focus-visible,.cw-launch:focus-visible,.send:focus-visible,.p-ask:focus-visible{outline:2px solid var(--gold); outline-offset:2px}
 
 .cw-launch{position:fixed; z-index:300; right:calc(20px + env(safe-area-inset-right)); bottom:calc(20px + env(safe-area-inset-bottom));
   width:52px; height:52px; border-radius:50%; display:grid; place-items:center; cursor:pointer;
   background:var(--ink-3); color:var(--gold); border:1px solid var(--gold-dim); box-shadow:0 6px 22px rgba(0,0,0,.55); transition:border-color .16s,transform .16s}
 .cw-launch:hover{border-color:var(--gold); transform:translateY(-1px)}
 .cw-launch svg{width:22px; height:22px}
+/* Hover/focus label, to the left of the button. Never takes clicks, and is
+   gone while the window is open. aria-hidden: the button's aria-label says
+   the same thing. .peek shows it once on touch screens (cwPeek()). */
+.cw-label{position:fixed; z-index:300; right:calc(84px + env(safe-area-inset-right)); bottom:calc(25px + env(safe-area-inset-bottom));
+  pointer-events:none; text-align:right; white-space:nowrap; padding:7px 11px; border-radius:4px;
+  background:var(--ink-3); border:1px solid var(--line-2); box-shadow:0 6px 18px rgba(0,0,0,.5);
+  opacity:0; transform:translateX(6px); transition:opacity .15s ease, transform .15s ease}
+.cw-label b{display:block; font-weight:500; font-size:12.5px; color:var(--cream)}
+.cw-label span{display:block; font-family:var(--mono); font-size:9.5px; color:var(--muted); margin-top:2px}
+body:not(.cw-is-open) .cw-launch:hover + .cw-label, body:not(.cw-is-open) .cw-launch:focus-visible + .cw-label, body:not(.cw-is-open) .cw-label.peek{opacity:1; transform:none}
+body[data-tab="chat"] .cw-label{display:none}
 .cw-dot{position:absolute; top:3px; right:3px; width:11px; height:11px; border-radius:50%; background:var(--gold); border:2px solid var(--ink-3)}
 .cw-dot[hidden]{display:none}
 .cw-win{position:fixed; z-index:300; right:calc(20px + env(safe-area-inset-right)); bottom:calc(84px + env(safe-area-inset-bottom));
   width:400px; max-width:calc(100vw - 32px); height:min(620px, calc(100dvh - 160px)); min-height:320px;
   display:flex; flex-direction:column; background:var(--ink-2); border:1px solid var(--line-2); border-radius:6px;
-  box-shadow:0 18px 50px rgba(0,0,0,.6); overflow:hidden}
-.cw-win[hidden]{display:none}
+  box-shadow:0 18px 50px rgba(0,0,0,.6); overflow:hidden;
+  /* Closed is invisible, not display:none, so open/close can transition; the
+     window is also inert + aria-hidden while closed (cwOpenWin/cwClose).
+     Only this container animates, never the messages. visibility flips at
+     the END of a close (delayed) and at the START of an open (no delay), so
+     the input can take focus at once and a closed window takes no clicks.
+     Reversing mid-way is just another transition: nothing can get stuck. */
+  transform-origin:100% 100%;
+  opacity:0; transform:translate(10px,14px) scale(.96); visibility:hidden; pointer-events:none;
+  transition:opacity .2s ease, transform .22s cubic-bezier(.2,.8,.2,1), visibility 0s linear .22s}
+.cw-win.open{opacity:1; transform:none; visibility:visible; pointer-events:auto;
+  transition:opacity .2s ease, transform .22s cubic-bezier(.2,.8,.2,1), visibility 0s}
 body[data-tab="chat"] .cw-launch, body[data-tab="chat"] .cw-win{display:none}
 .cw-hd{display:flex; align-items:center; gap:10px; padding:11px 12px 10px 16px; border-bottom:1px solid var(--line)}
-.cw-ttl{flex:1; font-family:var(--display); font-size:19px; line-height:1.2}
+.cw-ttl{flex:1; display:flex; align-items:center; gap:8px; font-family:var(--display); font-size:19px; line-height:1.2}
+.ai-badge{font-family:var(--mono); font-size:9px; font-weight:500; letter-spacing:.12em; color:var(--gold); border:1px solid var(--gold-dim); border-radius:3px; padding:2px 5px 1px; line-height:1.3}
+.chat-ttl .ai-badge{vertical-align:middle; margin-left:10px; position:relative; top:-4px}
 .cw-acts{display:flex; gap:6px}
 .cw-ib{width:30px; height:30px; padding:0; display:grid; place-items:center; font-size:14px; letter-spacing:0}
 .cw-ib svg{width:14px; height:14px}
@@ -693,15 +721,18 @@ body[data-tab="chat"] .cw-launch, body[data-tab="chat"] .cw-win{display:none}
 .cw-log .msg{gap:10px; animation:none}
 .cw-log .msg-av{width:23px; height:23px; font-size:10px}
 .cw-log .msg-tx{font-size:13px; line-height:1.65}
-.cw-starters{display:flex; flex-direction:column; gap:6px; padding:0 16px 10px}
-.cw-starters:empty{display:none}
-.cw-start{text-align:left; font-family:var(--ui); font-size:12px; letter-spacing:0; line-height:1.4; color:var(--cream); padding:7px 10px}
+/* Empty state: a plain intro instead of starter prompts, gone after the
+   first question (the window gets .is-empty from cwSyncEmpty()). */
+.cw-intro{display:none; flex:1; min-height:0; flex-direction:column; justify-content:center; gap:10px; padding:20px 28px; text-align:center; color:var(--muted); font-size:13px; line-height:1.6}
+.cw-intro svg{width:26px; height:26px; color:var(--gold); align-self:center}
+.cw-win.is-empty .cw-intro{display:flex}
+.cw-win.is-empty .cw-log{display:none}
 .cw-ctx{display:flex; align-items:flex-start; gap:7px; padding:8px 16px 0; border-top:1px solid var(--line); font-family:var(--mono); font-size:9.5px; color:var(--muted); min-width:0}
 .cw-ctx-v{flex:1; min-width:0; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; line-height:1.45; color:var(--cream)}
 .cw-ctx button{padding:2px 7px; font-size:9.5px}
 .cw-win .chat-in{padding:8px 12px 0 16px; border-top:none}
 .cw-win .chat-in textarea{max-height:130px}
-.cw-meta{display:flex; justify-content:space-between; gap:10px; padding:6px 16px calc(10px + env(safe-area-inset-bottom)); font-family:var(--mono); font-size:9px; color:var(--muted)}
+.cw-meta{display:flex; justify-content:space-between; gap:10px; padding:6px 16px calc(10px + env(safe-area-inset-bottom)); font-family:var(--mono); font-size:9px; letter-spacing:.02em; color:var(--muted)}
 .cw-count{color:var(--gold)}
 .p-ask{background:none; border:1px solid transparent; border-radius:3px; color:var(--muted-2); cursor:pointer; padding:1px 3px; display:inline-grid; place-items:center; align-self:center}
 .p-ask svg{width:13px; height:13px}
@@ -710,13 +741,16 @@ body[data-tab="chat"] .cw-launch, body[data-tab="chat"] .cw-win{display:none}
 @media (max-width:640px){
   /* Bottom sheet: full width, most of the height, obvious close; the
      launcher steps aside while it is open so it never sits on the input. */
-  .cw-win{left:0; right:0; bottom:0; width:100%; max-width:none; height:88dvh; min-height:0; border-radius:12px 12px 0 0; border-bottom:none}
+  .cw-win{left:0; right:0; bottom:0; width:100%; max-width:none; height:88dvh; min-height:0; border-radius:12px 12px 0 0; border-bottom:none;
+    opacity:1; transform:translateY(100%)} /* the sheet slides up and down */
+  .cw-win.open{transform:none}
+  .cw-label{right:calc(72px + env(safe-area-inset-right)); bottom:calc(18px + env(safe-area-inset-bottom))}
   .cw-launch{right:calc(14px + env(safe-area-inset-right)); bottom:calc(14px + env(safe-area-inset-bottom)); width:48px; height:48px}
   body.cw-is-open .cw-launch{display:none}
   .cw-min-ic{display:none} .cw-close-x{display:inline}
   .cw-ib{width:36px; height:36px}
 }
-@media print{.cw-launch,.cw-win,.p-ask{display:none!important}}
+@media print{.cw-launch,.cw-label,.cw-win,.p-ask{display:none!important}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
 </style>
 </head>
@@ -771,7 +805,7 @@ body[data-tab="chat"] .cw-launch, body[data-tab="chat"] .cw-win{display:none}
     <div class="chat">
       <div class="chat-hd">
         <div class="chat-hd-row">
-          <div class="chat-ttl">Ask the estate</div>
+          <div class="chat-ttl">Ask the estate<span class="ai-badge">AI<span class="sr-only"> assistant</span></span></div>
           <button class="chat-new" id="chatNew" type="button" disabled>New chat</button>
         </div>
         <div class="chat-confirm" id="chatConfirm" hidden><span>Clear this conversation? It is also cleared in the floating chat window.</span>
@@ -796,16 +830,17 @@ body[data-tab="chat"] .cw-launch, body[data-tab="chat"] .cw-win{display:none}
         <textarea id="chatin" rows="1" maxlength="4000" aria-label="Ask a question" placeholder="&hellip;or type your own question"></textarea>
         <button class="send" id="send" aria-label="Send">&rarr;</button>
       </div>
-      <div class="chat-note">Answers are generated from Mars Estate's live data &middot; verify anything safety-critical against the dashboard</div>
+      <div class="chat-note">AI-generated answers from Mars Estate&rsquo;s live data &middot; check anything important against the dashboard</div>
     </div>
   </section>
 
   <!-- Floating chat launcher (§8 "cw"). The window itself is built on first
        open; until then this button is the only cost. -->
-  <button class="cw-launch" id="cw-launch" type="button" aria-label="Ask Mars Telemetry" aria-expanded="false" aria-controls="cw-win">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12.5a7.5 7.5 0 0 1-10.9 6.7L4 20.5l1.3-4.6A7.5 7.5 0 1 1 20 12.5z"/></svg>
+  <button class="cw-launch" id="cw-launch" type="button" aria-label="Ask Mars Telemetry AI assistant" aria-expanded="false" aria-controls="cw-win">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M10 3.5l1.6 4.9 4.9 1.6-4.9 1.6L10 16.5l-1.6-4.9-4.9-1.6 4.9-1.6z"/><path d="M18 13.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg>
     <span class="cw-dot" id="cw-dot" hidden></span>
   </button>
+  <div class="cw-label" id="cw-label" aria-hidden="true"><b>Ask Mars Telemetry AI</b><span>AI assistant for your estate data</span></div>
   <div class="sr-only" id="chat-live" aria-live="polite"></div>
 
   <div class="foot">
@@ -5389,8 +5424,10 @@ const chatAtBottom = log => log.scrollHeight - log.scrollTop - log.clientHeight 
 const chatIsQuestion = m => m.role==='user' && (typeof m.content==='string' || (Array.isArray(m.content) && m.content.some(b=>b?.type==='text')));
 const chatHasQuestions = () => chatMsgs.some(m=>m.who==='u');
 
-function chatMakeView({surface, log, input, send, counter=null, visible, after=null}){
-  const v = {surface, log, input, send, counter, visible, after, nodes:new Map(), dirty:true, shown:false, stick:true, scroll:0};
+// skipGreeting: the floating window shows its own intro instead of the
+// greeting bubble, whose text points at the Chat tab's suggestion chips.
+function chatMakeView({surface, log, input, send, counter=null, visible, after=null, skipGreeting=false}){
+  const v = {surface, log, input, send, counter, visible, after, skipGreeting, nodes:new Map(), dirty:true, shown:false, stick:true, scroll:0};
   // Each view keeps its own scroll position; tracked only while on screen,
   // since hiding a scroller can report 0.
   log.addEventListener('scroll', ()=>{ if(v.shown){ v.stick = chatAtBottom(log); v.scroll = log.scrollTop; } });
@@ -5430,7 +5467,7 @@ function chatWho(m){
   if(m.who==='u') return 'You';
   // `provider` is the model that ACTUALLY answered (server-set, see the
   // `done` event) -- operator only, same gate as the model dropdown.
-  return 'Mars Telemetry' + (chatRole==='operator' && m.provider ? ' · '+(MODEL_LABELS[m.provider]||m.provider) : '');
+  return 'Mars Telemetry AI' + (chatRole==='operator' && m.provider ? ' · '+(MODEL_LABELS[m.provider]||m.provider) : '');
 }
 
 const CHAT_TYPING = '<div class="typing"><i></i><i></i><i></i></div>';
@@ -5495,6 +5532,7 @@ function chatFeedbackHtml(m){
 }
 
 function chatPatch(v, m){
+  if(v.skipGreeting && m.greeting) return;
   let n = v.nodes.get(m.id);
   if(!n){
     n = el('div', 'msg '+(m.who==='u'?'u':'a'));
@@ -5556,11 +5594,12 @@ function chatSyncViews(){
   });
   if(chatUnread && chatViews.some(v=>v.visible())) chatUnread = false;
   chatSyncLauncher();
+  if(typeof cwPeek==='function') cwPeek();
 }
 
 function chatSyncLauncher(){
   $('#cw-dot').hidden = !chatUnread;
-  $('#cw-launch').setAttribute('aria-label', chatUnread ? 'Ask Mars Telemetry (new answer)' : 'Ask Mars Telemetry');
+  $('#cw-launch').setAttribute('aria-label', chatUnread ? 'Ask Mars Telemetry AI assistant (new answer)' : 'Ask Mars Telemetry AI assistant');
 }
 
 // Screen readers get each finished answer once, not every streamed token.
@@ -5951,6 +5990,7 @@ let cwPanelId = null;
 // whose filter says "all blocks" is described as viewing block B2.
 let cwBlocksAccess = null;
 
+const CW_ICON_AI = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M10 3.5l1.6 4.9 4.9 1.6-4.9 1.6L10 16.5l-1.6-4.9-4.9-1.6 4.9-1.6z"/><path d="M18 13.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg>';
 const CW_ICON_MIN = '<svg class="cw-min-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 12h12"/></svg><span class="cw-close-x" aria-hidden="true">&#10005;</span>';
 const CW_ICON_EXPAND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></svg>';
 const CW_ICON_NEW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
@@ -5960,11 +6000,11 @@ function cwBuild(){
   cwRoot.id = 'cw-win';
   cwRoot.setAttribute('role', 'dialog');
   cwRoot.setAttribute('aria-modal', 'false'); // the dashboard behind stays usable
-  cwRoot.setAttribute('aria-labelledby', 'cw-ttl');
-  cwRoot.hidden = true;
+  cwRoot.setAttribute('aria-labelledby', 'cw-ttl cw-ai'); // "Ask Mars Telemetry AI assistant"
+  cwRoot.inert = true; cwRoot.setAttribute('aria-hidden', 'true');
   cwRoot.innerHTML = `
     <div class="cw-hd">
-      <div class="cw-ttl" id="cw-ttl">Ask Mars Telemetry</div>
+      <div class="cw-ttl"><span id="cw-ttl">Ask Mars Telemetry</span><span class="ai-badge" id="cw-ai">AI<span class="sr-only"> assistant</span></span></div>
       <div class="cw-acts">
         <button type="button" class="cw-ib" data-cw="new" aria-label="New chat" title="New chat">${CW_ICON_NEW}</button>
         <button type="button" class="cw-ib" data-cw="expand" aria-label="Open in the Chat tab" title="Open in the Chat tab">${CW_ICON_EXPAND}</button>
@@ -5973,20 +6013,20 @@ function cwBuild(){
     </div>
     <div class="chat-confirm" hidden><span>Clear this conversation? It is also cleared in the Chat tab.</span>
       <button class="msg-btn" type="button" data-confirm="yes">Clear</button><button class="msg-btn ghost" type="button" data-confirm="no">Cancel</button></div>
+    <div class="cw-intro">${CW_ICON_AI}<p style="margin:0">Ask about what you&rsquo;re looking at, or anything about the estate&rsquo;s data. Answers are AI-generated.</p></div>
     <div class="cw-log" role="log" aria-label="Conversation"></div>
-    <div class="cw-starters" aria-label="Suggested questions"></div>
     <div class="cw-ctx"></div>
     <div class="chat-in">
       <textarea rows="1" maxlength="${CHAT_MAX_Q}" aria-label="Ask a question" placeholder="Ask about the estate&hellip;"></textarea>
       <button class="send" type="button" aria-label="Send">&rarr;</button>
     </div>
-    <div class="cw-meta"><span>Enter to send · Shift+Enter for a new line</span><span class="cw-count" aria-live="polite"></span></div>`;
+    <div class="cw-meta"><span>AI-generated answers from Mars Estate&rsquo;s live data &middot; check anything important against the dashboard</span><span class="cw-count" aria-live="polite"></span></div>`;
   $('.wrap').appendChild(cwRoot);
 
   cwView = chatMakeView({surface:'widget', log:cwRoot.querySelector('.cw-log'),
     input:cwRoot.querySelector('textarea'), send:cwRoot.querySelector('.send'), counter:cwRoot.querySelector('.cw-count'),
     visible:()=> cwOpen && typeof state!=='undefined' && state.tab!=='chat',
-    after:cwRenderStarters});
+    after:cwSyncEmpty, skipGreeting:true});
 
   const [bNew, bExpand, bMin] = ['new','expand','min'].map(k=>cwRoot.querySelector(`[data-cw="${k}"]`));
   chatWireConfirm(bNew, cwRoot.querySelector('.chat-confirm'), ()=>cwView.input.focus());
@@ -5999,25 +6039,22 @@ function cwBuild(){
     cwRenderCtx();
     cwRoot.querySelector('.cw-ctx button')?.focus();
   };
-  cwRoot.querySelector('.cw-starters').onclick = e=>{
-    const b = e.target.closest('.cw-start'); if(!b || chatBusy) return;
-    ask(b.textContent, {surface:'widget', ctx:cwContextForSend()});
-  };
   // Esc minimises -- only from inside the window, so it never competes with
   // anything else on the page.
   cwRoot.addEventListener('keydown', e=>{ if(e.key==='Escape'){ e.stopPropagation(); cwClose(true); } });
 }
 
 function cwOpenWin({focus=true}={}){
-  if(!cwRoot) cwBuild();
+  if(!cwRoot){ cwBuild(); void cwRoot.offsetWidth; } // first open: commit the closed state so it transitions
   const was = cwOpen;
   cwOpen = true;
-  cwRoot.hidden = false;
+  cwRoot.inert = false; cwRoot.removeAttribute('aria-hidden');
+  cwRoot.classList.add('open');
   document.body.classList.add('cw-is-open');
   $('#cw-launch').setAttribute('aria-expanded', 'true');
   cwRenderCtx();
   chatSyncViews();
-  cwRenderStarters();
+  cwSyncEmpty();
   if(!was) chatEvent('open', 'widget');
   if(!cwBlocksAccess && typeof getAccessibleBlocks==='function'){
     const gen = chatGen;
@@ -6033,7 +6070,8 @@ function cwOpenWin({focus=true}={}){
 function cwClose(returnFocus){
   if(!cwOpen) return;
   cwOpen = false;
-  cwRoot.hidden = true;
+  cwRoot.classList.remove('open');
+  cwRoot.inert = true; cwRoot.setAttribute('aria-hidden', 'true');
   document.body.classList.remove('cw-is-open');
   $('#cw-launch').setAttribute('aria-expanded', 'false');
   chatSyncViews();
@@ -6082,27 +6120,25 @@ function cwRenderCtx(){
 // (renderTab) call this. Cheap -- no DOM work at all while it is closed.
 function cwRefresh(){
   if(cwCtxMode==='panel' && !PANELS.some(p=>p.id===cwPanelId && p.tab===state.tab)){ cwCtxMode = 'page'; cwPanelId = null; }
-  cwRenderCtx(); cwRenderStarters();
+  cwRenderCtx();
 }
 
-// One-click starting points, shown only while the thread has no questions.
-function cwStarters(){
-  const op = chatRole==='operator';
-  if(state.tab==='winery') return op
-    ? ['What are current cellar temperature and humidity?', 'Any lots showing chemistry I should keep an eye on?', "What's in each barrel and tank right now?"]
-    : ["What might this vintage's wine characteristics be, based on the growing season?", "How does this vintage compare to last year's climate?"];
-  return op
-    ? ["How's this season's GDD tracking?", 'Which block is driest right now?', 'Any anomalies I should know about?', 'What do VPD and diurnal range say about vine stress right now?']
-    : ["What's the GDD to date this season, and what does GDD measure?", "What's the current soil moisture in my block?", "How's the weather been at the estate this week?", 'Any risks I should know about this season?'];
+// Intro instead of an empty log until the first question.
+function cwSyncEmpty(){
+  if(cwRoot) cwRoot.classList.toggle('is-empty', !chatHasQuestions());
 }
-function cwRenderStarters(){
-  if(!cwRoot || !cwOpen) return;
-  const box = cwRoot.querySelector('.cw-starters');
-  const want = chatRole && !chatHasQuestions() && !chatBusy;
-  const key = want ? state.tab+'|'+chatRole : '';
-  if(box.dataset.key===key) return;
-  box.dataset.key = key;
-  box.innerHTML = want ? cwStarters().map(s=>`<button type="button" class="cw-start">${escapeHtml(s)}</button>`).join('') : '';
+
+// Touch screens have no hover, so the launcher's label is shown once, for a
+// few seconds, the first time the button is on screen in this page session.
+// In memory only: a reload shows it again, nothing is stored.
+let cwPeeked = false;
+function cwPeek(){
+  if(cwPeeked || !matchMedia('(hover: none)').matches) return;
+  if($('.wrap').style.display==='none' || typeof state==='undefined' || state.tab==='chat') return;
+  cwPeeked = true;
+  const l = $('#cw-label');
+  l.classList.add('peek');
+  setTimeout(()=>l.classList.remove('peek'), 3500);
 }
 
 // "Ask about this" on a panel: open the window with that panel attached and

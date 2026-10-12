@@ -11,7 +11,7 @@ const EXPORT = `globalThis.__t = {
   get cwRoot(){ return cwRoot; }, get cwView(){ return cwView; }, get views(){ return chatViews; },
   set ctxMode(v){ cwCtxMode = v; }, set role(v){ chatRole = v; }, set access(v){ cwBlocksAccess = v; },
   ask, resetChat, newChat, cwOpenWin, cwClose, cwAskAbout, cwPageContext, cwContextForSend, chatSyncViews,
-  chatOnLogClick, chatMsgHtml, LOG };`;
+  chatOnLogClick, chatMsgHtml, initChat, LOG };`;
 
 const PANELS = [
   { id: 'soilmoist', tab: 'vineyard', minRole: 'all', title: 'Soil moisture', range: '30D' },
@@ -213,7 +213,7 @@ test('the window is never a view on the Chat tab', () => {
   assert.equal(t.cwView.visible(), false);
   assert.equal(ctx.document.body.dataset.tab, 'chat');
   assert.match(HTML, /body\[data-tab="chat"\] \.cw-launch, body\[data-tab="chat"\] \.cw-win\{display:none\}/);
-  assert.match(HTML, /@media print\{\.cw-launch,\.cw-win,\.p-ask\{display:none!important\}\}/);
+  assert.match(HTML, /@media print\{\.cw-launch,\.cw-label,\.cw-win,\.p-ask\{display:none!important\}\}/);
 });
 
 test('server errors: 413 tells the user to start a new chat, 401 says sign in, network says retry', async () => {
@@ -323,4 +323,62 @@ test('with events on: text is sent only on a confirmed "This was wrong", after t
   assert.equal(flag.panel_id, 'ferm');
   assert.equal(flag.turn_index, 0);
   assert.match(t.cwView.log.innerHTML, /Reported — thank you/);
+});
+
+test('no starter prompts in the window; the Chat tab keeps its suggestion chips', async () => {
+  assert.equal(/cwRenderStarters|cwStarters|cw-starters|cw-start\b/.test(HTML), false, 'window starter code and styles are gone');
+  const from = (table) => ({ select: () => ({ eq: () => ({
+    single: async () => ({ data: { first_name: 'Op', last_name: 'Erator' } }),
+    order: () => ({ limit: async () => ({ data: [{ lot_name: '25CS-B2' }] }) }),
+  }) }) });
+  const { t, $ } = setup({ from });
+  await t.initChat({ user: { id: 'u' } }, 'operator');
+  assert.match($('#chipPanel').innerHTML, /Brix trend for 25CS-B2.*Any vessels sitting empty\?/, 'Chat tab chips rendered as before');
+  t.cwOpenWin();
+  assert.equal(/cw-start/.test(t.cwRoot.innerHTML), false);
+});
+
+test('window empty state: intro until the first question; the greeting stays on the Chat tab only', async () => {
+  const from = (table) => ({ select: () => ({ eq: () => ({ single: async () => ({ data: { first_name: 'Cus', last_name: 'Tomer' } }) }) }) });
+  const { t, state, last } = setup({ role: 'customer', from });
+  await t.initChat({ user: { id: 'u' } }, 'customer');
+  t.cwOpenWin();
+  assert.equal(t.cwRoot.classList.contains('is-empty'), true);
+  assert.match(t.cwRoot.innerHTML, /Ask about what you’re looking at|Ask about what you&rsquo;re looking at/);
+  assert.equal(/Hi Cus/.test(t.cwView.log.innerHTML), false, 'no greeting bubble in the window');
+  t.ask('first', { surface: 'widget' });
+  await tick();
+  assert.equal(t.cwRoot.classList.contains('is-empty'), false, 'intro gone after the first message');
+  state.tab = 'chat'; t.chatSyncViews();
+  assert.match(t.LOG.innerHTML, /Hi Cus/, 'Chat tab still greets');
+  finish(last()); await new Promise((r) => setTimeout(r, 5));
+  t.newChat(); state.tab = 'vineyard'; t.chatSyncViews();
+  assert.equal(t.cwRoot.classList.contains('is-empty'), true, 'intro back after New chat');
+});
+
+test('closed window is inert and hidden from screen readers; open is not', () => {
+  const { t } = setup();
+  t.cwOpenWin();
+  assert.equal(t.cwRoot.classList.contains('open'), true);
+  assert.equal(t.cwRoot.inert, false);
+  assert.equal(t.cwRoot.getAttribute('aria-hidden'), null);
+  t.cwClose(true);
+  assert.equal(t.cwRoot.classList.contains('open'), false);
+  assert.equal(t.cwRoot.inert, true);
+  assert.equal(t.cwRoot.getAttribute('aria-hidden'), 'true');
+  assert.equal(/\.cw-win\[hidden\]/.test(HTML), false, 'no display:none closed state');
+});
+
+test('AI attribution: replies, header, launcher and the note under the input', async () => {
+  const { t, last, $ } = setup({ role: 'customer' });
+  t.cwOpenWin();
+  t.ask('q', { surface: 'widget' }); await tick();
+  finish(last()); await new Promise((r) => setTimeout(r, 5));
+  const whos = [...t.cwView.nodes.values()].map((n) => n.querySelector('.msg-who').textContent);
+  assert.deepEqual(whos, ['You', 'Mars Telemetry AI']);
+  assert.match(t.cwRoot.innerHTML, /class="ai-badge"/);
+  assert.match(t.cwRoot.innerHTML, /AI-generated answers from Mars Estate&rsquo;s live data &middot; check anything important against the dashboard/);
+  assert.match(HTML, /<div class="chat-note">AI-generated answers from Mars Estate&rsquo;s live data &middot; check anything important against the dashboard<\/div>/, 'same wording on the Chat tab');
+  assert.match($('#cw-launch').getAttribute('aria-label'), /AI assistant/);
+  assert.match(HTML, /class="cw-label" id="cw-label" aria-hidden="true"><b>Ask Mars Telemetry AI<\/b>/);
 });

@@ -9321,3 +9321,116 @@ check that no estate-wide guide text, persona or chip offers per-block data;
 the band line in the GDD entry and context only. Node **205/205**, Deno
 **96/96**, boundary check PASS, lint shows the 2 pre-existing findings, and
 the mocked browser check passed 74 of 74 with 0 real requests.
+
+## Production run: chat launcher, dashboard guide, chat_events (2026-10-12)
+
+Released PRs #4-#8 to production. Only the synthetic operator and
+HEALTH-CUST-B2 were used throughout; no real user's account was touched.
+
+### Merges (merge commits, trees equal to the reviewed heads)
+
+| PR | Merge commit | Content |
+|---|---|---|
+| #4 | `db017a8` | Chat history and rendered dashboard DOM cleared on user change |
+| #5 | `dd21a16` | Floating chat launcher |
+| #6 | `d5c7735` | Dashboard guide, server-validated context, corrected tool descriptions, release follow-ups |
+| #7 | `fc780ee` | `CHAT_EVENTS_ENABLED = true` |
+| #8 | `56fcc09` | Fix forward: server-computed GDD band position, estate-wide scope marker |
+
+Main in production: `56fcc09`. Vercel deploys main to Production
+automatically; the final production deployment `7025925050` serves a page
+byte-identical to main's `web/index.html` (sha256 `002973a7…`).
+
+### Database
+
+- `20261012120000_chat_events.sql` applied: `supabase db push`, after a
+  dry run showed it was the only pending migration. The migration list is
+  clean afterwards.
+- Live state as designed:
+  - RLS on (not forced);
+  - `chat_events_insert_own` (INSERT, authenticated, own row, approved role)
+    and `chat_events_operator_read` (SELECT, operators);
+  - `authenticated`: SELECT plus column-level INSERT on the six designed
+    columns; no anon or PUBLIC access; no `mcp_reader` grant;
+  - the text-only-on-flag CHECK is present.
+- `check_policy_drift.py`: 0 problems, both new policies MATCH.
+- P1 `security.mcp_reader.grants` was not re-baselined: no `mcp_reader` grant
+  changed.
+
+### Edge functions
+
+| Step | chat | mcp |
+|---|---|---|
+| Before (rollback copies, = `9b93fb4`) | v52 `88620ba1…` | v22 `ba1fc451…` |
+| After #4-#7 (from `d5c7735`) | v53 `b885cd06…` | v23 `5963410e…` |
+| Final (from `56fcc09`) | **v54 `7cf233b2…`** | **v24 `3f14580d…`** |
+
+Each deploy was downloaded and diffed against main: **0 lines** across
+chat/, mcp/ and _shared/ (26 files for the final deploy). Rollback copies of
+v52/v22 and v53/v23 were kept outside the repo.
+
+### Checks
+
+- **MCP parity**, after each deploy: 69 queries, 68 byte-identical,
+  1 count-only (unordered and capped), **0 failed**.
+- **Colin's cases.** The previous harness was not available, so his 75
+  distinct logged `runTool` calls (`agent_api_key_calls` 578-677; the 3
+  MCP-only health calls excluded) were replayed through the deployed code
+  and the release code. Row counts and error states matched in all 75; 0
+  unexpected differences (68 identical, 7 differing only by the designed
+  source/demonstration notes or tie order).
+- **Identifier sweep.** Rebuilt locally, because the original ran through the
+  gateway with an owner key that was not available. It covered 47 sample
+  numbers, 18 lots and 1 vessel-only lot code: 179 lookups.
+  - 0 unexpected differences from the deployed code;
+  - 0 dead ends across the 132 winery/InnoVint/vessel/reissue lookups;
+  - `310310429` still returns its 2 rows.
+  - The original's 43 cross-source variant lookups were not re-run
+    separately; their outputs match the previously deployed code.
+
+### Live verification (production)
+
+- **Launcher browser check:** 74/74 at `fc780ee` and again at `56fcc09`, with
+  the chat mocked in the page, 0 real chat requests, and `chat_events` writes
+  intercepted. It covers sign-out mid-answer followed by B2 on the same page
+  inheriting nothing.
+- **Rendered panels on user change:** operator opens Winery and signs out,
+  B2 signs in. Hidden Winery panels in the DOM: 0 (main before #4: 6).
+- **`chat_events`.** As the operator on production, with the chat mocked:
+  - the window open, a question, a thumbs-up and a confirmed "This was
+    wrong" wrote exactly 4 rows (`open`, `ask`, `thumb_up`, `flag_wrong`);
+  - question and answer text appeared only on the flag, after the notice
+    was shown;
+  - B2's own session read 0 rows (HTTP 200);
+  - the 4 test rows (ids 1-4) were then deleted, and the table is empty.
+- **Real questions: 5 in total.** The first live run asked 3 (approved cap
+  3):
+  - (a) GDD, operator: **failed**, it computed "roughly 690 GDD short" itself;
+  - (b) Solar, B2: **failed**, it offered "GDD or temperature trends for B2";
+  - (c) soil moisture, operator: passed, via `get_dashboard_guide`.
+
+  A rollback was blocked by a tool permission; the owner chose to fix forward
+  (#8). After #8, 2 more (approved cap 2):
+  - (a) GDD, operator: **passed**. It quoted the server statement ("2863.5 GDD
+    … below the 3550-4050 GDD harvest band, 686.5 GDD short of the low end",
+    from `harvest_band_position` in the GDD context), with no self-computed
+    figure.
+  - (b) Solar, B2: **passed**. "Since this is estate-wide, there's no
+    block-level breakdown", with no per-block offer.
+
+  Cost: about $0.15-0.25 for the five, estimated from the earlier local
+  batch's token counts, since the deployed function's usage is not visible.
+
+### Decided before release (Phase 0)
+
+- Soil help text says "0-7 cm surface layer".
+- Demo-clock times are labelled.
+- Alerts from simulated data are marked "Demonstration".
+- 2026 fruit receipts are real (`REAL_FRUIT_VINTAGES` gains 2026).
+- A paragraph break goes between model turns.
+- `chat_events` revokes PUBLIC explicitly.
+
+### Still open (owner's decision)
+
+- Should the Solar panel plot the real ECMWF model solar rows (2022-2025
+  only)?

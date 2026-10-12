@@ -106,3 +106,16 @@ test("anon has no access at all", async () => {
     await assert.rejects(db.query("select * from public.chat_events"), /permission denied/);
   } finally { await db.query("rollback"); }
 });
+
+test("grants are exactly as designed: no PUBLIC or anon grant, authenticated column-level insert + select", async () => {
+  const g = (await db.query(`select grantee, privilege_type from information_schema.role_table_grants
+     where table_schema = 'public' and table_name = 'chat_events' and grantee in ('PUBLIC', 'anon', 'authenticated') order by 1, 2`)).rows;
+  assert.deepEqual(g.map((r) => `${r.grantee}:${r.privilege_type}`), ["authenticated:SELECT"]);
+  const cols = (await db.query(`select column_name from information_schema.column_privileges
+     where table_name = 'chat_events' and grantee = 'authenticated' and privilege_type = 'INSERT' order by 1`)).rows.map((r) => r.column_name);
+  assert.deepEqual(cols, ["answer", "event", "panel_id", "question", "surface", "turn_index"]);
+  const rls = (await db.query("select relrowsecurity from pg_class where relname = 'chat_events'")).rows[0];
+  assert.equal(rls.relrowsecurity, true);
+  const pols = (await db.query("select policyname, cmd, roles::text from pg_policies where tablename = 'chat_events' order by 1")).rows;
+  assert.deepEqual(pols.map((p) => `${p.policyname}:${p.cmd}:${p.roles}`), ["chat_events_insert_own:INSERT:{authenticated}", "chat_events_operator_read:SELECT:{authenticated}"]);
+});

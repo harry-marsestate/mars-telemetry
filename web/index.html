@@ -632,15 +632,129 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   .hdr{grid-template-columns:1fr auto; gap:12px; padding:12px 16px}
   .tabs{order:3; grid-column:1/-1; width:100%; justify-content:center}
   .clock{display:none}
-  .wrap{padding:18px 14px 60px}
+  .wrap{padding:18px 14px 80px} /* bottom: clear of the 48px chat launcher at 14px */
+  /* Section notes wrap instead of widening the page: a nowrap note pushed a
+     390px phone's layout to 455px, so mobile browsers zoomed out and every
+     fixed element (the chat launcher) sat partly off-screen. */
+  .sect{flex-wrap:wrap; row-gap:6px}
+  .sect-n{white-space:normal; min-width:0}
   .s3,.s4,.s5,.s6,.s7,.s8,.s9{grid-column:span 12}
   .fmeta{align-items:flex-start}
   .ov-grid.duo{grid-template-columns:1fr}
 }
+/* ── Floating chat launcher + window ("cw", §8) ─────
+   Fixed to the viewport, inside .wrap so it disappears with the dashboard
+   (sign-in, pending, User Management all hide .wrap). Layering: above the
+   sticky header (100) and chart tooltip (200), below every full-screen
+   .out view (400). Hidden on the Chat tab, which already is the chat. */
+.chat-hd-row{display:flex; align-items:flex-start; justify-content:space-between; gap:12px}
+.chat-new,.cw-ib,.msg-btn,.cw-ctx button{font-family:var(--mono); font-size:10px; letter-spacing:.08em; background:none; border:1px solid var(--line-2); border-radius:3px; color:var(--muted); cursor:pointer; padding:5px 9px; transition:border-color .16s,color .16s}
+.chat-new:hover,.cw-ib:hover,.msg-btn:hover,.cw-ctx button:hover{border-color:var(--gold-dim); color:var(--gold)}
+.chat-new:disabled{opacity:.4; cursor:default; border-color:var(--line); color:var(--muted)}
+.chat-confirm{display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:12px; color:var(--cream); padding:9px 11px; margin-top:10px; border:1px solid var(--line-2); border-radius:3px; background:var(--ink-3)}
+.chat-confirm[hidden]{display:none}
+.chat-confirm span{flex:1 1 200px}
+.send:disabled{opacity:.4; cursor:default}
+.send:disabled:hover{border-color:var(--line); color:var(--muted-2)}
+.msg-ctx{display:inline-block; font-family:var(--mono); font-size:9.5px; letter-spacing:.04em; color:var(--muted); border:1px solid var(--line); border-radius:3px; padding:2px 7px; margin-bottom:7px}
+.msg-acts{display:flex; gap:8px; flex-wrap:wrap; margin-top:10px}
+.msg-btn.ghost{border-color:transparent}
+.msg-fb:empty{display:none}
+.fb{display:flex; align-items:center; gap:6px; margin-top:10px; flex-wrap:wrap}
+.fb-b{display:inline-flex; align-items:center; gap:5px; background:none; border:1px solid transparent; border-radius:3px; color:var(--muted); cursor:pointer; padding:3px 6px; font-family:var(--mono); font-size:9.5px; letter-spacing:.06em}
+.fb-b svg{width:13px; height:13px}
+.fb-b:hover:not(:disabled){color:var(--gold); border-color:var(--line-2)}
+.fb-b.on{color:var(--gold)}
+.fb-b:disabled:not(.on){opacity:.35; cursor:default}
+.fb-note{font-family:var(--mono); font-size:10px; color:var(--muted); margin-top:10px}
+.fb-confirm{margin-top:10px; padding:10px 12px; border:1px solid var(--line-2); border-radius:3px; background:var(--ink-3); font-size:12px; line-height:1.55}
+.fb-confirm p{margin:0 0 9px}
+.fb-confirm .msg-btn{margin-right:6px}
+.sr-only{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0}
+.chat-new:focus-visible,.cw-ib:focus-visible,.msg-btn:focus-visible,.fb-b:focus-visible,.cw-ctx button:focus-visible,.cw-launch:focus-visible,.send:focus-visible,.p-ask:focus-visible{outline:2px solid var(--gold); outline-offset:2px}
+
+.cw-launch{position:fixed; z-index:300; right:calc(20px + env(safe-area-inset-right)); bottom:calc(20px + env(safe-area-inset-bottom));
+  width:52px; height:52px; border-radius:50%; display:grid; place-items:center; cursor:pointer;
+  background:var(--ink-3); color:var(--gold); border:1px solid var(--gold-dim); box-shadow:0 6px 22px rgba(0,0,0,.55); transition:border-color .16s,transform .16s}
+.cw-launch:hover{border-color:var(--gold); transform:translateY(-1px)}
+.cw-launch svg{width:22px; height:22px}
+/* Hover/focus label, to the left of the button. Never takes clicks, and is
+   gone while the window is open. aria-hidden: the button's aria-label says
+   the same thing. .peek shows it once on touch screens (cwPeek()). */
+.cw-label{position:fixed; z-index:300; right:calc(84px + env(safe-area-inset-right)); bottom:calc(25px + env(safe-area-inset-bottom));
+  pointer-events:none; text-align:right; white-space:nowrap; padding:7px 11px; border-radius:4px;
+  background:var(--ink-3); border:1px solid var(--line-2); box-shadow:0 6px 18px rgba(0,0,0,.5);
+  opacity:0; transform:translateX(6px); transition:opacity .15s ease, transform .15s ease}
+.cw-label b{display:block; font-weight:500; font-size:12.5px; color:var(--cream)}
+.cw-label span{display:block; font-family:var(--mono); font-size:9.5px; color:var(--muted); margin-top:2px}
+body:not(.cw-is-open) .cw-launch:hover + .cw-label, body:not(.cw-is-open) .cw-launch:focus-visible + .cw-label, body:not(.cw-is-open) .cw-label.peek{opacity:1; transform:none}
+body[data-tab="chat"] .cw-label{display:none}
+.cw-dot{position:absolute; top:3px; right:3px; width:11px; height:11px; border-radius:50%; background:var(--gold); border:2px solid var(--ink-3)}
+.cw-dot[hidden]{display:none}
+.cw-win{position:fixed; z-index:300; right:calc(20px + env(safe-area-inset-right)); bottom:calc(84px + env(safe-area-inset-bottom));
+  width:400px; max-width:calc(100vw - 32px); height:min(620px, calc(100dvh - 160px)); min-height:320px;
+  display:flex; flex-direction:column; background:var(--ink-2); border:1px solid var(--line-2); border-radius:6px;
+  box-shadow:0 18px 50px rgba(0,0,0,.6); overflow:hidden;
+  /* Closed is invisible, not display:none, so open/close can transition; the
+     window is also inert + aria-hidden while closed (cwOpenWin/cwClose).
+     Only this container animates, never the messages. visibility flips at
+     the END of a close (delayed) and at the START of an open (no delay), so
+     the input can take focus at once and a closed window takes no clicks.
+     Reversing mid-way is just another transition: nothing can get stuck. */
+  transform-origin:100% 100%;
+  opacity:0; transform:translate(10px,14px) scale(.96); visibility:hidden; pointer-events:none;
+  transition:opacity .2s ease, transform .22s cubic-bezier(.2,.8,.2,1), visibility 0s linear .22s}
+.cw-win.open{opacity:1; transform:none; visibility:visible; pointer-events:auto;
+  transition:opacity .2s ease, transform .22s cubic-bezier(.2,.8,.2,1), visibility 0s}
+body[data-tab="chat"] .cw-launch, body[data-tab="chat"] .cw-win{display:none}
+.cw-hd{display:flex; align-items:center; gap:10px; padding:11px 12px 10px 16px; border-bottom:1px solid var(--line)}
+.cw-ttl{flex:1; display:flex; align-items:center; gap:8px; font-family:var(--display); font-size:19px; line-height:1.2}
+.ai-badge{font-family:var(--mono); font-size:9px; font-weight:500; letter-spacing:.12em; color:var(--gold); border:1px solid var(--gold-dim); border-radius:3px; padding:2px 5px 1px; line-height:1.3}
+.chat-ttl .ai-badge{vertical-align:middle; margin-left:10px; position:relative; top:-4px}
+.cw-acts{display:flex; gap:6px}
+.cw-ib{width:30px; height:30px; padding:0; display:grid; place-items:center; font-size:14px; letter-spacing:0}
+.cw-ib svg{width:14px; height:14px}
+.cw-win .chat-confirm{margin:10px 12px 0}
+.cw-log{flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; display:flex; flex-direction:column; gap:16px; padding:14px 14px 10px 16px}
+/* No fade-in here: an animation restarts every time the window is shown, so
+   reopening would blank the whole conversation for a moment. */
+.cw-log .msg{gap:10px; animation:none}
+.cw-log .msg-av{width:23px; height:23px; font-size:10px}
+.cw-log .msg-tx{font-size:13px; line-height:1.65}
+/* Empty state: a plain intro instead of starter prompts, gone after the
+   first question (the window gets .is-empty from cwSyncEmpty()). */
+.cw-intro{display:none; flex:1; min-height:0; flex-direction:column; justify-content:center; gap:10px; padding:20px 28px; text-align:center; color:var(--muted); font-size:13px; line-height:1.6}
+.cw-intro svg{width:26px; height:26px; color:var(--gold); align-self:center}
+.cw-win.is-empty .cw-intro{display:flex}
+.cw-win.is-empty .cw-log{display:none}
+.cw-ctx{display:flex; align-items:flex-start; gap:7px; padding:8px 16px 0; border-top:1px solid var(--line); font-family:var(--mono); font-size:9.5px; color:var(--muted); min-width:0}
+.cw-ctx-v{flex:1; min-width:0; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; line-height:1.45; color:var(--cream)}
+.cw-ctx button{padding:2px 7px; font-size:9.5px}
+.cw-win .chat-in{padding:8px 12px 0 16px; border-top:none}
+.cw-win .chat-in textarea{max-height:130px}
+.cw-meta{display:flex; justify-content:space-between; gap:10px; padding:6px 16px calc(10px + env(safe-area-inset-bottom)); font-family:var(--mono); font-size:9px; letter-spacing:.02em; color:var(--muted)}
+.cw-count{color:var(--gold)}
+.p-ask{background:none; border:1px solid transparent; border-radius:3px; color:var(--muted-2); cursor:pointer; padding:1px 3px; display:inline-grid; place-items:center; align-self:center}
+.p-ask svg{width:13px; height:13px}
+.p-ask:hover{color:var(--gold); border-color:var(--line-2)}
+.cw-close-x{display:none}
+@media (max-width:640px){
+  /* Bottom sheet: full width, most of the height, obvious close; the
+     launcher steps aside while it is open so it never sits on the input. */
+  .cw-win{left:0; right:0; bottom:0; width:100%; max-width:none; height:88dvh; min-height:0; border-radius:12px 12px 0 0; border-bottom:none;
+    opacity:1; transform:translateY(100%)} /* the sheet slides up and down */
+  .cw-win.open{transform:none}
+  .cw-label{right:calc(72px + env(safe-area-inset-right)); bottom:calc(18px + env(safe-area-inset-bottom))}
+  .cw-launch{right:calc(14px + env(safe-area-inset-right)); bottom:calc(14px + env(safe-area-inset-bottom)); width:48px; height:48px}
+  body.cw-is-open .cw-launch{display:none}
+  .cw-min-ic{display:none} .cw-close-x{display:inline}
+  .cw-ib{width:36px; height:36px}
+}
+@media print{.cw-launch,.cw-label,.cw-win,.p-ask{display:none!important}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
 </style>
 </head>
-<body>
+<body data-tab="vineyard">
 
 <header class="hdr">
   <div class="brand">
@@ -690,7 +804,12 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
   <section class="view" id="view-chat">
     <div class="chat">
       <div class="chat-hd">
-        <div class="chat-ttl">Ask the estate</div>
+        <div class="chat-hd-row">
+          <div class="chat-ttl">Ask the estate<span class="ai-badge">AI<span class="sr-only"> assistant</span></span></div>
+          <button class="chat-new" id="chatNew" type="button" disabled>New chat</button>
+        </div>
+        <div class="chat-confirm" id="chatConfirm" hidden><span>Clear this conversation? It is also cleared in the floating chat window.</span>
+          <button class="msg-btn" type="button" data-confirm="yes">Clear</button><button class="msg-btn ghost" type="button" data-confirm="no">Cancel</button></div>
         <div class="chat-sub" id="chat-sub">Vineyard and winery telemetry &middot; Blocks 1&ndash;3</div>
         <!-- Operator-only, hidden by default; shown from initChat() only when
              role==='operator'. Cosmetic gate ONLY -- the real enforcement is
@@ -704,16 +823,25 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
           </select>
         </div>
       </div>
-      <div class="chat-log" id="chatlog"></div>
+      <div class="chat-log" id="chatlog" role="log" aria-label="Conversation"></div>
       <div class="chip-toggle" id="chipToggle"><span>Suggestions</span><span id="chipChevron">&#9652;</span></div>
       <div class="chip-panel" id="chipPanel"></div>
       <div class="chat-in">
-        <textarea id="chatin" rows="1" placeholder="&hellip;or type your own question"></textarea>
+        <textarea id="chatin" rows="1" maxlength="4000" aria-label="Ask a question" placeholder="&hellip;or type your own question"></textarea>
         <button class="send" id="send" aria-label="Send">&rarr;</button>
       </div>
-      <div class="chat-note">Answers are generated from Mars Estate's live data &middot; verify anything safety-critical against the dashboard</div>
+      <div class="chat-note">AI-generated answers from Mars Estate&rsquo;s live data &middot; check anything important against the dashboard</div>
     </div>
   </section>
+
+  <!-- Floating chat launcher (§8 "cw"). The window itself is built on first
+       open; until then this button is the only cost. -->
+  <button class="cw-launch" id="cw-launch" type="button" aria-label="Ask Mars Telemetry AI assistant" aria-expanded="false" aria-controls="cw-win">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M10 3.5l1.6 4.9 4.9 1.6-4.9 1.6L10 16.5l-1.6-4.9-4.9-1.6 4.9-1.6z"/><path d="M18 13.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg>
+    <span class="cw-dot" id="cw-dot" hidden></span>
+  </button>
+  <div class="cw-label" id="cw-label" aria-hidden="true"><b>Ask Mars Telemetry AI</b><span>AI assistant for your estate data</span></div>
+  <div class="sr-only" id="chat-live" aria-live="polite"></div>
 
   <div class="foot">
     <div>1984 Summit Lake Drive, Angwin CA 94508 &middot; 7.35 acres &middot; Howell Mountain AVA</div>
@@ -4561,6 +4689,15 @@ function makePanel(p, c){
     ic.onmouseleave=hideTip;
     hd.querySelector('.p-ttl-row').appendChild(ic);
   }
+  // "Ask about this" (§8 cwAskAbout): opens the floating chat with this panel
+  // attached and a question ready to edit. Only panels this user's role
+  // renders get one, so nothing gated is ever offered as context.
+  const ask=el('button','p-ask','<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12.5a7.5 7.5 0 0 1-10.9 6.7L4 20.5l1.3-4.6A7.5 7.5 0 1 1 20 12.5z"/></svg>');
+  ask.type='button';
+  ask.setAttribute('aria-label',`Ask about ${p.title}`);
+  ask.title='Ask about this';
+  ask.onclick=()=>cwAskAbout(p.id);
+  hd.querySelector('.p-ttl-row').appendChild(ask);
   if(p.range){
     if(!state.range[p.id]) state.range[p.id]=p.range;
     const rangeOpts = p.rangeOptions||Object.keys(RANGES);
@@ -4719,6 +4856,7 @@ function vineyardOverviewNote(c){
 }
 
 async function renderTab(tab){
+  cwRefresh(); // filters may have changed what the chat window would attach (§8)
   const renderedAt=Date.now(), inputs=tabInputs(tab);
   const c=ctxFor(tab);
   const role = await getCurrentUserRole();
@@ -4933,6 +5071,7 @@ $$('.tab').forEach(t=>t.onclick=()=>{
   $$('.view').forEach(v=>v.classList.toggle('on', v.id==='view-'+state.tab));
   hideTip();
   if(state.tab!=='chat') showTab(state.tab);
+  chatSyncViews(); cwRefresh(); // which chat view is on screen (§8)
 });
 
 /* Live tick */
@@ -5222,35 +5361,297 @@ const MODEL_LABELS = { claude: 'Sonnet 5', kimi: 'Kimi K3' };
 
 const LOG=$('#chatlog');
 
-// A conversation belongs to exactly one signed-in user and is never carried
-// to another. chatHistory replays raw tool results (operator-only rows
-// included) on every request, so a turn that crossed accounts would hand one
-// user's data to the next user's model context. resetChat() wipes every piece
-// of chat state and bumps chatGen; ask() and initChat() capture chatGen when
-// they start and drop their result if it has moved on, so a request still
-// streaming when its user signs out can never write into whoever signs in
-// next. The abort only saves the wasted stream -- the generation check is
-// what makes the write-back impossible.
+/* ── One conversation, two views ───────────────────────────────────────
+   The Chat tab and the floating chat window ("cw", below) are two views of
+   ONE conversation. Everything about it lives here and nowhere else:
+     chatHistory  what the model is sent (Anthropic-shaped turns)
+     chatMsgs     what is on screen, one object per bubble (chatMsgHtml())
+     chatDraft    text typed but not sent -- shared, so it follows the user
+     chatBusy     the request in flight; one at a time, from either view
+   ask() only ever writes this state; each view draws from it. A view that is
+   not on screen is redrawn when it next appears, so a question sent from the
+   window and still streaming shows up mid-answer in the Chat tab: it is the
+   same message object, not a copy. Nothing here is persisted -- no browser
+   storage, no server-side history (docs/SECURITY.md).
+
+   A conversation belongs to exactly one signed-in user and is never carried
+   to another. chatHistory replays raw tool results (operator-only rows
+   included) on every request, so a turn that crossed accounts would hand one
+   user's data to the next user's model context. resetChat() wipes every piece
+   of chat state and bumps chatGen; ask() and initChat() capture chatGen when
+   they start and drop their result if it has moved on, so a request still
+   streaming when its user signs out can never write into whoever signs in
+   next. The abort only saves the wasted stream -- the generation check is
+   what makes the write-back impossible. newChat() uses the same mechanism. */
+let chatMsgs = [];
+let chatMsgSeq = 0;
+let chatGreeting = null; // the greeting bubble, kept so newChat() can show it again
+let chatDraft = '';
+let chatBusy = null;     // {ac} while a request is in flight
+let chatUnread = false;  // an answer finished while no chat view was on screen
 let chatGen = 0;
-let chatAbort = null; // AbortController for the request in flight, if any
+const chatViews = [];
+
+// Mirrors supabase/functions/chat/input-caps.ts, which enforces them; checked
+// here first so an over-limit request is never sent.
+const CHAT_MAX_Q = 4000, CHAT_MAX_QUESTIONS = 40, CHAT_MAX_HISTORY_BYTES = 1000000;
+
 function resetChat(){
   chatGen++;
-  if(chatAbort){ chatAbort.abort(); chatAbort = null; }
-  chatHistory = [];
+  if(chatBusy){ chatBusy.ac.abort(); chatBusy = null; }
+  chatHistory = []; chatMsgs = []; chatGreeting = null; chatDraft = '';
   chatRole = null;
   chatModelProvider = 'claude';
-  LOG.innerHTML = '';
+  chatUnread = false;
+  cwCtxMode = 'page'; cwPanelId = null; cwBlocksAccess = null;
   $('#chipPanel').innerHTML = ''; // operator chips can name a real lot
-  $('#chatin').value = ''; $('#chatin').style.height = 'auto';
+  cwClose(false);
+  chatRedrawAll();
 }
 
-function addMsg(who, html){
-  const m=el('div','msg '+(who==='u'?'u':'a'));
-  m.innerHTML=`<div class="msg-av">${who==='u'?'Y':'M'}</div>
-    <div class="msg-b"><div class="msg-who">${who==='u'?'You':'Mars Telemetry'}</div>
-    <div class="msg-tx">${html}</div></div>`;
-  LOG.appendChild(m); LOG.scrollTop=LOG.scrollHeight;
-  return m;
+// "New chat", from either view: same user, empty thread, greeting back.
+function newChat(){
+  chatGen++;
+  if(chatBusy){ chatBusy.ac.abort(); chatBusy = null; }
+  chatHistory = [];
+  chatMsgs = chatGreeting ? [chatGreeting] : [];
+  chatUnread = false;
+  if(chatRole) setChipsExpanded(true);
+  chatRedrawAll();
+}
+
+const chatAtBottom = log => log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+const chatIsQuestion = m => m.role==='user' && (typeof m.content==='string' || (Array.isArray(m.content) && m.content.some(b=>b?.type==='text')));
+const chatHasQuestions = () => chatMsgs.some(m=>m.who==='u');
+
+// skipGreeting: the floating window shows its own intro instead of the
+// greeting bubble, whose text points at the Chat tab's suggestion chips.
+function chatMakeView({surface, log, input, send, counter=null, visible, after=null, skipGreeting=false}){
+  const v = {surface, log, input, send, counter, visible, after, skipGreeting, nodes:new Map(), dirty:true, shown:false, stick:true, scroll:0};
+  // Each view keeps its own scroll position; tracked only while on screen,
+  // since hiding a scroller can report 0.
+  log.addEventListener('scroll', ()=>{ if(v.shown){ v.stick = chatAtBottom(log); v.scroll = log.scrollTop; } });
+  log.addEventListener('click', e=>chatOnLogClick(e, v));
+  input.addEventListener('input', ()=>{ chatDraft = input.value; chatAutosize(input); chatSyncAllInputs(); });
+  // Enter sends, Shift+Enter is a new line; never mid-IME-composition.
+  input.addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); chatSendFrom(v); } });
+  send.onclick = ()=>chatSendFrom(v);
+  chatViews.push(v);
+  return v;
+}
+
+function chatAutosize(t){
+  t.style.height = 'auto';
+  if(t.value) t.style.height = Math.min(130, t.scrollHeight)+'px';
+}
+
+function chatSyncInputs(v){
+  if(v.input.value !== chatDraft){ v.input.value = chatDraft; chatAutosize(v.input); }
+  v.send.disabled = !!chatBusy || !chatDraft.trim();
+  if(v.counter){
+    const n = chatDraft.length;
+    v.counter.textContent = n > CHAT_MAX_Q-500 ? `${n.toLocaleString('en-US')} / ${CHAT_MAX_Q.toLocaleString('en-US')}` : '';
+  }
+}
+function chatSyncAllInputs(){
+  chatViews.forEach(chatSyncInputs);
+  $('#chatNew').disabled = !chatHasQuestions();
+}
+
+function chatSendFrom(v){
+  if(chatBusy || !chatDraft.trim()) return;
+  ask(chatDraft, {surface:v.surface, ctx: v.surface==='widget' ? cwContextForSend() : null});
+}
+
+function chatWho(m){
+  if(m.who==='u') return 'You';
+  // `provider` is the model that ACTUALLY answered (server-set, see the
+  // `done` event) -- operator only, same gate as the model dropdown.
+  return 'Mars Telemetry AI' + (chatRole==='operator' && m.provider ? ' · '+(MODEL_LABELS[m.provider]||m.provider) : '');
+}
+
+const CHAT_TYPING = '<div class="typing"><i></i><i></i><i></i></div>';
+const CHAT_ERRORS = {
+  offline: 'You appear to be offline. Check your connection, then retry.',
+  network: 'Couldn’t reach the assistant. Check your connection, then retry.',
+  auth:    'Your session has expired. Sign in again to continue.',
+  rate:    'Too many questions in a short time. Wait a moment, then retry.',
+  server:  'Something went wrong reaching the assistant.'
+};
+
+// Every bubble's HTML, from its message object. Model text only ever goes
+// through renderReply() (escape first, then markdown); everything else is
+// app text, escaped where it is not a literal.
+function chatMsgHtml(m){
+  if(m.who==='u') return (m.ctx ? `<div class="msg-ctx">${escapeHtml(m.ctx)}</div>` : '') + `<p>${escapeHtml(m.text)}</p>`;
+  if(m.greeting) return m.greeting;
+  const retry = '<div class="msg-acts"><button type="button" class="msg-btn" data-act="retry">Retry</button></div>';
+  switch(m.state){
+    case 'pending':
+      // Status renders only while there is no text yet, so "cleared on the
+      // first text delta" is structural. App voice, never renderReply().
+      return (m.status ? `<div class="msg-status">${escapeHtml(m.status)}</div>` : '') + CHAT_TYPING;
+    case 'streaming':
+      return renderReply(m.text);
+    case 'done':
+      return renderReply(m.text || '(no response)')
+        + (m.truncated ? '<p class="msg-note">Cut off before I could finish — ask me to continue if you’d like the rest.</p>' : '');
+    case 'partial':
+      // Partial text stays: discarding something the reader may already have
+      // used is worse than keeping it. But the note names BOTH facts, because
+      // a visible answer that silently isn't in context would mislead.
+      return renderReply(m.text)
+        + '<p class="msg-note">Connection lost — this answer is incomplete, and I won’t remember it in follow-up questions.</p>' + retry;
+    case 'error': {
+      const e = m.err || {kind:'server'};
+      const text = e.text || CHAT_ERRORS[e.kind] || CHAT_ERRORS.server;
+      const detail = e.detail ? `<br><code>${escapeHtml(e.detail)}</code>` : '';
+      const act = e.kind==='limit'
+        ? (e.code==='question_too_long' ? '' : '<div class="msg-acts"><button type="button" class="msg-btn" data-act="new">New chat</button></div>')
+        : retry;
+      return `<p>${escapeHtml(text)}${detail}</p>${act}`;
+    }
+  }
+  return '';
+}
+
+const CHAT_THUMB = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v11H3V10h4zm0 0 4-8a3 3 0 0 1 3 3v4h5.5a2 2 0 0 1 2 2.3l-1.4 8A2 2 0 0 1 18.1 21H7"/></svg>';
+function chatFeedbackHtml(m){
+  if(!CHAT_EVENTS_ENABLED || m.who!=='a' || m.greeting || m.state!=='done') return '';
+  if(m.flag==='confirm') return `<div class="fb-confirm" role="group" aria-label="Report this answer">
+      <p>Report this answer as wrong? Your question and this answer’s text will be sent to the Mars Estate team for review. Nothing else from the conversation is sent.</p>
+      <button type="button" class="msg-btn" data-act="flag-send">Send report</button><button type="button" class="msg-btn ghost" data-act="flag-cancel">Cancel</button></div>`;
+  if(m.flag==='sending') return '<div class="fb-note">Sending report…</div>';
+  if(m.flag==='sent') return '<div class="fb-note">Reported — thank you. The estate team will review this answer.</div>';
+  const r = m.rating, dis = r ? ' disabled' : '';
+  return `<div class="fb" role="group" aria-label="Rate this answer">
+      <button type="button" class="fb-b${r==='up'?' on':''}" data-act="up" aria-label="Helpful" aria-pressed="${r==='up'}" title="Helpful"${dis}>${CHAT_THUMB}</button>
+      <button type="button" class="fb-b${r==='down'?' on':''}" data-act="down" aria-label="Not helpful" aria-pressed="${r==='down'}" title="Not helpful"${dis}><span style="display:inline-flex;transform:rotate(180deg)">${CHAT_THUMB}</span></button>
+      <button type="button" class="fb-b" data-act="flag">This was wrong</button>
+      ${m.flag==='failed' ? '<span class="fb-note" style="margin:0">Couldn’t send the report — try again.</span>' : ''}</div>`;
+}
+
+function chatPatch(v, m){
+  if(v.skipGreeting && m.greeting) return;
+  let n = v.nodes.get(m.id);
+  if(!n){
+    n = el('div', 'msg '+(m.who==='u'?'u':'a'));
+    n.dataset.id = m.id;
+    n.innerHTML = `<div class="msg-av" aria-hidden="true">${m.who==='u'?'Y':'M'}</div>
+      <div class="msg-b"><div class="msg-who"></div><div class="msg-tx"></div><div class="msg-fb"></div></div>`;
+    v.nodes.set(m.id, n); v.log.appendChild(n);
+  }
+  n.querySelector('.msg-who').textContent = chatWho(m);
+  n.querySelector('.msg-tx').innerHTML = chatMsgHtml(m);
+  n.querySelector('.msg-fb').innerHTML = chatFeedbackHtml(m);
+}
+
+function chatRedraw(v){
+  v.log.innerHTML = ''; v.nodes.clear();
+  chatMsgs.forEach(m=>chatPatch(v, m));
+  v.dirty = false;
+  if(v.after) v.after();
+}
+
+// Whole-thread changes (reset, new chat, retry): every view, on screen or
+// not, so nothing of a cleared conversation is left even in a hidden view.
+function chatRedrawAll(){
+  chatViews.forEach(v=>{
+    chatRedraw(v);
+    if(v.shown){ v.log.scrollTop = v.log.scrollHeight; v.stick = true; }
+  });
+  chatSyncAllInputs();
+  chatSyncLauncher();
+}
+
+// One message changed (or was added). Views on screen patch just that
+// bubble, following the reader only if they were already at the bottom
+// (measured BEFORE the mutation); hidden views are redrawn when shown.
+function chatChanged(m){
+  if(!chatMsgs.includes(m)) return; // a message from a conversation that has since been cleared
+  chatViews.forEach(v=>{
+    if(!v.visible()){ v.dirty = true; return; }
+    if(v.dirty){ chatRedraw(v); v.log.scrollTop = v.log.scrollHeight; return; }
+    const stick = chatAtBottom(v.log);
+    chatPatch(v, m);
+    if(v.after) v.after();
+    if(stick) v.log.scrollTop = v.log.scrollHeight;
+  });
+}
+
+// Called whenever what is on screen may have changed: tab switch, window
+// open/close, dashboard shown.
+function chatSyncViews(){
+  if(typeof state!=='undefined') document.body.dataset.tab = state.tab;
+  chatViews.forEach(v=>{
+    const vis = v.visible();
+    if(vis && !v.shown){
+      v.shown = true;
+      if(v.dirty) chatRedraw(v);
+      chatSyncInputs(v);
+      v.log.scrollTop = v.stick ? v.log.scrollHeight : v.scroll;
+    } else if(!vis) v.shown = false;
+  });
+  if(chatUnread && chatViews.some(v=>v.visible())) chatUnread = false;
+  chatSyncLauncher();
+  if(typeof cwPeek==='function') cwPeek();
+}
+
+function chatSyncLauncher(){
+  $('#cw-dot').hidden = !chatUnread;
+  $('#cw-launch').setAttribute('aria-label', chatUnread ? 'Ask Mars Telemetry AI assistant (new answer)' : 'Ask Mars Telemetry AI assistant');
+}
+
+// Screen readers get each finished answer once, not every streamed token.
+function chatAnnounce(m){
+  const live = $('#chat-live');
+  if(!chatViews.some(v=>v.visible())){
+    chatUnread = true; chatSyncLauncher();
+    live.textContent = 'New answer from Mars Telemetry.';
+    return;
+  }
+  const plain = m.state==='error'
+    ? (m.err?.text || CHAT_ERRORS[m.err?.kind] || CHAT_ERRORS.server)
+    : m.text.replace(/[*#`|]/g, '').replace(/\s+/g, ' ').trim();
+  live.textContent = 'Mars Telemetry: ' + (plain.length > 600 ? plain.slice(0, 600)+'…' : plain);
+}
+
+function chatOnLogClick(e, v){
+  const b = e.target.closest('[data-act]'); if(!b) return;
+  const n = b.closest('.msg'); const m = n && chatMsgs.find(x=>String(x.id)===n.dataset.id);
+  const act = b.dataset.act;
+  if(act==='new'){ newChat(); return; }
+  if(!m) return;
+  if(act==='retry') chatRetry(m);
+  else if(act==='up' || act==='down'){
+    if(m.rating) return;
+    m.rating = act; chatChanged(m);
+    chatEvent(act==='up' ? 'thumb_up' : 'thumb_down', v.surface, {turn_index:m.turn, panel_id:m.panelId});
+  }
+  else if(act==='flag'){ m.flag = 'confirm'; chatChanged(m); }
+  else if(act==='flag-cancel'){ m.flag = null; chatChanged(m); }
+  else if(act==='flag-send'){
+    m.flag = 'sending'; chatChanged(m);
+    // The only event that carries text, and only after the user confirmed
+    // the notice above (docs/SECURITY.md; the table's CHECK enforces it).
+    chatEvent('flag_wrong', v.surface, {turn_index:m.turn, panel_id:m.panelId,
+      question:m.question.slice(0, 4100), answer:m.text.slice(0, 40000)})
+      .then(ok=>{ m.flag = ok ? 'sent' : 'failed'; chatChanged(m); });
+  }
+}
+
+// Usage events (supabase/migrations/20261012120000_chat_events.sql). OFF
+// until that migration is approved and applied: with the flag off nothing is
+// written and no rating controls are drawn. No question or answer text is
+// ever sent except on a confirmed "This was wrong".
+const CHAT_EVENTS_ENABLED = false;
+function chatEvent(event, surface, extra={}){
+  if(!CHAT_EVENTS_ENABLED) return Promise.resolve(false);
+  const row = {surface, event};
+  for(const k in extra) if(extra[k]!=null) row[k] = extra[k];
+  return sb.from('chat_events').insert(row).then(
+    ({error})=>{ if(error){ console.warn('chat_events: insert failed', error.message); return false; } return true; },
+    ()=>false);
 }
 /* Escape FIRST, then transform -- markdown syntax is matched and wrapped on
    the already-escaped string, so raw '<'/'>' from the model or a user can
@@ -5412,64 +5813,96 @@ function renderChipPanel(groups){
   });
 }
 
-// "Is the reader parked at the bottom?" -- measured BEFORE any DOM mutation,
-// because reading scrollHeight after innerHTML has already grown gives the new
-// height and would report everyone as scrolled-up. 40px of slack absorbs
-// sub-pixel/rounding drift without needing an exact match.
-const atLogBottom=()=> LOG.scrollHeight - LOG.scrollTop - LOG.clientHeight < 40;
+// Same limits and wording as the server (input-caps.ts), checked before
+// sending; null when the request may go.
+function chatLocalCap(q, pending){
+  if(q.length > CHAT_MAX_Q) return {kind:'limit', code:'question_too_long', text:`That question is too long. Keep it under ${CHAT_MAX_Q.toLocaleString('en-US')} characters.`};
+  if(pending.filter(chatIsQuestion).length > CHAT_MAX_QUESTIONS) return {kind:'limit', code:'too_many_questions', text:`This conversation has reached ${CHAT_MAX_QUESTIONS} questions. Start a new chat to keep going.`};
+  if(new TextEncoder().encode(JSON.stringify(pending)).length > CHAT_MAX_HISTORY_BYTES) return {kind:'limit', code:'history_too_large', text:'This conversation has grown too long to continue. Start a new chat to keep going.'};
+  return null;
+}
 
-async function ask(q){
-  if(!q.trim()) return;
+async function chatClassifyError(error){
+  const res = error?.context;
+  let body = null;
+  if(res && typeof res.json==='function'){ try{ body = await res.json(); }catch{} }
+  const status = res?.status;
+  if(navigator.onLine===false) return {kind:'offline'};
+  if(error?.name==='FunctionsFetchError') return {kind:'network', detail:error.message};
+  if(status===401) return {kind:'auth'};
+  if(status===413) return {kind:'limit', code:body?.code||'history_too_large', text:body?.error};
+  if(status===429) return {kind:'rate', text:body?.error};
+  return {kind:'server', detail:body?.error || error?.message || 'unexpected error'};
+}
+
+// The one path every question takes, from the Chat tab, the floating window,
+// a suggestion chip or a starter prompt alike: same request, same Edge
+// Function, same server-side answer rules and tool allowlist. `ctx` is the
+// page context (cwPageContext()) the window attaches, or null.
+async function ask(q, {surface='tab', ctx=null}={}){
+  q = String(q||'').trim();
+  if(!q || chatBusy) return;
   if(chipsExpanded) setChipsExpanded(false); // collapses on every send, not just the first -- toggle stays reachable
-  addMsg('u',`<p>${escapeHtml(q)}</p>`);
-  const t=addMsg('a','<div class="typing"><i></i><i></i><i></i></div>');
-  const tx=t.querySelector('.msg-tx');
-  const who=t.querySelector('.msg-who'); // attribution tag, filled in once `done.provider` is known -- operator only
 
-  // BUILD-THEN-COMMIT. chatHistory is not touched until a `done` event actually
-  // arrives, replacing the old push-then-pop(). That made "never persist a
-  // broken turn" structural rather than a compensating action -- and it matters
-  // more with streaming, because a stream can die AFTER text is on screen. The
-  // frontend cannot repair that case even in principle: the tool_use/tool_result
-  // turn pairs live server-side and are only ever sent as part of `appended`, so
-  // a synthesised partial turn would be missing its pairs and 400 the next
-  // request.
-  const pending=[...chatHistory,{role:'user', content:q}];
-  const gen=chatGen, ac=new AbortController(); // see resetChat()
-  chatAbort=ac;
+  // Context rides as a visible first line of the user's own turn: it is in
+  // history, shown on the bubble, and grants nothing -- every tool call still
+  // runs on the caller's JWT under RLS, exactly as if they had typed it.
+  const content = ctx ? `[Viewing: ${ctx.label}]\n${q}` : q;
+  const turn = chatMsgs.filter(m=>m.who==='u').length;
+  const um = {id:++chatMsgSeq, who:'u', text:q, ctx:ctx?.label||null};
+  const am = {id:++chatMsgSeq, who:'a', state:'pending', text:'', status:'', turn,
+              retry:{q, surface, ctx}, panelId:ctx?.panelId||null, question:content};
+  chatMsgs.push(um, am);
+  chatDraft = '';
+  chatChanged(um); chatChanged(am);
 
-  let buf='', status='', done=null, failed=null, frame=null;
-
-  // Repaint on an animation frame, not per delta: deltas arrive far faster than
-  // the display refreshes, and renderReply() is a whole-string parse each time.
-  const paint=()=>{
-    frame=null;
-    const stick=atLogBottom();
-    // Status only ever renders while there is no text yet, so "cleared on the
-    // first text delta" is structural rather than a separate step. It is app
-    // voice -- plain escaped text, never through renderReply().
-    tx.innerHTML = buf
-      ? renderReply(buf)
-      : (status?`<div class="msg-status">${escapeHtml(status)}</div>`:'')+'<div class="typing"><i></i><i></i><i></i></div>';
-    if(stick) LOG.scrollTop=LOG.scrollHeight; // only follow a reader who was already at the bottom
-  };
-  const schedule=()=>{ if(frame===null) frame=requestAnimationFrame(paint); };
-
-  const {data, error} = await sb.functions.invoke('chat', {body:{messages:pending, modelProvider:chatModelProvider}, signal:ac.signal});
-  if(gen!==chatGen) return; // signed out (or another user signed in) while waiting
-  if(error){
-    let message=error.message;
-    if(error.context && typeof error.context.json==='function'){
-      try{ const body=await error.context.json(); if(body?.error) message=body.error; }catch{}
-    }
-    console.error('ask: chat function failed', error);
-    tx.innerHTML = `<p>Something went wrong reaching the assistant.<br><code>${escapeHtml(message)}</code></p>`;
-    return; // pending discarded -- chatHistory never saw this turn
+  // BUILD-THEN-COMMIT. chatHistory is not touched until a `done` event
+  // arrives, so "never persist a broken turn" is structural. A stream can die
+  // AFTER text is on screen, and the frontend cannot repair that even in
+  // principle: the tool_use/tool_result pairs live server-side and are only
+  // sent as part of `appended`, so a synthesised partial turn would be
+  // missing its pairs and 400 the next request.
+  const pending = [...chatHistory, {role:'user', content}];
+  const capped = chatLocalCap(content, pending);
+  if(capped){
+    am.state = 'error'; am.err = capped;
+    if(capped.code==='question_too_long') chatDraft = q; // give it back to shorten
+    chatChanged(am); chatSyncAllInputs(); chatAnnounce(am);
+    return;
   }
 
+  const gen = chatGen, ac = new AbortController(); // see resetChat()
+  chatBusy = {ac};
+  chatSyncAllInputs();
+  chatEvent('ask', surface, {turn_index:turn, panel_id:am.panelId});
+  try{ await chatStream(am, pending, gen, ac); }
+  finally{
+    if(chatBusy?.ac===ac){ chatBusy = null; chatSyncAllInputs(); }
+  }
+}
+
+async function chatStream(am, pending, gen, ac){
+  let done=null, failed=null, frame=null;
+  // Repaint on an animation frame, not per delta: deltas arrive far faster
+  // than the display refreshes, and renderReply() is a whole-string parse.
+  const paint = ()=>{ frame=null; chatChanged(am); };
+  const schedule = ()=>{ if(frame===null) frame=requestAnimationFrame(paint); };
+
+  const {data, error} = await sb.functions.invoke('chat', {body:{messages:pending, modelProvider:chatModelProvider}, signal:ac.signal});
+  if(gen!==chatGen) return; // signed out, another user, or New chat, while waiting
+  if(error){
+    const err = await chatClassifyError(error);
+    if(gen!==chatGen) return;
+    console.error('ask: chat function failed', error);
+    am.state = 'error'; am.err = err;
+    if(err.code==='question_too_long' && !chatDraft) chatDraft = am.retry.q;
+    chatChanged(am); chatSyncAllInputs(); chatAnnounce(am);
+    return; // pending discarded -- chatHistory never saw this turn
+  }
   if(!data || typeof data.body?.getReader!=='function'){
     console.error('ask: expected an SSE stream, got', data);
-    tx.innerHTML = `<p>Something went wrong reaching the assistant.<br><code>unexpected response format</code></p>`;
+    am.state = 'error'; am.err = {kind:'server', detail:'unexpected response format'};
+    chatChanged(am); chatAnnounce(am);
     return;
   }
 
@@ -5489,8 +5922,8 @@ async function ask(q){
         const line=frame_.split('\n').find(l=>l.startsWith('data:'));
         if(!line) continue;
         let ev; try{ ev=JSON.parse(line.slice(5)); }catch{ continue; }
-        if(ev.type==='text'){ buf+=ev.text; status=''; schedule(); }
-        else if(ev.type==='tool'){ if(!buf){ status=ev.text; schedule(); } } // never replace text already on screen
+        if(ev.type==='text'){ am.text+=ev.text; am.status=''; am.state='streaming'; schedule(); }
+        else if(ev.type==='tool'){ if(!am.text){ am.status=ev.text; schedule(); } } // never replace text already on screen
         else if(ev.type==='done'){ done=ev; }
         else if(ev.type==='error'){ failed=ev.message||'unexpected error'; }
       }
@@ -5501,38 +5934,223 @@ async function ask(q){
   }
 
   if(frame!==null){ cancelAnimationFrame(frame); frame=null; }
-  if(chatAbort===ac) chatAbort=null;
   if(gen!==chatGen) return; // the read that threw may have been resetChat()'s abort
-  const stick=atLogBottom();
   if(done && !failed){
     // The ONLY success path, and the only place chatHistory is written.
-    chatHistory=pending.concat(done.appended||[]);
+    chatHistory = pending.concat(done.appended||[]);
     // `done.provider` is the model that ACTUALLY answered -- set server-side
     // after the fact, never the requested `chatModelProvider` -- so a Kimi
-    // request that silently fell back to Claude correctly reads "Sonnet 5"
-    // here, matching the fallback note (if any) appended in the reply body
-    // below rather than contradicting it. Operator-only, same gate as the
-    // dropdown itself; customers never had a choice for this to disclose.
-    if(chatRole==='operator' && done.provider){
-      who.textContent = 'Mars Telemetry · '+(MODEL_LABELS[done.provider]||done.provider);
-    }
-    tx.innerHTML = renderReply(buf||'(no response)')
-      + (done.truncated?'<p class="msg-note">Cut off before I could finish — ask me to continue if you’d like the rest.</p>':'');
-  } else if(buf){
-    // Partial text stays: discarding something the reader may already have used
-    // is worse than keeping it. But the marker has to name BOTH facts, because a
-    // visible answer that silently isn't in context is exactly the kind of
-    // misleading UI state this project refuses to ship.
-    tx.innerHTML = renderReply(buf)
-      + '<p class="msg-note">Connection lost — this answer is incomplete, and I won’t remember it in follow-up questions. Ask again to retry.</p>';
+    // request that silently fell back to Claude correctly reads "Sonnet 5",
+    // matching the fallback note (if any) in the reply body.
+    am.state = 'done'; am.provider = done.provider || null; am.truncated = !!done.truncated;
+  } else if(am.text){
+    am.state = 'partial';
   } else {
-    tx.innerHTML = `<p>Something went wrong reaching the assistant.<br><code>${escapeHtml(failed||'no response')}</code></p>`;
+    am.state = 'error';
+    am.err = navigator.onLine===false ? {kind:'offline'} : {kind:'server', detail:failed||'no response'};
   }
-  if(stick) LOG.scrollTop=LOG.scrollHeight;
+  chatChanged(am);
+  chatAnnounce(am);
 }
-$('#send').onclick=()=>{ask($('#chatin').value); $('#chatin').value=''; $('#chatin').style.height='auto';};
-$('#chatin').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault(); $('#send').click();}});
-$('#chatin').addEventListener('input',e=>{e.target.style.height='auto'; e.target.style.height=Math.min(130,e.target.scrollHeight)+'px';});
+
+// Retry asks the same question again (same context). When the failed answer
+// is the newest bubble, its question and the failure are replaced rather
+// than left above the new attempt.
+function chatRetry(m){
+  if(chatBusy || !m.retry) return;
+  const i = chatMsgs.indexOf(m);
+  if(i===chatMsgs.length-1 && chatMsgs[i-1]?.who==='u'){ chatMsgs.splice(i-1, 2); chatRedrawAll(); }
+  ask(m.retry.q, {surface:m.retry.surface, ctx:m.retry.ctx});
+}
+
+/* ── Chat tab view ── */
+chatMakeView({surface:'tab', log:LOG, input:$('#chatin'), send:$('#send'),
+  visible:()=> typeof state!=='undefined' && state.tab==='chat'});
+
+// "New chat" asks first (inline, never a blocking confirm() dialog), since it
+// clears the thread in both views.
+function chatWireConfirm(btn, bar, after){
+  btn.onclick = ()=>{ bar.hidden = false; bar.querySelector('[data-confirm="no"]').focus(); };
+  bar.querySelector('[data-confirm="yes"]').onclick = ()=>{ bar.hidden = true; newChat(); after?.(); };
+  bar.querySelector('[data-confirm="no"]').onclick = ()=>{ bar.hidden = true; btn.focus(); };
+}
+chatWireConfirm($('#chatNew'), $('#chatConfirm'), ()=>$('#chatin').focus());
+
+/* ── Floating chat window ("cw") ───────────────────────────────────────
+   A second view of the same conversation for the Vineyard Data and Winery
+   Data tabs. Its DOM is built on first open: before that the launcher button
+   is the only cost -- no listeners on the page, no timers, no requests.
+   Minimising only hides it; nothing is cancelled, so an answer still
+   streaming keeps going and the launcher shows a dot when it lands. */
+let cwRoot = null, cwView = null, cwOpen = false;
+let cwCtxMode = 'page'; // 'page' (tab + filters) | 'panel' (one panel, "Ask about this") | 'none'
+let cwPanelId = null;
+// This user's blocks (accessible_blocks(), the list RLS itself uses), fetched
+// on first open. Only ever narrows the attached context: a B2-only customer
+// whose filter says "all blocks" is described as viewing block B2.
+let cwBlocksAccess = null;
+
+const CW_ICON_AI = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M10 3.5l1.6 4.9 4.9 1.6-4.9 1.6L10 16.5l-1.6-4.9-4.9-1.6 4.9-1.6z"/><path d="M18 13.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg>';
+const CW_ICON_MIN = '<svg class="cw-min-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 12h12"/></svg><span class="cw-close-x" aria-hidden="true">&#10005;</span>';
+const CW_ICON_EXPAND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></svg>';
+const CW_ICON_NEW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+
+function cwBuild(){
+  cwRoot = el('div', 'cw-win');
+  cwRoot.id = 'cw-win';
+  cwRoot.setAttribute('role', 'dialog');
+  cwRoot.setAttribute('aria-modal', 'false'); // the dashboard behind stays usable
+  cwRoot.setAttribute('aria-labelledby', 'cw-ttl cw-ai'); // "Ask Mars Telemetry AI assistant"
+  cwRoot.inert = true; cwRoot.setAttribute('aria-hidden', 'true');
+  cwRoot.innerHTML = `
+    <div class="cw-hd">
+      <div class="cw-ttl"><span id="cw-ttl">Ask Mars Telemetry</span><span class="ai-badge" id="cw-ai">AI<span class="sr-only"> assistant</span></span></div>
+      <div class="cw-acts">
+        <button type="button" class="cw-ib" data-cw="new" aria-label="New chat" title="New chat">${CW_ICON_NEW}</button>
+        <button type="button" class="cw-ib" data-cw="expand" aria-label="Open in the Chat tab" title="Open in the Chat tab">${CW_ICON_EXPAND}</button>
+        <button type="button" class="cw-ib" data-cw="min" aria-label="Minimize chat" title="Minimize (Esc)">${CW_ICON_MIN}</button>
+      </div>
+    </div>
+    <div class="chat-confirm" hidden><span>Clear this conversation? It is also cleared in the Chat tab.</span>
+      <button class="msg-btn" type="button" data-confirm="yes">Clear</button><button class="msg-btn ghost" type="button" data-confirm="no">Cancel</button></div>
+    <div class="cw-intro">${CW_ICON_AI}<p style="margin:0">Ask about what you&rsquo;re looking at, or anything about the estate&rsquo;s data. Answers are AI-generated.</p></div>
+    <div class="cw-log" role="log" aria-label="Conversation"></div>
+    <div class="cw-ctx"></div>
+    <div class="chat-in">
+      <textarea rows="1" maxlength="${CHAT_MAX_Q}" aria-label="Ask a question" placeholder="Ask about the estate&hellip;"></textarea>
+      <button class="send" type="button" aria-label="Send">&rarr;</button>
+    </div>
+    <div class="cw-meta"><span>AI-generated answers from Mars Estate&rsquo;s live data &middot; check anything important against the dashboard</span><span class="cw-count" aria-live="polite"></span></div>`;
+  $('.wrap').appendChild(cwRoot);
+
+  cwView = chatMakeView({surface:'widget', log:cwRoot.querySelector('.cw-log'),
+    input:cwRoot.querySelector('textarea'), send:cwRoot.querySelector('.send'), counter:cwRoot.querySelector('.cw-count'),
+    visible:()=> cwOpen && typeof state!=='undefined' && state.tab!=='chat',
+    after:cwSyncEmpty, skipGreeting:true});
+
+  const [bNew, bExpand, bMin] = ['new','expand','min'].map(k=>cwRoot.querySelector(`[data-cw="${k}"]`));
+  chatWireConfirm(bNew, cwRoot.querySelector('.chat-confirm'), ()=>cwView.input.focus());
+  bMin.onclick = ()=>cwClose(true);
+  bExpand.onclick = ()=>{ cwClose(false); $('.tab[data-tab="chat"]').click(); $('#chatin').focus(); };
+  cwRoot.querySelector('.cw-ctx').onclick = e=>{
+    const b = e.target.closest('[data-ctx]'); if(!b) return;
+    if(b.dataset.ctx==='clear'){ cwCtxMode = 'none'; cwPanelId = null; }
+    else cwCtxMode = 'page';
+    cwRenderCtx();
+    cwRoot.querySelector('.cw-ctx button')?.focus();
+  };
+  // Esc minimises -- only from inside the window, so it never competes with
+  // anything else on the page.
+  cwRoot.addEventListener('keydown', e=>{ if(e.key==='Escape'){ e.stopPropagation(); cwClose(true); } });
+}
+
+function cwOpenWin({focus=true}={}){
+  if(!cwRoot){ cwBuild(); void cwRoot.offsetWidth; } // first open: commit the closed state so it transitions
+  const was = cwOpen;
+  cwOpen = true;
+  cwRoot.inert = false; cwRoot.removeAttribute('aria-hidden');
+  cwRoot.classList.add('open');
+  document.body.classList.add('cw-is-open');
+  $('#cw-launch').setAttribute('aria-expanded', 'true');
+  cwRenderCtx();
+  chatSyncViews();
+  cwSyncEmpty();
+  if(!was) chatEvent('open', 'widget');
+  if(!cwBlocksAccess && typeof getAccessibleBlocks==='function'){
+    const gen = chatGen;
+    getAccessibleBlocks().then(b=>{ if(gen===chatGen && b?.length){ cwBlocksAccess = b; cwRenderCtx(); } });
+  }
+  // Focus the input with a mouse/trackpad; on touch screens that would throw
+  // the keyboard over the sheet before the user has read anything.
+  if(focus && matchMedia('(pointer:fine)').matches){
+    const t = cwView.input; t.focus(); t.setSelectionRange(t.value.length, t.value.length);
+  }
+}
+
+function cwClose(returnFocus){
+  if(!cwOpen) return;
+  cwOpen = false;
+  cwRoot.classList.remove('open');
+  cwRoot.inert = true; cwRoot.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('cw-is-open');
+  $('#cw-launch').setAttribute('aria-expanded', 'false');
+  chatSyncViews();
+  if(returnFocus) $('#cw-launch').focus();
+}
+$('#cw-launch').onclick = ()=> cwOpen ? cwClose(true) : cwOpenWin();
+
+const CW_RANGE_WORDS = {'1D':'1-day view', '5D':'5-day view', '30D':'30-day view', '1Y':'1-year view'};
+// What the user is looking at, built ONLY from app state and the static
+// PANELS list -- never free text -- and only from what this user can see: a
+// panel is named only if it is on the current tab and their role renders it.
+// It is a hint for the model, not a permission (see ask()).
+function cwPageContext(panelId){
+  const tab = state.tab;
+  if(tab!=='vineyard' && tab!=='winery') return null;
+  const blocks = selB(tab).filter(b=>ALL_IDS.includes(b) && (!cwBlocksAccess?.length || cwBlocksAccess.includes(b)));
+  const vintages = selV(tab).filter(v=>Number.isInteger(v) && v>=FIRST_VINTAGE && v<=CURRENT);
+  const parts = [tab==='vineyard' ? 'Vineyard Data' : 'Winery Data',
+    blocks.length===ALL_IDS.length ? 'all blocks' : (blocks.length===1 ? 'block ' : 'blocks ')+blocks.join(', ')];
+  if(vintages.length) parts.push((vintages.length===1 ? 'vintage ' : 'vintages ')+vintages.join(', '));
+  let pid = null;
+  const p = panelId && PANELS.find(x=>x.id===panelId && x.tab===tab && (x.minRole!=='operator' || chatRole==='operator'));
+  if(p){
+    pid = p.id;
+    const rng = state.range[p.id] || p.range, back = state.scrollDays[p.id] || 0;
+    // The panel leads: it is what the question is about.
+    parts.unshift(p.title + (rng ? ` (${CW_RANGE_WORDS[rng]||rng}${back ? `, scrolled back ${back} days` : ''})` : ''));
+  }
+  return {label:parts.join(' · '), panelId:pid};
+}
+function cwContextForSend(){
+  return cwCtxMode==='none' ? null : cwPageContext(cwCtxMode==='panel' ? cwPanelId : null);
+}
+
+function cwRenderCtx(){
+  if(!cwRoot || !cwOpen) return;
+  const c = cwContextForSend(), box = cwRoot.querySelector('.cw-ctx');
+  box.innerHTML = c
+    ? `<span>Attached:</span><span class="cw-ctx-v" title="Sent with your question so the answer can refer to it. It never changes what data you can see.">${escapeHtml(c.label)}</span>
+       <button type="button" data-ctx="clear" aria-label="Don't attach what I'm viewing" title="Don't attach">&#10005;</button>`
+    : (state.tab==='vineyard' || state.tab==='winery')
+      ? `<span>Nothing attached.</span><button type="button" data-ctx="add">+ Attach what I&rsquo;m viewing</button>`
+      : '';
+}
+// Kept current while the window is open: tab switches and filter changes
+// (renderTab) call this. Cheap -- no DOM work at all while it is closed.
+function cwRefresh(){
+  if(cwCtxMode==='panel' && !PANELS.some(p=>p.id===cwPanelId && p.tab===state.tab)){ cwCtxMode = 'page'; cwPanelId = null; }
+  cwRenderCtx();
+}
+
+// Intro instead of an empty log until the first question.
+function cwSyncEmpty(){
+  if(cwRoot) cwRoot.classList.toggle('is-empty', !chatHasQuestions());
+}
+
+// Touch screens have no hover, so the launcher's label is shown once, for a
+// few seconds, the first time the button is on screen in this page session.
+// In memory only: a reload shows it again, nothing is stored.
+let cwPeeked = false;
+function cwPeek(){
+  if(cwPeeked || !matchMedia('(hover: none)').matches) return;
+  if($('.wrap').style.display==='none' || typeof state==='undefined' || state.tab==='chat') return;
+  cwPeeked = true;
+  const l = $('#cw-label');
+  l.classList.add('peek');
+  setTimeout(()=>l.classList.remove('peek'), 3500);
+}
+
+// "Ask about this" on a panel: open the window with that panel attached and
+// a question ready to edit -- never sent on the user's behalf. A draft the
+// user already typed is kept.
+function cwAskAbout(panelId){
+  const p = PANELS.find(x=>x.id===panelId); if(!p) return;
+  cwCtxMode = 'panel'; cwPanelId = panelId;
+  if(!chatDraft.trim()) chatDraft = `What stands out in ${p.title} for this selection, and why does it matter?`;
+  cwOpenWin();
+  chatSyncAllInputs();
+}
 
 function operatorSuggestions(brixLotName){
   return [
@@ -5620,16 +6238,18 @@ async function initChat(session, role){
   setChipsExpanded(true);
 
   // One bubble, multiple <p> tags -- same convention renderReply() uses for
-  // every real LLM reply (split on paragraph breaks, not <br>). Doesn't
-  // touch chatHistory (addMsg is purely a DOM render either way), so this
-  // has no effect on the backend's role-alternation or the chip-collapse
-  // logic, both of which key off ask() being called, not message count.
+  // every real LLM reply (split on paragraph breaks, not <br>). A display
+  // message only: it never enters chatHistory, so it has no effect on the
+  // backend's role-alternation, and it is shown in both views. Put first
+  // even if a question beat it here.
   const body = role==='operator'
     ? `<p>I'm the Mars Telemetry AI assistant. I can draw on real vineyard and winery data across climate, soil, lab analyses, tanks, anomalies, and labor for any block and vintage since 2022. I can also surface insights and inferences across those data types together.</p>
        <p>Ask me anything specific, or start with one of the suggestions below.</p>`
     : `<p>Welcome to Mars Telemetry. I'm your AI assistant, and I'm here to help you understand the story behind your wine. I can share how the vineyard has fared this season, what the growing conditions have meant for the fruit, and what to expect as this vintage comes together.</p>
        <p>Please feel free to begin with one of the suggestions below, or simply share what you would like to know.</p>`;
-  addMsg('a', `<p>Hi ${greetName},</p>${body}`);
+  chatGreeting = {id:++chatMsgSeq, who:'a', state:'done', greeting:`<p>Hi ${greetName},</p>${body}`};
+  chatMsgs.unshift(chatGreeting);
+  chatRedrawAll();
 }
 
 /* §9 ── AUTH VIEW (Phase 6.1 — view + logic only; no session gate yet) ── */
@@ -5859,6 +6479,7 @@ function showDashboard(){
     showTab(state.tab==='chat' ? 'vineyard' : state.tab);
     subscribeOverviewRealtime();
   }
+  chatSyncViews();
 }
 function showQueueOnly(){
   $('#auth-view').classList.remove('on');

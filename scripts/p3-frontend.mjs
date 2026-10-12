@@ -20,7 +20,11 @@
 // admin-generated magic link (needs .env's service key; synthetic users only;
 // nothing is emailed) and --dry-run prints results instead of recording them.
 //
-//   node scripts/p3-frontend.mjs [--dashboard <url>] [--magic-link] [--dry-run] [--chrome <path>]
+// --users <keys> runs only those synthetic users (comma-separated: operator,
+// customer, customer_b2), e.g. a local check limited to the accounts approved
+// for it.
+//
+//   node scripts/p3-frontend.mjs [--dashboard <url>] [--magic-link] [--dry-run] [--users <keys>] [--chrome <path>]
 import { readFileSync } from "node:fs";
 import { chromium } from "playwright-core";
 import pg from "pg";
@@ -555,7 +559,9 @@ const startedAt = new Date();
 const executablePath = arg("chrome") ?? process.env.CHROME_PATH;
 const browser = await chromium.launch(executablePath ? { executablePath, headless: true } : { channel: "chrome", headless: true });
 try {
-  for (const u of USERS) await runUser(browser, u);
+  const only = arg("users")?.split(",").map((k) => k.trim());
+  if (only?.some((k) => !USERS.some((u) => u.key === k))) throw new Error(`--users: unknown key in ${only.join(",")}`);
+  for (const u of USERS.filter((u) => !only || only.includes(u.key))) await runUser(browser, u);
 } finally {
   await browser.close();
 }

@@ -8760,3 +8760,274 @@ awaits; this is noted rather than done here because it touches every panel
 render path.
 
 **Deploy.** Frontend only (`web/index.html`); no Edge Function or migration.
+
+## Floating chat launcher (2026-10-12)
+
+A floating "Ask Mars Telemetry" button, fixed bottom-right on the Vineyard
+Data and Winery Data tabs. It opens a chat window over the dashboard. The
+window and the Chat tab are **two views of one conversation**, not two chats.
+Stacked on "Chat history is never carried across users" above, which it
+depends on.
+
+### One conversation, one path
+
+- **State.** `web/index.html` §8 holds the conversation once: `chatHistory`
+  (sent to the model), `chatMsgs` (on screen), `chatDraft` (typed, not sent)
+  and `chatBusy` (the request in flight). `ask()` is the only writer; the Chat
+  tab and the window both draw from that state. A hidden view is redrawn when
+  shown, so an answer that is still streaming appears mid-answer in whichever
+  view the user opens next. One request runs at a time, from either view.
+- **Same backend, same rules.** The window calls the same `ask()`, so it hits
+  the same `chat` Edge Function with the same JWT. It gets the same RLS-scoped
+  tools, the same role-derived persona and model gate, and the same
+  `ANSWER_RULES` in the system prompt. There is no second code path, and the
+  Edge Function cannot tell the two views apart.
+- **Rendering.** Model text still goes only through `renderReply()` (escape
+  first, no links, literal attributes only). Questions, context labels, error
+  details and tool status lines are escaped. The greeting is the only trusted
+  HTML, and its name is escaped. Feedback controls are fixed markup. Tests
+  cover script, img and markdown-link payloads in both views.
+- **Persistence (unchanged, decided 2026-10-12).** Memory only: no browser
+  storage and no server-side history. A reload starts a fresh chat. Sign-out
+  and any user change clear both views, close the window and abort the
+  request. "New chat", from either view, clears the shared thread with the
+  same generation mechanism.
+
+### Page context
+
+- The window attaches what the user is looking at: tab, blocks, vintages and,
+  from "Ask about this", one panel with its range. It is shown as an
+  "Attached:" line the user can clear (✕) or re-attach, and as a chip on the
+  question bubble.
+- It is sent as a visible first line of the user's own turn:
+  `[Viewing: Soil moisture (30-day view) · Vineyard Data · block B2 · vintage 2026]`.
+  It is in history, so the model sees it in later turns too.
+- **It grants nothing.** It is text the user could have typed; every tool call
+  still runs on the caller's JWT under RLS. It is built only from app state
+  and the static `PANELS` list, never from free text:
+  - blocks come from `ALL_IDS`, intersected with `accessible_blocks()`. That
+    is the same list RLS uses, so a B2-only customer is described as viewing
+    block B2, never "all blocks";
+  - vintages are integers in `FIRST_VINTAGE..CURRENT`;
+  - a panel is named only if it is on the current tab and the user's role
+    renders it.
+  The context can therefore only narrow what is described, never widen what
+  can be read. No server-side change was needed.
+- "Ask about this" (a small icon in each panel header) opens the window with
+  that panel attached and a question ready to edit. Nothing is ever sent on
+  the user's behalf, and a draft the user already typed is kept.
+
+### Input caps (Edge Function; on the branch, NOT deployed)
+
+`supabase/functions/chat/input-caps.ts`, called first in `chat/index.ts`:
+
+- question over **4,000 characters** → 413 `question_too_long`;
+- more than **40 questions** → 413 `too_many_questions`. Questions are user
+  turns carrying the user's text, not raw messages: one question can add 12
+  messages through tool loops;
+- history over **1 MB** of JSON → 413 `history_too_large`. A Content-Length
+  over 1 MB + 16 KB is refused before the body is parsed;
+- malformed input → 400: a role other than user/assistant (including
+  `system`), or a last message that is not a question.
+
+The browser applies the same limits first, with the same wording. The
+textarea has `maxlength=4000` and a counter from 3,500 characters. An
+over-long question is given back to the draft to shorten; the two
+conversation limits offer **New chat**. Tests: `tests/chat-input-caps.test.mjs`.
+
+**Rate limits are a follow-up, not built** (decided 2026-10-12). The in-app
+chat has no per-user request or spend limit; the existing ones apply only to
+MCP keys (`agent_api_key_calls`). The window adds an entry point but no new
+capability: same user, same function, one request at a time. A per-user limit
+needs a counter table and a SECURITY DEFINER check, i.e. a migration plus an
+Edge Function change.
+
+### Usage events: `chat_events` (migration on the branch, NOT applied; flag off)
+
+`supabase/migrations/20261012120000_chat_events.sql`. Before this, nothing
+recorded in-app chat use: the function logs token counts only.
+
+- **Rows:** `surface` (`widget` | `tab`) and `event` (`open`, `ask`,
+  `thumb_up`, `thumb_down`, `flag_wrong`); plus `turn_index` and `panel_id`
+  (a `PANELS` id, shape-checked).
+- **No question or answer text**, except on `flag_wrong`. A CHECK constraint
+  enforces this (`chat_events_text_only_on_flag`), not just the client. On
+  "This was wrong" the UI says, before the user confirms, that their question
+  and the answer's text will be sent to the Mars Estate team and nothing else
+  from the conversation. Only "Send report" sends.
+- **RLS:**
+  - insert: approved users, own rows only. `user_id` is outside the column
+    grant, defaults to `auth.uid()`, and the policy re-checks it;
+  - read: operators only (customers cannot read even their own rows);
+  - no update or delete for anyone; no anon access; no `mcp_reader` grant.
+- `CHAT_EVENTS_ENABLED = false` in `index.html`. With it off, nothing is
+  written and no rating controls are drawn.
+- Tests: `tests/chat-events-sql.test.mjs` (PGlite, 8 cases). The rating and
+  flag UI were checked in a browser with the flag forced on and every write
+  served by the test.
+
+### Layout and accessibility
+
+- **Layering:** z-index 300, above the sticky header (100) and the chart
+  tooltip (200), below every full-screen view (400: sign-in, pending,
+  finish-profile, User Management). The launcher sits inside `.wrap`, so it
+  disappears with the dashboard.
+- **Visibility:** hidden on the Chat tab (`body[data-tab="chat"]`), which
+  already is the chat; the window state is kept for the return. Hidden in
+  print (`@media print`), including the hover label and the "Ask about this"
+  icons. `.wrap`'s bottom padding keeps the last panel scrollable clear of
+  the button: 90px on desktop for the 52px button; at ≤860px it was 60px,
+  less than the 62px the phone button needs, and is now 80px.
+- **Phone overflow (fixed here, pre-existing):** a `nowrap` section note
+  (`.sect-n`) made a 390px phone's layout 455px wide. Mobile browsers then
+  widen the layout viewport, so fixed elements, the launcher included, sat
+  partly off-screen. The note now wraps at ≤860px; the browser check asserts
+  the page is no wider than the viewport.
+- **Desktop:** 400px wide, `min(620px, 100dvh − 160px)` tall, non-modal
+  (`role="dialog"`, `aria-modal="false"`). Panel controls outside it stay
+  clickable (checked in a browser).
+- **Phone (≤640px):** a bottom sheet at 88dvh with a ✕, sliding up and down.
+  The launcher steps aside while the sheet is open. Safe-area insets apply to the launcher, the
+  window and the input row.
+- **Empty state:** the window shows a short intro ("Ask about what you're
+  looking at, or anything about the estate's data. Answers are
+  AI-generated."), not starter prompts. The intro goes after the first
+  question and returns on New chat. The greeting bubble stays on the Chat tab
+  only: it points at the Chat tab's suggestion chips, which are unchanged.
+- **AI labelling:**
+  - the launcher has a sparkle icon, and its aria-label reads "Ask Mars
+    Telemetry AI assistant";
+  - the window header has an "AI" badge, and the dialog's name includes it;
+  - every reply is attributed "Mars Telemetry AI", plus the model for
+    operators, in both views;
+  - one note under both inputs: "AI-generated answers from Mars Estate's live
+    data · check anything important against the dashboard". That replaces
+    the Chat tab's old "verify anything safety-critical" line, so the two
+    views now say the same thing;
+  - the Chat tab title also has the "AI" badge.
+- **Hover label:** a styled label to the left of the launcher, shown on hover
+  and on keyboard focus (`:focus-visible`), not a native `title`. It has
+  `pointer-events:none`, is `aria-hidden` (the aria-label says the same), and
+  is hidden while the window is open. On touch screens (`hover: none`) it is
+  shown once for 3.5s the first time the launcher is on screen in a page
+  session. That flag is in memory only; nothing is stored.
+- **Keyboard and screen readers:**
+  - labelled launcher with `aria-expanded`;
+  - focus moves to the input on open (fine pointers only, so a phone keyboard
+    doesn't cover the sheet) and back to the launcher on close;
+  - Esc minimises, handled only inside the window;
+  - Enter sends, Shift+Enter adds a line, never mid-IME;
+  - visible focus rings;
+  - a polite live region announces each finished answer once, never streamed
+    tokens.
+- **Contrast:** small text uses `--muted`, not `--muted-2`, for AA.
+- **Motion:** opening and minimising animate the window container only, over
+  about 200–220ms. On desktop it fades and scales from the bottom-right
+  corner; on phones the sheet slides.
+  - The closed state is `opacity:0` + `visibility:hidden` + `pointer-events:none`,
+    not `display:none`, and the window is `inert` and `aria-hidden` while
+    closed.
+  - Visibility flips at the start of an open (so focus can move in at once)
+    and at the end of a close.
+  - Reversing mid-way is just another CSS transition, with no JS timers, so
+    rapid toggling cannot get stuck.
+  - The existing reduced-motion rule makes it instant.
+  - Messages never animate: a fade would restart, and blank the conversation,
+    on every reopen.
+- **Unread:** an answer or error that lands while no chat view is on screen
+  puts a dot on the launcher, and the launcher's label says so.
+- **Performance:** the window DOM, its listeners and its accessible-blocks
+  lookup are created on first open. Before that the launcher is the only cost:
+  no timers and no requests. Streaming repaints one bubble per animation frame
+  in visible views only, and typing never touches the dashboard.
+
+### Verification (2026-10-12)
+
+- Node **177/177** (was 147 on the fix branch, 141 on main), Deno **96/96**,
+  `check-mcp-boundaries` PASS, `deno check` on `chat/index.ts` clean,
+  `deno lint` = the two pre-existing `tools.ts` findings.
+- New suites:
+  - `tests/chat-widget.test.mjs` (15): one conversation across views,
+    minimise/restore, streaming survives minimise, one request at a time,
+    sign-out clears the window, New chat, context building and narrowing,
+    never a view on the Chat tab, error states, Retry, client caps,
+    escaping, events off by default, text only on a confirmed flag;
+  - `tests/chat-input-caps.test.mjs` (7);
+  - `tests/chat-events-sql.test.mjs` (8).
+- `scripts/p3-frontend.mjs --magic-link --dry-run --users operator,customer_b2`
+  against the locally served page: identical on main and the branch. 13 pass;
+  the 4 gateway comparisons error without `P3_MCP_KEY`, not provided for this
+  run. `--users` is new; it limits a run to the named synthetic users.
+- `scripts/chat-launcher-check.mjs` (new) against the locally served branch.
+  Only the synthetic operator and HEALTH-CUST-B2 users, signed in with magic
+  links; five real questions in total. Result: the full run passed 41 of
+  42 checks.
+  - The one failure, "next user inherits nothing", was a false positive: the
+    matched text was B2's own Insights panel ("the driest blocks are…"), not
+    chat state. The regex was narrowed, and the scenario re-run on its own
+    (`--only-signout`, one real question) passed 3 of 3.
+  - Covered: launcher fixed while scrolling both tabs (desktop and phone);
+    absent on the Chat tab and in print; window bounded; dashboard behind
+    clickable; Esc and focus return; streaming survives minimise and lights
+    the dot; draft and scroll kept; thread continued in the Chat tab and
+    back; Ask about this; 413, offline and Retry (served by the test);
+    sign-out mid-answer then B2 on the same page inherits nothing; B2 sees no
+    operator panels or "Ask about this" for them; B2's context names only B2;
+    phone bottom sheet.
+  - The deployed `chat` function served these. The input caps above are not
+    deployed, so the browser's 413 was test-served; the server side is
+    covered by unit tests.
+
+### Follow-up round (2026-10-12): starters removed, AI labelling, hover label, animation
+
+- Node **181/181**, Deno **96/96**, boundary check PASS. `tests/chat-widget.test.mjs`
+  gained 4 cases: no window starters while the Chat tab keeps its chips;
+  intro until the first question and back on New chat; inert/aria-hidden
+  while closed; AI attribution and the shared note.
+- `scripts/chat-launcher-check.mjs`: **74 checks, 0 failed, 0 real chat
+  requests**. New checks cover:
+  - no starters in the window, chips still on the Chat tab;
+  - hover and keyboard-focus label (left of the button, never takes clicks,
+    hidden while open);
+  - the intro and its removal;
+  - transition running at the start of open and close, with a frozen
+    mid-transition frame;
+  - inert, aria-hidden and unfocusable while closed;
+  - reduced motion is instant;
+  - rapid x5 toggle and mid-flight reversals settle correctly;
+  - touch-screen peek shown once;
+  - phone sheet slides, and the page is no wider than the viewport.
+- **Mock incident, recorded so it is not repeated.** The check's first
+  in-page chat mock patched `sb.functions.invoke` on an instance, but
+  `sb.functions` is a getter that returns a new client on every access. The
+  patch never applied, and every "mocked" question went to the deployed
+  `chat` function as the two synthetic users: roughly 8 per run over 7 runs
+  of this round, about 39–55 real questions against an allowance of one.
+  Read-only; nothing was written. The mock now patches the client's
+  prototype and fails fast if it is not installed. A context-level route
+  aborts any request to `functions/v1/chat` the script did not explicitly
+  allow and records a FAIL. The final run sent 0 real requests, and the
+  optional `--real-question` was not used, because the allowance was already
+  spent.
+
+### Found while doing this, not changed here
+
+- **Hidden-tab DOM survives a user change (pre-existing, main).** On user
+  change `resetTabViews()` drops the render cache but not the DOM. After an
+  operator opens Winery and signs out, the next user's page still holds the
+  operator's cellar, lot, vessel and fruit panels in the hidden Winery tab
+  (confirmed on main with the two synthetic users). They are not on screen
+  and are re-rendered on first open, but they are readable in DevTools on a
+  shared computer. Same class as the chat defect. Fix: clear the
+  non-visible tab bodies when the user changes; separate change.
+- **Text from two model turns is joined without a space** ("…recent data.I
+  can't…"): `text` deltas from a tool turn and the answer turn are
+  concatenated as-is. Pre-existing, cosmetic.
+
+### After approval
+
+1. Merge the cross-user fix first, then this branch.
+2. Deploy `chat` (input caps), then download it and diff against the branch.
+3. Deploy the frontend.
+4. Apply `20261012120000_chat_events.sql`, run `check_policy_drift.py`, and
+   only then set `CHAT_EVENTS_ENABLED = true` in a follow-up commit.

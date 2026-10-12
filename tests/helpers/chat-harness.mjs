@@ -28,7 +28,9 @@ class FakeEl {
   appendChild(c) { this.children.push(c); c.parentNode = this; return c; }
   append(...cs) { cs.forEach((c) => this.appendChild(c)); }
   remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((c) => c !== this); }
-  querySelector(s) { if (!this._q.has(s)) this._q.set(s, new FakeEl()); return this._q.get(s); }
+  // A queried element is created on first use and becomes a child, so its
+  // content shows up in the parent's innerHTML.
+  querySelector(s) { if (!this._q.has(s)) this._q.set(s, this.appendChild(new FakeEl())); return this._q.get(s); }
   querySelectorAll() { return []; }
   addEventListener(t, f) { (this.listeners[t] ??= []).push(f); }
   removeEventListener() {}
@@ -65,7 +67,9 @@ export function sseStream() {
 export const tick = () => new Promise((r) => setTimeout(r, 0));
 
 // extra: source appended after the chat section (e.g. a test-only export line).
-export function loadChat({ extra = '', invoke, from } = {}) {
+// globals: dashboard state the chat reads at runtime (state, PANELS, ...).
+// transform: edits the section source first (e.g. flip a feature flag).
+export function loadChat({ extra = '', invoke, from, globals = {}, transform = (s) => s } = {}) {
   const els = new Map();
   const $ = (s) => { if (!els.has(s)) els.set(s, new FakeEl()); return els.get(s); };
   const calls = [];
@@ -82,10 +86,11 @@ export function loadChat({ extra = '', invoke, from } = {}) {
     navigator: { onLine: true }, innerWidth: 1280, innerHeight: 900,
     document: { createElement: (t) => new FakeEl(t), addEventListener() {}, activeElement: null, body: new FakeEl('body') },
     window: {}, matchMedia: () => ({ matches: false, addEventListener() {} }),
+    ...globals,
   };
   ctx.window = ctx;
   vm.createContext(ctx);
-  const src = section('/* §8 ── CHAT', '/* §9 ──') + '\n' + extra;
+  const src = transform(section('/* §8 ── CHAT', '/* §9 ──')) + '\n' + extra;
   vm.runInContext(src, ctx, { filename: 'web/index.html#chat' });
   return { ctx, $, calls, els };
 }

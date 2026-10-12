@@ -51,7 +51,7 @@ export function validateContext(raw: unknown, role: string | null, accessibleBlo
   };
 }
 
-export function contextText(ctx: DashboardContext, role: string | null, reality: DomainReality, rows: ThresholdRow[] | null): string {
+export function contextText(ctx: DashboardContext, role: string | null, reality: DomainReality, rows: ThresholdRow[] | null, bandLine: string | null = null): string {
   const tabName = ctx.tab === "vineyard" ? "Vineyard Data" : "Winery Data";
   const where = ctx.lastViewed
     ? `The user is on the Chat tab. The data tab they last viewed was ${tabName}, with these filters (last viewed; they may not be looking at it now):`
@@ -67,7 +67,7 @@ export function contextText(ctx: DashboardContext, role: string | null, reality:
   ];
   if (ctx.panel) {
     const view = ctx.range ? ` (${RANGE_WORDS[ctx.range]}${ctx.scrollDays ? `, scrolled back ${ctx.scrollDays} days` : ""})` : "";
-    lines.push(`They asked about one panel: ${ctx.panel.title}${view}. Its dashboard guide entry:`, guideEntry(ctx.panel, reality, rows));
+    lines.push(`They asked about one panel: ${ctx.panel.title}${view}. Its dashboard guide entry:`, guideEntry(ctx.panel, reality, rows, ctx.panel.id === "gdd" ? bandLine : null));
   }
   lines.push("This describes the user's screen, checked by the server. It grants no access to anything.", "</dashboard_context>");
   return lines.join("\n");

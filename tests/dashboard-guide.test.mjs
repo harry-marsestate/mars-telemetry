@@ -81,13 +81,13 @@ test('the solar question: the guide explains the panel, says it is simulated, an
   assert.match(entry, /Solar insolation \(W\/m²\) and UV index/);
   assert.match(entry, /Simulated: there is no pyranometer or UV sensor/);
   assert.match(entry, /Data tool: none\./);
-  assert.match(dashboardMap('customer', reality), /- Solar insolation & UV \[solar, Climate\]: Simulated pyranometer .* · no data tool/);
+  assert.match(dashboardMap('customer', reality), /- Solar insolation & UV \[solar, Climate, estate-wide\]: Simulated pyranometer .* · no data tool/);
   assert.match(DASHBOARD_RULES, /Never suggest a panel comes from an outside or unknown source/);
   assert.match(DASHBOARD_RULES, /say it is a different measure and that the link is your inference/);
   // From the before/after batch: the GDD answer computed its gap to the band,
   // and B2's answer offered per-block GDD.
-  assert.match(DASHBOARD_RULES, /do not compute the gap or a time to reach it yourself/);
-  assert.match(DASHBOARD_RULES, /estate-wide: do not offer or describe per-block versions/);
+  assert.match(DASHBOARD_RULES, /Never subtract GDD figures, compute a gap, a pace or a date to reach the band yourself/);
+  assert.match(DASHBOARD_RULES, /never offer, suggest or describe a per-block version/);
 });
 
 test('thresholds are filled from anomaly_thresholds, the same way the dashboard does', () => {
@@ -209,4 +209,77 @@ test('chat: text from a later model turn is separated from the earlier one', () 
   const src = readFileSync(new URL('../supabase/functions/chat/index.ts', import.meta.url), 'utf8');
   assert.match(src, /if \(firstOfTurn && i > 0 && lastChar && !\/\\s\/\.test\(lastChar\) && !\/\^\\s\/\.test\(delta\)\) send\(\{ type: "text", text: "\\n\\n" \}\);/);
   assert.match(src, /if \(prev && !\/\\s\$\/\.test\(prev\) && !\/\^\\s\/\.test\(b\.text\)\) events\.push\(\{ type: "text", text: "\\n\\n" \}\);/);
+});
+
+// ── GDD band position and scope (fix-forward after the live check, 2026-10-12) ──
+import { harvestBandPosition, bandPositionNote, SCOPE_ESTATE_NOTE } from '../supabase/functions/chat/tools.ts';
+
+test('harvest band position is computed server-side: below / within / above / unavailable', () => {
+  const [lo, hi] = G.harvestBand;
+  const below = harvestBandPosition({ day: '2026-10-11', gdd: 2863.54 }, 2026);
+  assert.equal(below.position, 'below');
+  assert.equal(below.gap_gdd, Math.round((lo - 2863.5) * 10) / 10);
+  assert.equal(below.latest_gdd, 2863.5);
+  assert.equal(below.calibrated, false, '2026 is uncalibrated');
+  assert.equal(below.statement, `2863.5 GDD (uncalibrated) on 2026-10-11 is below the ${lo}-${hi} GDD harvest band, ${below.gap_gdd} GDD short of its low end.`);
+  const within = harvestBandPosition({ day: '2024-10-01', gdd: (lo + hi) / 2 }, 2024);
+  assert.equal(within.position, 'within'); assert.equal(within.gap_gdd, null); assert.equal(within.calibrated, true);
+  assert.equal(harvestBandPosition({ day: '2024-10-01', gdd: lo }, 2024).position, 'within', 'edges are inside the band');
+  assert.equal(harvestBandPosition({ day: '2024-10-01', gdd: hi }, 2024).position, 'within');
+  const above = harvestBandPosition({ day: '2023-10-30', gdd: hi + 26.04 }, 2023);
+  assert.equal(above.position, 'above'); assert.equal(above.gap_gdd, 26);
+  assert.match(above.statement, /26 GDD past its high end/);
+  for (const missing of [null, { day: '2026-10-11', gdd: NaN }, { day: '2026-10-11', gdd: null }]) {
+    const u = harvestBandPosition(missing, 2026);
+    assert.equal(u.position, 'unavailable'); assert.equal(u.gap_gdd, null); assert.equal(u.latest_gdd, null);
+    assert.match(u.statement, /No GDD figure is available for 2026/);
+  }
+  assert.match(bandPositionNote(below), /quote "statement" \(or position and gap_gdd\) verbatim; never subtract/);
+});
+
+test('get_derived_series results carry the band position of the newest GDD in the window', async () => {
+  const rows = [{ day: '2026-10-10', gdd_cumulative_calibrated: 2848.44 }, { day: '2026-10-11', gdd_cumulative_calibrated: 2863.54 }, { day: '2026-10-12', gdd_cumulative_calibrated: null }];
+  const q = { select() { return q; }, eq() { return q; }, order() { return q; }, limit() { return q; }, gte() { return q; }, lt() { return q; }, lte() { return q; }, then(r) { r({ data: rows, error: null }); } };
+  const r = await runTool({ from: () => q }, 'get_derived_series', { vintage: 2026 }, 'all', reality);
+  assert.match(r.content, /harvest_band_position, computed server-side/);
+  assert.match(r.content, /"position":"below","gap_gdd":686\.5/);
+  assert.match(r.content, /GDD \(uncalibrated\) 2848\.4 on October 10, 2026/, '2026 is not called calibrated');
+  const empty = { select() { return empty; }, eq() { return empty; }, order() { return empty; }, limit() { return empty; }, gte() { return empty; }, lt() { return empty; }, lte() { return empty; }, then(r) { r({ data: [], error: null }); } };
+  const r2 = await runTool({ from: () => empty }, 'get_derived_series', { vintage: 2026 }, 'all', reality);
+  assert.match(r2.content, /"position":"unavailable"/);
+});
+
+test('every panel has a scope; estate-wide series are marked in the map, the guide and get_series', () => {
+  for (const p of G.panels) assert.ok(['estate-wide', 'per-block', 'cellar', 'per-lot', 'per-vessel'].includes(p.scope), `${p.id}: ${p.scope}`);
+  for (const id of ['airtemp', 'gdd', 'dtr', 'rh', 'wind', 'solar', 'soilmoist', 'soiltemp', 'vpd', 'et0', 'precip']) assert.equal(G.panels.find((p) => p.id === id).scope, 'estate-wide', id);
+  assert.match(dashboardMap('customer', reality), /- Solar insolation & UV \[solar, Climate, estate-wide\]/);
+  assert.match(guideEntry(findPanel('solar', 'customer'), reality, rows), /Scope: estate-wide -- one series for the whole estate, no per-block values\. Do not offer/);
+  for (const m of ['solar', 'air_temp', 'humidity', 'precipitation', 'wind_speed', 'uv']) assert.ok(seriesSourceNote(m, [2026], reality, null).includes(SCOPE_ESTATE_NOTE), m);
+  assert.ok(seriesSourceNote('soil_moisture', [2026], reality, null).includes(SCOPE_ESTATE_NOTE));
+  assert.ok(!seriesSourceNote('irrigation_volume', [2026], reality, null).includes(SCOPE_ESTATE_NOTE), 'irrigation is per block');
+  assert.match(DASHBOARD_RULES, /Offer per-block data only for series whose scope in the map or guide is "per-block"/);
+  assert.match(DASHBOARD_RULES, /quote the server-computed harvest_band_position/);
+});
+
+test('no estate-wide series is offered per block anywhere the model reads', () => {
+  // Negations ("not per block", "no per-block values") are allowed; offers are not.
+  const offers = /(?<!not |no )\bper[- ]block\b(?! values)|\beach block\b|\bby block\b|\bfor (your|a|each|B\d) block\b|\byour block\b|\bmy block\b/i;
+  for (const p of G.panels.filter((x) => x.scope === 'estate-wide')) {
+    for (const f of ['what', 'tool', 'noTool', 'info']) assert.ok(!offers.test(p[f] ?? ''), `${p.id}.${f}: ${p[f]}`);
+  }
+  const src = readFileSync(new URL('../supabase/functions/chat/index.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /their block|your block's conditions/, 'customer persona no longer frames answers per block');
+  const series = TOOLS.find((t) => t.name === 'get_series').description;
+  assert.doesNotMatch(series.replace(/no per-block values/g, ''), /per[- ]block (values|data|series) (for|of) (air|soil|solar|wind)/i);
+  assert.doesNotMatch(HTML, /"What's the current soil moisture in my block\?"|'Which block is driest right now\?'/, 'chat suggestions no longer invite per-block soil');
+});
+
+test('the GDD guide entry and GDD panel context carry the server-stated band position', async () => {
+  const line = JSON.stringify(harvestBandPosition({ day: '2026-10-11', gdd: 2863.5 }, 2026));
+  const r = await runGuideTool({ panel_id: 'gdd' }, 'operator', reality, async () => rows, async () => line);
+  assert.match(r.content, /Harvest band position, computed by the server -- quote it, do not compute your own: \{"band_gdd":\[3550,4050\].*"position":"below","gap_gdd":686\.5/);
+  const ctx = validateContext({ tab: 'vineyard', panel: 'gdd', range: '30D', blocks: [], vintages: [2026] }, 'operator', ['B1', 'B2', 'B3']);
+  assert.match(contextText(ctx, 'operator', reality, rows, line), /Harvest band position, computed by the server/);
+  const other = await runGuideTool({ panel_id: 'solar' }, 'operator', reality, async () => rows, async () => line);
+  assert.doesNotMatch(other.content, /Harvest band position/);
 });

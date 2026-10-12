@@ -85,17 +85,28 @@ export function dashboardMap(role: string | null, reality: DomainReality): strin
     if (!ps.length) continue;
     lines.push(`${tab === "vineyard" ? "Vineyard Data" : "Winery Data"} tab:`);
     for (const p of ps) {
-      lines.push(`- ${p.title} [${p.id}, ${p.sectionLabel}]: ${provenance(p, cur, reality)}${p.tool ? "" : " · no data tool"}`);
+      lines.push(`- ${p.title} [${p.id}, ${p.sectionLabel}, ${p.scope}]: ${provenance(p, cur, reality)}${p.tool ? "" : " · no data tool"}`);
     }
   }
   return lines.join("\n");
 }
 
-export function guideEntry(p: GuidePanel, reality: DomainReality, rows: ThresholdRow[] | null): string {
+const SCOPE_LINE: Record<string, string> = {
+  "estate-wide": "Scope: estate-wide -- one series for the whole estate, no per-block values. Do not offer, describe or address per-block versions of it.",
+  "per-block": "Scope: per block.",
+  "cellar": "Scope: the cellar (barrel room), not the vineyard blocks.",
+  "per-lot": "Scope: per lot.",
+  "per-vessel": "Scope: per vessel.",
+};
+// bandLine: the server-computed harvest-band position (tools.ts
+// harvestBandPosition), given only for the GDD panel.
+export function guideEntry(p: GuidePanel, reality: DomainReality, rows: ThresholdRow[] | null, bandLine: string | null = null): string {
   const info = fillThresholds(p.info, rows);
   return [
     `${p.title} [${p.id}] -- ${p.tab === "vineyard" ? "Vineyard Data" : "Winery Data"} tab, ${p.sectionLabel}${p.unit ? `, unit: ${p.unit}` : ""}`,
     `What it shows: ${p.what}`,
+    p.scope ? SCOPE_LINE[p.scope] ?? `Scope: ${p.scope}.` : null,
+    p.id === "gdd" && bandLine ? `Harvest band position, computed by the server -- quote it, do not compute your own: ${bandLine}` : null,
     info ? `How to read it (the panel's own help text): ${info}` : null,
     `Where the data comes from, by vintage (the panel's own source label): ${provenanceByVintage(p, reality)}`,
     p.tool ? `Data tool: ${p.tool}` : `Data tool: none. ${p.noTool ?? ""}`.trim(),
@@ -108,8 +119,8 @@ export const DASHBOARD_RULES = `About the dashboard. The user is looking at the 
 - If no data tool returns that panel's data, say so and say the panel is part of this dashboard. Never suggest a panel comes from an outside or unknown source.
 - If you offer a related measure instead (for example diurnal range or ET0 for a question about sunlight), say it is a different measure and that the link is your inference, not the same thing.
 - A panel that is not in the map is not on this user's dashboard: do not describe it or guess what it would show.
-- When a value is compared with a band or threshold on a panel (e.g. GDD against the harvest band), say whether it is below, within or above it and quote both figures as given; do not compute the gap or a time to reach it yourself.
-- Climate and soil series that are model output are estate-wide: do not offer or describe per-block versions of them.
+- GDD against the harvest band: quote the server-computed harvest_band_position ("statement", or position and gap_gdd) exactly as given, from the GDD guide entry or a get_derived_series result. Never subtract GDD figures, compute a gap, a pace or a date to reach the band yourself. If the position is "unavailable", say the current figure is not available. For any other band or threshold, say below, within or above and quote both figures as given.
+- Offer per-block data only for series whose scope in the map or guide is "per-block". A series marked "estate-wide" (all climate, solar, wind, UV, ECMWF and ERA5-Land soil data) has no per-block values: never offer, suggest or describe a per-block version, and do not tie it to the user's block (no "for B2"), even when the user has one block.
 The answer-support rules above still apply to everything you say about a panel.`;
 
 export const GUIDE_TOOL: Anthropic.Tool = {
@@ -128,14 +139,17 @@ export const GUIDE_TOOL: Anthropic.Tool = {
 export async function runGuideTool(
   input: Record<string, unknown>, role: string | null, reality: DomainReality,
   loadThresholds: () => Promise<ThresholdRow[] | null>,
+  loadBandLine: () => Promise<string | null> = () => Promise.resolve(null),
 ): Promise<{ content: string; isError: boolean }> {
   const rows = await loadThresholds();
   if (input.panel_id != null) {
     const p = findPanel(input.panel_id, role);
     if (!p) return { content: `No panel '${String(input.panel_id)}' on this user's dashboard. Use an id from the dashboard map.`, isError: false };
-    return { content: guideEntry(p, reality, rows), isError: false };
+    return { content: guideEntry(p, reality, rows, p.id === "gdd" ? await loadBandLine() : null), isError: false };
   }
   const tab = input.tab === "vineyard" || input.tab === "winery" ? input.tab : null;
   if (!tab) return { content: "Pass panel_id, or tab ('vineyard' or 'winery').", isError: true };
-  return { content: panelsFor(role, tab).map((p) => guideEntry(p, reality, rows)).join("\n\n"), isError: false };
+  const ps = panelsFor(role, tab);
+  const band = ps.some((p) => p.id === "gdd") ? await loadBandLine() : null;
+  return { content: ps.map((p) => guideEntry(p, reality, rows, p.id === "gdd" ? band : null)).join("\n\n"), isError: false };
 }

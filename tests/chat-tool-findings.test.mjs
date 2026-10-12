@@ -285,7 +285,7 @@ test("5: rates are computed server-side -- 2.4 Brix over 28 days is +0.086/day, 
 test("5: GDD gained per period comes from the tool (the assistant said +81; the week gained +73.9)", async () => {
   const days = [["2026-09-01", 2194.4], ["2026-09-08", 2268.3]].map(([d, g]) => ({ vintage: 2026, day: `${d}T00:00:00+00:00`, gdd_cumulative_calibrated: g, dtr_f: 30, vpd_kpa: 1, vpd_peak_kpa: 2, et0_in: 0.2 }));
   const r = await run(fake({ daily_derived: days }), "get_derived_series", { vintage: 2026, start_date: "2026-09-01", end_date: "2026-09-08" });
-  assert.match(r.content, /GDD \(calibrated\) 2194\.4 on September 1, 2026 -> 2268\.3 on September 8, 2026: \+73\.9 over 7 days = \+10\.6\/day/);
+  assert.match(r.content, /GDD \(uncalibrated\) 2194\.4 on September 1, 2026 -> 2268\.3 on September 8, 2026: \+73\.9 over 7 days = \+10\.6\/day/);
 });
 
 test("5: the no-causal-claims rule is in the system prompt and the MCP instructions", () => {

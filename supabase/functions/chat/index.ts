@@ -6,6 +6,7 @@ import { callerProfile, resolveDisplayName } from "./profile.ts";
 import { callKimi, KIMI_MODEL } from "./kimi.ts";
 import { vintageContext } from "../_shared/vintage.ts";
 import { ANSWER_RULES } from "./query-rules.ts";
+import { checkChatInput, checkContentLength } from "./input-caps.ts";
 
 // RAG chat for Mars Estate/Mars Telemetry. ctx.supabase is RLS-scoped to the
 // caller's own JWT for every tool call -- deliberately never ctx.supabaseAdmin,
@@ -119,10 +120,13 @@ async function attemptKimi(
 export default {
   fetch: withSupabase({ auth: ["user"] }, async (req, ctx) => {
     try {
+      // Size caps before anything else (input-caps.ts). `code` lets the
+      // browser tell "start a new chat" apart from "shorten the question".
+      const lengthCap = checkContentLength(req.headers.get("content-length"));
+      if (!lengthCap.ok) return Response.json({ error: lengthCap.error, code: lengthCap.code }, { status: lengthCap.status });
       const { messages, modelProvider } = await req.json();
-      if (!Array.isArray(messages) || messages.length === 0) {
-        return Response.json({ error: "messages required" }, { status: 400 });
-      }
+      const inputCap = checkChatInput(messages);
+      if (!inputCap.ok) return Response.json({ error: inputCap.error, code: inputCap.code }, { status: inputCap.status });
 
       // Resolved once per request via the same RLS-safe, SECURITY DEFINER
       // RPC the frontend already uses for role display (getCurrentUserRole()).

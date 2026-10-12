@@ -385,9 +385,13 @@ async function getSeries(supabase: any, input: Record<string, unknown>, dataMode
 // screen says otherwise. domain_reality() decides real vs simulated per year,
 // as it does for the dashboard; an unknown answer is said to be unknown.
 const ESTATE_WIDE_REAL = new Set(["air_temp", "humidity", "precipitation", "soil_moisture", "soil_temp"]);
+// Series with only one estate-wide value per time (model output, or a
+// simulated estate-level stand-in): never offered per block.
+const ESTATE_WIDE_ALWAYS = new Set(["air_temp", "humidity", "precipitation", "solar", "wind_speed", "wind_dir", "uv"]);
+export const SCOPE_ESTATE_NOTE = `(Scope: estate-wide -- one series for the whole estate, with no per-block values. Do not offer, describe or address per-block versions of it, e.g. "for B2".)`;
 export function seriesSourceNote(metric: string, years: number[], reality: DomainReality, block: string | null): string {
   if (metric === "solar") {
-    return "(Source: solar rows are ECMWF IFS modelled radiation where the model was ingested and simulated otherwise; this tool does not say which applies to a bucket. The dashboard's Solar panel does NOT plot these rows -- it shows simulated values -- so never present them as what the panel shows.)";
+    return "(Source: solar rows are ECMWF IFS modelled radiation where the model was ingested and simulated otherwise; this tool does not say which applies to a bucket. The dashboard's Solar panel does NOT plot these rows -- it shows simulated values -- so never present them as what the panel shows.) " + SCOPE_ESTATE_NOTE;
   }
   const panel = DASHBOARD_GUIDE.panels.find((p) => p.domain === metric);
   const set = reality.get(metric);
@@ -399,6 +403,8 @@ export function seriesSourceNote(metric: string, years: number[], reality: Domai
       : `${y}: SIMULATED demonstration data, not a measurement${label?.notReal ? ` (dashboard label: "${label.notReal}")` : ""}`;
   });
   let note = `(Source, as the dashboard labels it -- ${parts.join("; ")}.)`;
+  const estateWide = ESTATE_WIDE_ALWAYS.has(metric) || (ESTATE_WIDE_REAL.has(metric) && years.some((y) => set?.has(y)));
+  if (estateWide) note += ` ${SCOPE_ESTATE_NOTE}`;
   if (block && ESTATE_WIDE_REAL.has(metric) && years.some((y) => set?.has(y))) {
     note += ` (Real ${metric} data is estate-wide model output with no per-block values: a block filter returns no real readings, so omit block.)`;
   }
@@ -496,9 +502,53 @@ async function getDerivedSeries(supabase: any, input: Record<string, unknown>, d
   const notes = [
     `(${bounds.label} Returned ${shown.length} day(s); truncated: ${truncated}${truncated ? ` -- more than ${DERIVED_LIMIT} days match; narrow start_date/end_date` : ""}.)`,
   ];
-  const changes = derivedChanges(shown);
+  const changes = derivedChanges(shown, vintage);
   if (changes) notes.push(changes);
+  // Where the newest GDD in this window sits against the harvest band,
+  // computed here so the model never subtracts it itself (seen live: "roughly
+  // 690 GDD short", self-computed).
+  const lastGdd = [...shown].reverse().find((r) => r.gdd_cumulative_calibrated != null);
+  notes.push(bandPositionNote(harvestBandPosition(lastGdd ? { day: lastGdd.day, gdd: lastGdd.gdd_cumulative_calibrated } : null, vintage)));
   return { content: JSON.stringify(shown) + "\n\n" + notes.join(" "), isError: false };
+}
+
+// ── GDD vs the harvest band (server-computed) ─────────────────────────────
+// The band is the dashboard's HARVEST_BAND (via the generated guide), the
+// figure is gdd_cumulative_calibrated -- the column the GDD panel plots.
+// gap_gdd is the distance to the nearest band edge: low edge when below,
+// high edge when above, null within. No figure: position "unavailable".
+export type BandPosition = {
+  band_gdd: number[]; vintage: number; as_of: string | null; latest_gdd: number | null; calibrated: boolean;
+  position: "below" | "within" | "above" | "unavailable"; gap_gdd: number | null; statement: string;
+};
+const round1 = (n: number) => Math.round(n * 10) / 10;
+export function harvestBandPosition(latest: { day: string; gdd: number } | null, vintage: number): BandPosition {
+  const [lo, hi] = DASHBOARD_GUIDE.harvestBand;
+  const gdd = DASHBOARD_GUIDE.panels.find((p) => p.id === "gdd");
+  const calibrated = /calibrated to/.test(gdd?.provenance[String(vintage)]?.real ?? "");
+  if (!latest || typeof latest.gdd !== "number" || !Number.isFinite(latest.gdd)) {
+    return { band_gdd: [lo, hi], vintage, as_of: null, latest_gdd: null, calibrated, position: "unavailable", gap_gdd: null,
+      statement: `No GDD figure is available for ${vintage}, so its position against the ${lo}-${hi} GDD harvest band is unknown.` };
+  }
+  const v = round1(latest.gdd), day = String(latest.day).slice(0, 10);
+  const position = v < lo ? "below" : v > hi ? "above" : "within";
+  const gap = position === "below" ? round1(lo - v) : position === "above" ? round1(v - hi) : null;
+  const cal = calibrated ? "calibrated" : "uncalibrated";
+  const statement = position === "below" ? `${v} GDD (${cal}) on ${day} is below the ${lo}-${hi} GDD harvest band, ${gap} GDD short of its low end.`
+    : position === "above" ? `${v} GDD (${cal}) on ${day} is above the ${lo}-${hi} GDD harvest band, ${gap} GDD past its high end.`
+    : `${v} GDD (${cal}) on ${day} is within the ${lo}-${hi} GDD harvest band.`;
+  return { band_gdd: [lo, hi], vintage, as_of: day, latest_gdd: v, calibrated, position, gap_gdd: gap, statement };
+}
+export const bandPositionNote = (p: BandPosition) =>
+  `(harvest_band_position, computed server-side -- quote "statement" (or position and gap_gdd) verbatim; never subtract, project or estimate a gap or a date yourself: ${JSON.stringify(p)})`;
+
+// Newest calibrated GDD for a vintage, for the dashboard guide's GDD entry.
+// deno-lint-ignore no-explicit-any
+export async function fetchLatestGdd(supabase: any, vintage: number): Promise<{ day: string; gdd: number } | null> {
+  const { data, error } = await supabase.from("daily_derived").select("day, gdd_cumulative_calibrated")
+    .eq("vintage", vintage).not("gdd_cumulative_calibrated", "is", null).order("day", { ascending: false }).limit(1);
+  if (error || !data?.length) return null;
+  return { day: data[0].day, gdd: Number(data[0].gdd_cumulative_calibrated) };
 }
 
 const DERIVED_LIMIT = 400;
@@ -507,7 +557,7 @@ const DERIVED_LIMIT = 400;
 // daily values: mean, min and max with their dates. Computed here so the model
 // never sums or differences daily rows itself.
 // deno-lint-ignore no-explicit-any
-function derivedChanges(rows: any[]): string | null {
+function derivedChanges(rows: any[], vintage?: number): string | null {
   if (rows.length < 2) return null;
   const day = (r: { day: string }) => String(r.day).slice(0, 10);
   const parts: string[] = [];
@@ -516,7 +566,10 @@ function derivedChanges(rows: any[]): string | null {
     const a = gdd[0], b = gdd[gdd.length - 1];
     const d = Math.round((Date.parse(day(b)) - Date.parse(day(a))) / 86400000);
     const gained = Math.round((b.gdd_cumulative_calibrated - a.gdd_cumulative_calibrated) * 10) / 10;
-    parts.push(`GDD (calibrated) ${a.gdd_cumulative_calibrated} on ${dayLabel(day(a))} -> ${b.gdd_cumulative_calibrated} on ${dayLabel(day(b))}: +${gained} over ${d} days = +${d > 0 ? Math.round((gained / d) * 10) / 10 : gained}/day`);
+    // The column is gdd_cumulative_calibrated for every vintage, but only
+    // vintages with a Grapegrowers report are calibrated (the GDD panel's own
+    // label, via the guide); the label says which.
+    parts.push(`GDD (${vintage != null && !harvestBandPosition({ day: "", gdd: 0 }, vintage).calibrated ? "uncalibrated" : "calibrated"}) ${a.gdd_cumulative_calibrated} on ${dayLabel(day(a))} -> ${b.gdd_cumulative_calibrated} on ${dayLabel(day(b))}: +${gained} over ${d} days = +${d > 0 ? Math.round((gained / d) * 10) / 10 : gained}/day`);
   }
   for (const [field, dp] of [["vpd_kpa", 2], ["vpd_peak_kpa", 2], ["dtr_f", 2], ["et0_in", 3]] as const) {
     const vals = rows.filter((r) => r[field] != null);

@@ -9277,3 +9277,47 @@ Guide regenerated. Node **199/199**, Deno **96/96**, boundary check PASS,
 `deno check` clean for chat and mcp, and `deno lint` on
 chat/mcp/_shared shows only the 2 pre-existing `tools.ts` findings. The
 mocked launcher browser check passed 74 of 74 with 0 real requests.
+
+### Fix forward after the first live check (2026-10-12)
+
+The first production check failed twice. Asked about GDD as the operator,
+the answer quoted the 3550-4050 band and then computed "roughly 690 GDD short
+of the low end" itself. Asked about Solar as B2, it offered "GDD or
+temperature trends for B2" for series that are estate-wide. Both are now in
+data the model reads, not only in rule wording:
+
+- **GDD band position is server-computed.** `harvestBandPosition()` in
+  `chat/tools.ts` compares the newest `gdd_cumulative_calibrated` with
+  `HARVEST_BAND` (from the generated guide). It returns `position`
+  (below / within / above / unavailable), `gap_gdd` (to the nearest band
+  edge; null within or unavailable), `latest_gdd`, `as_of`, `calibrated` and
+  a ready-made `statement`. It is attached:
+  - to every `get_derived_series` result;
+  - to the GDD guide entry (`get_dashboard_guide`);
+  - to the dashboard context when the GDD panel is selected.
+
+  A missing figure gives "unavailable" and says so, with no guess. The rule
+  now says to quote the field and never subtract, project or estimate.
+- **Scope marker.** Every guide entry has a `scope` (`estate-wide`,
+  `per-block`, `cellar`, `per-lot`, `per-vessel`), shown in the map and the
+  entry. Every estate-wide `get_series` result (ECMWF air, humidity and
+  precipitation; ERA5-Land soil; solar, wind, UV) ends with a scope note
+  forbidding per-block versions. A new rule allows per-block offers only
+  where the scope is `per-block`.
+- **Per-block invitations removed:**
+  - the soil guide texts;
+  - the customer persona ("their wine or their block" → "their wine and the
+    estate"; "your block's conditions" → "the estate's conditions");
+  - two Chat tab suggestion chips ("soil moisture in my block?" → "at the
+    estate?"; "Which block is driest right now?" → "Is soil moisture inside
+    the deficit-irrigation target?").
+- **Found while testing:** the `get_derived_series` Changes note labelled
+  2026 GDD "(calibrated)". It now says "(uncalibrated)" for a vintage without
+  a Grapegrowers report, matching the panel.
+
+Tests: band position below/within/above/edges/unavailable and on a real
+result path; scope on every panel, in the map, the entry and `get_series`; a
+check that no estate-wide guide text, persona or chip offers per-block data;
+the band line in the GDD entry and context only. Node **205/205**, Deno
+**96/96**, boundary check PASS, lint shows the 2 pre-existing findings, and
+the mocked browser check passed 74 of 74 with 0 real requests.

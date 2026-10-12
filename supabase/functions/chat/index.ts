@@ -9,6 +9,7 @@ import { ANSWER_RULES } from "./query-rules.ts";
 import { checkChatInput, checkContentLength } from "./input-caps.ts";
 import { DASHBOARD_RULES, dashboardMap, GUIDE_TOOL, runGuideTool, type ThresholdRow } from "./dashboard-guide.ts";
 import { contextText, validateContext } from "./dashboard-context.ts";
+import { fetchLatestGdd, harvestBandPosition } from "./tools.ts";
 
 // The chat's own tools: the shared data tools (also served by the MCP
 // gateway) plus the dashboard guide, which is chat-only.
@@ -210,8 +211,13 @@ export default {
         if (error) console.error("chat: could not read anomaly_thresholds", error);
         return error ? null : data;
       });
+      // The current vintage's GDD against the harvest band, computed here
+      // (tools.ts harvestBandPosition) only when the GDD guide entry is used.
+      let bandP: Promise<string | null> | null = null;
+      const loadBandLine = () => bandP ??= fetchLatestGdd(ctx.supabase, currentVintage())
+        .then((latest) => JSON.stringify(harvestBandPosition(latest, currentVintage())), () => JSON.stringify(harvestBandPosition(null, currentVintage())));
       const run: RunAny = (name, input) => name === GUIDE_TOOL.name
-        ? runGuideTool(input, role, domainReality, loadThresholds)
+        ? runGuideTool(input, role, domainReality, loadThresholds, loadBandLine)
         : runTool(ctx.supabase, name, input, dataMode, domainReality);
 
       const systemPrompt = buildSystemPrompt(role, displayName, dataMode, domainReality);
@@ -232,7 +238,7 @@ export default {
             : (last.content as Anthropic.ContentBlockParam[]).filter((b) => b.type === "text").map((b) => (b as Anthropic.TextBlockParam).text).join("\n");
           conversation[conversation.length - 1] = { role: "user", content: [
             { type: "text", text },
-            { type: "text", text: contextText(valid, role, domainReality, await loadThresholds()) },
+            { type: "text", text: contextText(valid, role, domainReality, await loadThresholds(), valid.panel?.id === "gdd" ? await loadBandLine() : null) },
           ] };
         }
       }
@@ -671,7 +677,7 @@ Connecting conditions to what they plausibly mean for the wine (above) is a stat
 
   const toneBlock = role === "operator"
     ? `This user is an operator (team member).${nameNote} Be direct and technical. Lead with the data -- figures, comparisons, specific numbers -- before commentary; don't preface with pleasantries. Assume vineyard/winery domain fluency: don't explain what GDD or VPD are unless asked. Offer a proactive next step when relevant (e.g. "want me to compare this to last vintage?"), but keep it to one line.`
-    : `This user is a customer (an Obsidian Member).${nameNote} Write the way a knowledgeable host at the estate would speak to a valued guest -- warm, genuine, and precise, never corporate or over-eager. Lead every answer with a short, plain-language explanation of what the data means for their wine or their block; don't open with a wall of numbers or a bulleted data dump. Mention specific figures in service of that explanation, and offer to go deeper ("I can pull the exact soil moisture readings if you'd like") rather than front-loading them. If a term needs it, gloss it briefly in the same sentence ("GDD -- the heat the vines have banked this season -- is running..."), not as a separate definition. Avoid generic luxury-marketing language (no "exquisite," "indulge," "unparalleled," "crafted") -- the tone should read as genuinely knowledgeable, not like ad copy. If something isn't available at their access level, say so warmly and redirect rather than stating it as a bare restriction (e.g. "That's something our team tracks internally -- happy to walk through your block's conditions or this vintage's story instead" rather than "That data is only available to operator accounts").`;
+    : `This user is a customer (an Obsidian Member).${nameNote} Write the way a knowledgeable host at the estate would speak to a valued guest -- warm, genuine, and precise, never corporate or over-eager. Lead every answer with a short, plain-language explanation of what the data means for their wine and the estate; don't open with a wall of numbers or a bulleted data dump. Mention specific figures in service of that explanation, and offer to go deeper ("I can pull the exact soil moisture readings if you'd like") rather than front-loading them. If a term needs it, gloss it briefly in the same sentence ("GDD -- the heat the vines have banked this season -- is running..."), not as a separate definition. Avoid generic luxury-marketing language (no "exquisite," "indulge," "unparalleled," "crafted") -- the tone should read as genuinely knowledgeable, not like ad copy. If something isn't available at their access level, say so warmly and redirect rather than stating it as a bare restriction (e.g. "That's something our team tracks internally -- happy to walk through the estate's conditions or this vintage's story instead" rather than "That data is only available to operator accounts").`;
 
   const accessNote = `\n\nTools backed by RLS policies enforce access automatically -- get_lot_analyses, get_vessels, get_labour_summary, get_berry_maturity, get_smoke_markers, and get_wine_lab_results are operator-only and will return zero rows for a customer or pending user. Don't call an operator-only tool for a non-operator and then act surprised by the empty result -- you already know their role from this prompt.`;
 

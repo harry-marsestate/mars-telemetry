@@ -90,7 +90,7 @@ export function build(currentVintage) {
     return {
       id: p.id, tab: p.tab, section: p.sect, sectionLabel: sectionOf(p.tab, p.sect)?.label ?? p.sect,
       minRole: p.minRole, title: p.title, unit: typeof p.unit === "string" ? p.unit : "",
-      domain: g.domain ?? null, tool: g.tool ?? null, noTool: g.noTool ?? null, what: fill(g.what),
+      scope: g.scope ?? null, domain: g.domain ?? null, tool: g.tool ?? null, noTool: g.noTool ?? null, what: fill(g.what),
       info: typeof p.info === "function" ? call(p.info, fakeTh) : (p.info ?? null),
       provenance: both((c) => (typeof p.sub === "function" ? call(p.sub, c) : p.sub) ?? ""),
     };
@@ -98,7 +98,7 @@ export function build(currentVintage) {
   for (const id of Object.keys(PANEL_GUIDE)) if (!PANELS.some((p) => p.id === id)) throw new Error(`PANEL_GUIDE entry '${id}' matches no panel`);
   const extras = DASHBOARD_EXTRAS.map((e) => ({
     id: e.id, tab: e.tab, section: e.sect, sectionLabel: "Overview", minRole: e.minRole, title: e.title, unit: e.unit,
-    domain: e.domain ?? null, tool: e.tool ?? null, noTool: e.noTool ?? null, what: fill(e.what), info: null,
+    scope: e.scope ?? null, domain: e.domain ?? null, tool: e.tool ?? null, noTool: e.noTool ?? null, what: fill(e.what), info: null,
     provenance: Object.fromEntries(vintages.map((v) => [v, { real: e.provenance, notReal: e.provenance }])),
   }));
   return { firstVintage: FIRST_VINTAGE, currentVintage, vintages, harvestBand: HARVEST_BAND, sections, panels: [...extras, ...panels] };
@@ -112,7 +112,7 @@ export function render(guide) {
 // tests/dashboard-guide.test.mjs fails while this file is stale.
 export type GuidePanel = {
   id: string; tab: "vineyard" | "winery"; section: string; sectionLabel: string; minRole: "all" | "operator";
-  title: string; unit: string; domain: string | null; tool: string | null; noTool: string | null;
+  title: string; unit: string; scope: string | null; domain: string | null; tool: string | null; noTool: string | null;
   what: string; info: string | null; provenance: Record<string, { real: string; notReal: string }>;
 };
 export type GuideSection = { tab: string; id: string; label: string; note: Record<string, { real: string; notReal: string }> };

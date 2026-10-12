@@ -31,10 +31,134 @@ const EXPECTED_TOOLS = [
   'get_smoke_markers', 'get_wine_lab_results',
 ];
 const PRODUCER_LAYERS = { p1_database: ['ingestion', 'database', 'security'], p2_probes: ['sources'], p3_frontend: ['dashboard'] };
-const PRODUCER_NAMES = { p1_database: 'Database checks (P1)', p2_probes: 'Upstream source probes (P2)', p3_frontend: 'Dashboard checks (P3)', p3_backup: 'P3 backup dispatch' };
+const PRODUCER_NAMES = { p1_database: 'Database self-check (P1)', p2_probes: 'Data-source check (P2)', p3_frontend: 'Dashboard test (P3)', p3_backup: 'Dashboard test backup start' };
 const LAYERS = ['sources', 'ingestion', 'database', 'gateway', 'dashboard', 'security'];
 const LAYER_NAMES = { sources: 'Sources', ingestion: 'Ingestion', database: 'Database', gateway: 'Gateway', dashboard: 'Dashboard', security: 'Security' };
 const SEV_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+
+// ---------- plain language ----------
+// The report is read by people who don't remember check IDs or what P1-P4
+// mean, so every name is explained where it appears. Check IDs stay in the
+// report only as a "Technical ID" for looking things up in docs/SECURITY.md.
+const PRODUCER_WHAT = {
+  p1_database: 'the database checks itself: new data arrived, past seasons are unchanged, values are sensible, and access/security settings match the approved setup',
+  p2_probes: 'each outside service the platform relies on (InnoVint, Open-Meteo weather, the AI chat models, Resend email) is contacted to confirm it answers with our key',
+  p3_frontend: 'a robot web browser signs in to the live dashboard as three test users (a staff operator, a customer with all blocks, a customer with only Block 2), opens every panel, and checks each one sees only what they should',
+};
+const LAYER_WHAT = {
+  sources: 'the outside services our data comes from',
+  ingestion: 'the daily jobs that pull new weather, InnoVint and lab data in',
+  database: 'the stored data itself: complete, sensible, and past seasons unchanged',
+  gateway: 'the read-only connection Claude and other AI agents use to look up data',
+  dashboard: 'the website people sign in to',
+  security: 'who can see or change what',
+};
+const TEST_USERS = { operator: 'the staff (operator) test account', customer: 'the customer test account (all blocks)', customer_b2: 'the Block 2-only customer test account' };
+const LAB_PLAIN = { get_berry_maturity: 'berry maturity samples', get_smoke_markers: 'smoke-taint marker samples', get_wine_lab_results: 'wine lab results' };
+// What each health check confirms, as a short sentence.
+const CHECK_PLAIN = [
+  [/^ingestion\.climate\.last_run$/, 'The daily weather import ran successfully in the last 26 hours'],
+  [/^ingestion\.innovint\.last_run$/, 'The daily InnoVint (winery system) import ran successfully in the last 26 hours'],
+  [/^ingestion\.climate\.freshness$/, 'The newest weather reading is less than 26 hours old'],
+  [/^ingestion\.climate\.daily_weather_through$/, 'The daily weather summaries are up to date (through two days ago)'],
+  [/^ingestion\.climate\.current_vintage$/, 'New weather data is filed under the right harvest year, and next year is set up before 1 November'],
+  [/^ingestion\.climate\.model_pinned$/, 'The weather import used the approved weather models'],
+  [/^ingestion\.ets_report\.last_run$/, 'The weekly ETS Labs report import ran in the last 10 days without errors'],
+  [/^ingestion\.ets_report\.quarantine$/, 'No ETS Labs report rows are held back for review'],
+  [/^database\.insights_estate_inputs_estate_wide$/, 'Weather and soil inputs to the Insights panel are recorded estate-wide, not per block'],
+  [/^database\.integrity\.soil_moisture_range$/, 'Every soil moisture reading is between 0 and 100%'],
+  [/^database\.integrity\.gdd_calibrated_2022_2025$/, "Each finished season's growing-degree-day (heat) total is in the normal 3,000-4,400 range"],
+  [/^database\.integrity\.mock_real_precedence$/, 'Where both real and sample data exist, the dashboard shows the real data'],
+  [/^database\.integrity\.daily_weather_pacific_days$/, 'Daily weather is split into days on Pacific time'],
+  [/^database\.integrity\.no_b1_2024_irrigation$/, 'Block 1 has no 2024 irrigation records (none should exist)'],
+  [/^database\.integrity\.sensor_readings_unique$/, 'The database blocks duplicate sensor readings'],
+  [/^database\.integrity\.no_future_real_rows$/, 'No real reading is dated in the future'],
+  [/^database\.integrity\.climate_source_labels$/, 'Weather data is labelled with its true source'],
+  [/^database\.vintage\.current_consistent$/, 'The database, dashboard and gateway agree on the current vintage (harvest year)'],
+  [/^database\.checksum\.winery_closed_vintages$/, "Finished seasons' (2022-2025) winery records (harvest, lab, labour) are unchanged"],
+  [/^database\.checksum\./, "Finished seasons' (2022-2025) sensor and weather data are unchanged"],
+  [/^database\.anomalies\.anchor_/, 'The alert rules still flag a known test day correctly'],
+  [/^database\.vessels\.counts$/, 'Tank and vessel counts look normal'],
+  [/^database\.backup\.retention_decision$/, 'No old backup table is overdue for a keep-or-delete decision'],
+  [/^security\.structure\.daily_derived$/, 'The daily summary table keeps its access settings (a data rebuild can strip them)'],
+  [/^security\.rls\.enabled_on_every_table$/, 'Every table has its row-level access rules switched on'],
+  [/^security\.anon\./, 'Signed-out visitors have no access to any data'],
+  [/^security\.policies\.baseline$/, 'The access rules match the approved set'],
+  [/^security\.functions\.required_present$/, 'The database functions the platform depends on all exist'],
+  [/^security\.definer\.search_path_pinned$/, 'Privileged database functions are protected against hijacking'],
+  [/^security\.mcp_reader\.grants$/, "The gateway's database account can read only what it should"],
+  [/^security\.health_writer\.privileges$/, 'The health-check account can only record results'],
+  [/^security\.no_embedded_keys$/, 'No password or API key is stored in plain text in the database'],
+  [/^security\.pg_net\.queue_not_stale$/, "The database's outgoing web-request queue isn't stuck"],
+  [/^source\.innovint\.api$/, 'The InnoVint winery system answers with our key'],
+  [/^source\.open_meteo\./, "The Open-Meteo weather service returns yesterday's data"],
+  [/^source\.anthropic\.model$/, 'The Anthropic (Claude) chat model is available with our key'],
+  [/^source\.fireworks\.model$/, 'The optional Kimi chat model is available'],
+  [/^source\.resend\.api$/, 'The Resend email service accepts our key'],
+  [/^frontend\.([a-z0-9_]+)\.login$/, (m) => `Signing in to the dashboard as ${TEST_USERS[m[1]] || m[1]}`],
+  [/^frontend\.([a-z0-9_]+)\.panels$/, (m) => `Every dashboard panel loads without errors for ${TEST_USERS[m[1]] || m[1]}`],
+  [/^frontend\.([a-z0-9_]+)\.role_visibility$/, (m) => `Staff-only panels appear only for staff (checked as ${TEST_USERS[m[1]] || m[1]})`],
+  [/^frontend\.([a-z0-9_]+)\.rls_boundary$/, (m) => `${(TEST_USERS[m[1]] || m[1]).replace(/^t/, 'T')} sees only its own blocks' data`],
+  [/^frontend\.([a-z0-9_]+)\.insights_scope$/, (m) => `The Insights panel for ${TEST_USERS[m[1]] || m[1]} covers only its own blocks`],
+  [/^frontend\.current_vintage$/, 'The dashboard shows the right current vintage'],
+  [/^gateway\.current_vintage$/, 'The gateway uses the right current vintage'],
+  [/^frontend\.fidelity\.gdd$/, "The dashboard's growing-degree-day figure matches the gateway's"],
+  [/^frontend\.fidelity\.air_temp_series$/, "The dashboard's air temperature chart matches the gateway's data"],
+  [/^gateway\.tools\.vessels_vs_rest$/, "The gateway's vessel count matches the database"],
+  [/^gateway\.tools\.anomaly_anchor_vs_rest$/, "The gateway's alerts for a known test day match the database"],
+  [/^frontend\.latest\.consistent$/, 'Each dashboard panel\'s "latest" value matches its chart and overview tile'],
+  [/^frontend\.tab_cache$/, 'Switching dashboard tabs reuses already-loaded data correctly'],
+  [/^(frontend\.p3\.schedule_backup|p3_backup)/, 'The backup that starts the dashboard test (P3) when GitHub runs it late'],
+  [/^gateway\.p4\.database_reachable$/, 'The gateway can reach the database'],
+  [/^gateway\.p4\.key_expiry$/, "The gateway access key isn't about to expire"],
+  [/^gateway\.p4\.allowed_tools$/, "The gateway key's allowed tools are as expected"],
+  [/^gateway\.p4\.write_capable_tools$/, "The gateway key can't change any data"],
+  [/^gateway\.p4\.current_vintage$/, 'The gateway and database agree on the current vintage'],
+];
+// Why a problem in each area matters to the business, in one sentence.
+const WHY_PLAIN = [
+  [/^ingestion\./, "If new data stops arriving, the dashboard and Claude's answers go out of date."],
+  [/^(database\.vintage\.|frontend\.current_vintage$|gateway\.current_vintage$|gateway\.p4\.current_vintage$)/, 'If parts of the system disagree on the current harvest year, pages and answers can show the wrong season.'],
+  [/^database\.anomalies\./, 'Vineyard alerts (frost, heat, humidity and so on) could be missed or raised wrongly.'],
+  [/^database\.vessels\.|^spot\.vessels/, 'Tank and vessel information from InnoVint may be incomplete or wrong.'],
+  [/^database\.backup\./, 'Housekeeping only; users are not affected.'],
+  [/^(database\.|spot\.)/, "Wrong or altered data would show wrong numbers on the dashboard and in Claude's answers."],
+  [/^security\.|^frontend\.[a-z0-9_]+\.(rls_boundary|role_visibility|insights_scope)$/, "These settings keep each customer's data private; a problem could let someone see or change data they shouldn't."],
+  [/^source\./, 'If this outside service cannot be reached, the data or feature that depends on it stops updating.'],
+  [/^frontend\.[a-z0-9_]+\.login$/, 'If this is happening to real users too, they could be unable to sign in or reach the dashboard.'],
+  [/^frontend\.[a-z0-9_]+\.panels$/, 'Part of the dashboard may be broken for users.'],
+  [/^(frontend\.fidelity\.|frontend\.latest\.|gateway\.tools\.)/, 'The dashboard and Claude could give different numbers for the same thing.'],
+  [/^frontend\.tab_cache$/, 'The dashboard may show out-of-date figures or load slowly.'],
+  [/^gateway\.p4\.write_capable_tools$|^inventory\.unexpected/, 'Claude must never be able to change data; this would allow it.'],
+  [/^(gateway|inventory|get_system_health|check\.script)/, "Claude's data lookups may fail, so it could not answer questions about the estate."],
+  [/^lab\./, "Lab results on the dashboard and in Claude's answers may be incomplete or wrong."],
+  [/^(p3_backup|frontend\.p3\.)/, 'Without it, the daily dashboard test may not run on days GitHub is late.'],
+];
+const whyPlain = (id) => (WHY_PLAIN.find(([re]) => re.test(id)) || [null, ''])[1];
+const TODO_PLAIN = {
+  CRITICAL: 'Ask Claude to investigate and fix this today; the technical step below is where to start.',
+  HIGH: 'Ask Claude to investigate and fix this today; the technical step below is where to start.',
+  MEDIUM: 'Worth a look this week: ask Claude to check it, starting from the technical step below.',
+  LOW: 'No action needed unless it keeps happening.',
+};
+function checkPlain(id) {
+  for (const [re, d] of CHECK_PLAIN) { const m = re.exec(id); if (m) return typeof d === 'function' ? d(m) : d; }
+  return `Health check ${id}`;
+}
+// Spell out bare "P1".."P4" in text that came from the platform.
+const plainify = (t) => String(t ?? '').replace(/(?<![(\w.-])P([1-4])\b(?![)\w-])/gi, (_, n) =>
+  ({ 1: 'database self-check (P1)', 2: 'data-source check (P2)', 3: 'dashboard test (P3)', 4: 'gateway self-check (P4)' })[n]);
+const STATE_PLAIN = { fail: 'failed', warn: 'warning', error: 'could not run' };
+// A recorded observed/expected value as "key: value; ..." rather than raw JSON.
+function plainValue(v) {
+  if (v == null || v === '') return '(none recorded)';
+  if (typeof v !== 'object') return plainify(v);
+  const one = (x) => x == null ? 'none' : typeof x === 'boolean' ? (x ? 'yes' : 'no') : Array.isArray(x) ? (x.length ? x.map(one).join(', ') : 'none')
+    : typeof x === 'object' ? (Object.keys(x).length ? JSON.stringify(x) : 'none') : String(x);
+  if (Array.isArray(v)) return one(v);
+  const e = Object.entries(v);
+  return e.length ? plainify(e.map(([k, x]) => `${k.replace(/_/g, ' ')}: ${one(x)}`).join('; ')) : '(none recorded)';
+}
 const KNOWN_ISSUES = { 'source.anthropic.model': 'known: Anthropic key pending replacement' };
 // Items that are structurally not checkable; anything else becoming NOT CHECKABLE turns the report YELLOW.
 const EXPECTED_UNCHECKABLE = new Set(['spot.soil_b2']);
@@ -177,6 +301,7 @@ function nextStep(id) {
     [/^database\.integrity\.climate_source_labels$/, 'Relabel per the 2026-09-30 rule: atmospheric = ECMWF IFS, soil = ERA5-Land, no legacy open_meteo_era5/OM-ERA5.'],
     [/^database\.checksum\.(sensor_readings|daily_weather)_closed_vintages$/, 'Closed-vintage (2022-2025) data changed: find what wrote to it. If deliberate, re-baseline with system_health.set_baseline().'],
     [/^database\.checksum\.winery_closed_vintages$/, 'Likely an upstream InnoVint/ETS correction: confirm it upstream, then re-baseline.'],
+    [/^database\.vintage\.current_consistent$/, 'If the dashboard test (P3) did not run in the last day, this clears after its next run. Otherwise compare vintages.is_current, harvest_vintage(now()) and the latest frontend.current_vintage / gateway.current_vintage results.'],
     [/^database\.anomalies\.anchor_/, 'Check recent anomaly_thresholds changes and anomalies_eval() under svc-nightly-checks via RLS.'],
     [/^database\.vessels\.counts$/, 'Check the InnoVint vessel sync; review new placeholder capacities; re-baseline if intended.'],
     [/^database\.backup\.retention_decision$/, 'Decide whether to drop the old table in schema backup (never dropped automatically).'],
@@ -314,7 +439,7 @@ async function main() {
     for (const [id, f] of Object.entries(fails)) {
       if (f.n < 2 || currentProblems.has(id) || stale.has(f.producer) || !producers[f.producer]) continue;
       if (KNOWN_ISSUES[id]) continue; // known issue now passing: stop mentioning it
-      add('LOW', layerOf(f.layer, id), id, `Health check ${id} failed ${f.n} times in the last 7 days but passes now`,
+      add('LOW', layerOf(f.layer, id), id, `Fixed for now, but failed ${f.n} times in the last 7 days: ${checkPlain(id)}`,
         `${f.n} failed runs in 7 days, most recently ${et(f.last)}; passing in run #${producers[f.producer].run_id}`, 'no failures', nextStep(id) + ' Watch for recurrence.');
     }
     for (const [p, cur] of Object.entries(producers)) {
@@ -323,14 +448,14 @@ async function main() {
       const before = i >= 0 ? mine[i + 1] : mine[0];
       const label = PRODUCER_NAMES[p] || p;
       if (!before) { changes.push(`${label}: no earlier run in the last 7 days to compare with`); continue; }
-      const ids = (r) => new Set((r.summary?.problems || []).map((x) => `${x.check_id} (${x.status})`));
-      const a = ids(before), b = new Set((health.producers.find((x) => x.producer === p)?.summary?.problems || []).map((x) => `${x.check_id} (${x.status})`));
+      const ids = (list) => new Set((list || []).map((x) => `${checkPlain(x.check_id)} (${STATE_PLAIN[x.status] || x.status})`));
+      const a = ids(before.summary?.problems), b = ids(health.producers.find((x) => x.producer === p)?.summary?.problems);
       const added = [...b].filter((x) => !a.has(x)), gone = [...a].filter((x) => !b.has(x));
       const parts = [];
-      if (before.status !== cur.status) parts.push(`status ${before.status} -> ${cur.status}`);
-      if (added.length) parts.push(`new: ${added.join(', ')}`);
-      if (gone.length) parts.push(`resolved: ${gone.join(', ')}`);
-      changes.push(`${label}: ${parts.length ? parts.join('; ') : 'no change'} (run #${cur.run_id} vs #${before.run_id} at ${et(before.started_at)})`);
+      if (before.status !== cur.status) parts.push(`overall result went from ${before.status} to ${cur.status}`);
+      if (added.length) parts.push(`new problem${added.length > 1 ? 's' : ''}: ${added.join('; ')}`);
+      if (gone.length) parts.push(`fixed since last time: ${gone.join('; ')}`);
+      changes.push(`${label}: ${parts.length ? parts.join('. ') : 'no change'} (compared with its previous run, ${et(before.started_at)})`);
     }
   }
 
@@ -357,8 +482,8 @@ async function main() {
     obs.spot.soil_b2 = { total: s1.data?.total_count ?? null, non_null: vals.length, min: vals.length ? Math.min(...vals) : null, max: vals.length ? Math.max(...vals) : null };
     let checkVals = vals, where = 'B2';
     if (!vals.length) {
-      nc('spot.soil_b2', `get_series soil_moisture B2 2024-07-01..08 returned ${s1.data?.total_count ?? 0} buckets, all empty; real soil data (ERA5-Land) is recorded estate-wide, not per block`,
-        'B2 soil moisture (soil data is recorded estate-wide, not per block)');
+      nc('spot.soil_b2', `The weather service (ERA5-Land) provides soil moisture for the whole estate, not per block, so all ${s1.data?.total_count ?? 0} days came back empty for Block 2; the estate-wide values were checked instead`,
+        'Block 2 soil moisture (soil data is recorded for the whole estate, not per block)');
       const s2 = await tool('get_series', { ...soilArgs, block: undefined });
       if (s2.ok) {
         checkVals = (rowsOf(s2.data) || []).map((r) => r.v).filter((v) => v != null);
@@ -432,7 +557,7 @@ async function main() {
     const rows = r.ok ? rowsOf(r.data) : null;
     if (!r.ok || !rows) {
       nc(`lab.${name}`, r.ok ? 'response was not a row list' : `${name} failed: ${r.failure}`, `${name} (no usable rows)`);
-      add('MEDIUM', 'gateway', `lab.${name}`, `${name} did not return usable rows`, r.ok ? 'unparseable response' : r.failure, 'a JSON row list', 'Check the mcp Edge Function logs.');
+      add('MEDIUM', 'gateway', `lab.${name}`, `Lab data (${LAB_PLAIN[name]}) could not be read through the gateway`, r.ok ? 'unparseable response' : r.failure, 'a JSON row list', 'Check the mcp Edge Function logs.');
       continue;
     }
     const fields = [...new Set(rows.flatMap((x) => Object.keys(x)))].sort();
@@ -445,21 +570,21 @@ async function main() {
       if (name === 'get_wine_lab_results' && BOUNDS[x.analysis_code]) { const b = BOUNDS[x.analysis_code]; check(b[2], x.result_numeric, b[0], b[1], ref); }
       if (name === 'get_smoke_markers' && typeof x.result_numeric === 'number' && x.result_numeric < 0) oob.push(`${ref}: ${x.analysis_code}=${x.result_numeric} (negative)`);
     }
-    if (oob.length) issues.push(['values outside sanity bounds', `${oob.length}: ${oob.slice(0, 5).join('; ')}`, 'values inside the sanity bounds']);
+    if (oob.length) issues.push(['some values are outside the normal range', `${oob.length}: ${oob.slice(0, 5).join('; ')}`, 'values inside the sanity bounds']);
     const fut = rows.filter((x) => (x.collected_on && String(x.collected_on).slice(0, 10) > tomorrow) || (x.analyzed_at && new Date(x.analyzed_at) > new Date(now.getTime() + 86400_000)));
-    if (fut.length) issues.push(['future-dated rows', `${fut.length} row(s), e.g. ${fut.slice(0, 3).map((x) => x.collected_on || x.analyzed_at).join(', ')}`, 'no dates after today']);
+    if (fut.length) issues.push(['some samples are dated in the future', `${fut.length} row(s), e.g. ${fut.slice(0, 3).map((x) => x.collected_on || x.analyzed_at).join(', ')}`, 'no dates after today']);
     const seen = new Set(); let dups = 0;
     for (const x of rows) { const k = JSON.stringify(Object.keys(x).sort().map((f) => [f, x[f]])); if (seen.has(k)) dups++; seen.add(k); }
-    if (dups) issues.push(['duplicate rows', `${dups} exact duplicate row(s)`, 'no exact duplicates']);
+    if (dups) issues.push(['some samples appear twice', `${dups} exact duplicate row(s)`, 'no exact duplicates']);
     const allNull = rows.length ? fields.filter((f) => rows.every((x) => x[f] == null)) : [];
-    if (allNull.length) issues.push(['field empty on every row', allNull.join(', '), 'each field populated on at least one row']);
+    if (allNull.length) issues.push(['some fields are empty on every sample', allNull.join(', '), 'each field populated on at least one row']);
     const pf = LAB_FIELDS[name];
     const added = fields.filter((f) => !pf.includes(f)), removed = pf.filter((f) => !fields.includes(f));
     if (added.length || removed.length) {
-      issues.push(['schema drift', `${added.length ? 'added ' + added.join(', ') : ''}${added.length && removed.length ? '; ' : ''}${removed.length ? 'removed ' + removed.join(', ') : ''}`, `the ${pf.length} fields recorded on 2026-09-30`]);
-      changes.push(`${name}: fields changed (${added.length} added, ${removed.length} removed)`);
+      issues.push(['the set of data fields changed (schema drift), which can break anything that reads this data', `${added.length ? 'new fields: ' + added.join(', ') : ''}${added.length && removed.length ? '; ' : ''}${removed.length ? 'missing fields: ' + removed.join(', ') : ''}`, `the ${pf.length} known fields`]);
+      changes.push(`Lab data (${LAB_PLAIN[name]}): data fields changed (${added.length} added, ${removed.length} removed)`);
     }
-    for (const [t, o, e] of issues) add('MEDIUM', 'database', `lab.${name}`, `Lab data (${name}): ${t}`, o, e, 'Compare with the ETS Labs source CSV / InnoVint record and correct the ingest if wrong.');
+    for (const [t, o, e] of issues) add('MEDIUM', 'database', `lab.${name}`, `Lab data (${LAB_PLAIN[name]}): ${t}`, o, e, 'Compare with the ETS Labs report / InnoVint record and correct the import if it is wrong; if the change was deliberate, update the expected list in this check.');
     obs.lab[name] = { rows: rows.length, issues: issues.length, fields };
     if (name === 'get_wine_lab_results' && rows.length >= 300) nc('lab.get_wine_lab_results.complete', 'returned the 300-row maximum, so later rows were not checked', 'wine lab rows beyond the first 300');
     if (name === 'get_smoke_markers' && currentVintage != null) {
@@ -490,8 +615,8 @@ function healthProblem(pr, producer) {
   else return;
   if (/^frontend\.[a-z0-9_]+\.login$/.test(id)) return loginProblem(pr, layer);
   const known = KNOWN_ISSUES[id];
-  add(sev, layer, id, `Health check ${id} ${st === 'fail' ? 'failed' : `returned "${st}"`}${pr.detail ? `: ${clip(firstLine(pr.detail), 200)}` : ''}${known ? ` (${known})` : ''}`,
-    clip(fmt(pr.observed ?? '(none recorded)'), 600), clip(fmt(pr.expected ?? '(none recorded)'), 600), nextStep(id));
+  add(sev, layer, id, `${st === 'fail' ? 'Failed' : st === 'warn' ? 'Warning' : 'Could not run'}: ${checkPlain(id)}${pr.detail ? ` (${clip(plainify(firstLine(pr.detail)), 200)})` : ''}${known ? ` (${known})` : ''}`,
+    clip(plainValue(pr.observed), 600), clip(plainValue(pr.expected), 600), nextStep(id));
 }
 
 // P3 signs each synthetic user in through the real form in a headless browser.
@@ -504,13 +629,13 @@ function healthProblem(pr, producer) {
 // Runs from before that diagnosis existed can't tell these apart: MEDIUM.
 function loginProblem(pr, layer) {
   const id = pr.check_id, o = (pr.observed && typeof pr.observed === 'object') ? pr.observed : {};
-  const who = o.user || id.split('.')[1];
+  const who = TEST_USERS[o.user || id.split('.')[1]] || o.user || id.split('.')[1];
   const diag = (d) => [d.screen && `screen: ${d.screen}`, d.session && `session: ${d.session}`, d.role_probe && `database: ${d.role_probe}`,
     d.pending_requests?.length && `open requests: ${d.pending_requests.slice(0, 3).join(', ')}`].filter(Boolean).join('; ');
-  const step = 'See the P3 GitHub Actions run log: the "diagnosis" line shows which dashboard sign-in step stalled.';
+  const step = 'Open the latest "nightly-health-p3" run in GitHub Actions: its "diagnosis" line shows which sign-in step stalled.';
   const tag = (short) => Object.assign(findings[findings.length - 1], { short, who });
   if (pr.status === 'warn') {
-    add('LOW', layer, id, `Dashboard test for ${who}: signed in, but the page needed a reload to appear`,
+    add('LOW', layer, id, `Dashboard test (P3), ${who}: signed in fine, but the page needed a reload to appear`,
       clip(diag(o.first_attempt || {}) || 'recovered after one reload', 400), 'dashboard within 60s of sign-in', step);
     tag('the dashboard test needed a page reload after sign-in');
     return;
@@ -520,15 +645,15 @@ function loginProblem(pr, layer) {
   const dbOk = /^ok \(/.test(o.role_probe || '');
   const authBroken = !!o.auth_error || o.session === 'no session' || (signedIn && o.role_probe && !dbOk);
   if (authBroken) {
-    add('HIGH', layer, id, `Dashboard sign-in failed for ${who}${o.auth_error ? `: ${clip(o.auth_error, 120)}` : ''}`,
+    add('HIGH', layer, id, `Dashboard test (P3): signing in failed for ${who}${o.auth_error ? `: ${clip(o.auth_error, 120)}` : ''}`,
       clip(diag(o), 400), 'signed in, dashboard shown', "Check the synthetic user's GitHub secret password and Supabase Auth; see the P3 Actions run log.");
     tag('dashboard sign-in failed');
   } else if (signedIn) {
-    add('MEDIUM', layer, id, `Dashboard test for ${who}: signed in and the database answered, but the page did not finish loading in the test browser, even after a reload`,
+    add('MEDIUM', layer, id, `Dashboard test (P3), ${who}: signed in and the database answered, but the page did not finish loading in the robot browser, even after a reload`,
       clip(diag(o), 400), 'dashboard within 60s of sign-in', step);
     tag('the dashboard page stalled in the test browser after sign-in (sign-in itself worked)');
   } else {
-    add('MEDIUM', layer, id, `Dashboard test for ${who}: the dashboard did not appear within 60s of sign-in (cause not recorded by this P3 version)`,
+    add('MEDIUM', layer, id, `Dashboard test (P3), ${who}: the dashboard did not appear within 60 seconds of signing in (cause not recorded)`,
       clip(firstLine(pr.detail || ''), 200), 'dashboard within 60s of sign-in',
       'Usually a stalled page load in the test browser rather than a sign-in failure; if it repeats, sign in as a real user to confirm, and see the P3 Actions run log.');
     tag('the dashboard test page did not appear after sign-in');
@@ -544,7 +669,7 @@ function summarize(list) {
     if (!byShort.has(f.short)) { byShort.set(f.short, []); out.push(f.short); }
     byShort.get(f.short).push(f.who);
   }
-  const text = out.map((t) => byShort.has(t) ? `${t} (${byShort.get(t).length === 1 ? 'test user' : `${byShort.get(t).length} test users`}: ${byShort.get(t).join(', ')})` : t);
+  const text = out.map((t) => byShort.has(t) ? `${t} (${byShort.get(t).join('; ')})` : t);
   return `${text.slice(0, 3).join('; ')}${text.length > 3 ? '; ...' : ''}`;
 }
 
@@ -603,9 +728,9 @@ function build() {
     else ex.push('Everything looks healthy: no issues found.');
     const all = Object.values(producers).reduce((m, p) => { for (const [k, v] of Object.entries(p.counts)) m[k] = (m[k] || 0) + v; return m; }, {});
     const total = Object.values(all).reduce((a, b) => a + b, 0);
-    if (health) ex.push(`The platform's own nightly health checks report "${overall}": ${all.pass || 0} of ${total} checks passed on their latest runs, and ${stale.size ? `${plural(stale.size, 'producer')} did not run on schedule (${[...stale].map((p) => PRODUCER_NAMES[p] || p).join(', ')})` : 'all three producers ran on schedule'}.`);
+    if (health) ex.push(`The platform's own early-morning self-checks (the database self-check, the data-source check and the robot dashboard test) passed ${all.pass || 0} of ${total} checks; their overall result is "${overall}", and ${stale.size ? `${plural(stale.size, 'of them', 'of them')} did not run on schedule (${[...stale].map((p) => PRODUCER_NAMES[p] || p).join(', ')})` : 'all three ran on schedule'}.`);
     const spotBad = findings.filter((f) => /^(spot\.|lab\.|inventory\.|get_lot|get_labour)/.test(f.check_id) || /disagrees/.test(f.title));
-    ex.push(`The independent checks (tool inventory, GDD, anomaly alerts, vessel counts, lab data) ${spotBad.length ? `found ${plural(spotBad.length, 'discrepancy', 'discrepancies')}` : 'all matched expectations'}.`);
+    ex.push(`This report's own spot checks of the data (gateway tools, season heat totals, alert rules, tank counts, lab data) ${spotBad.length ? `found ${plural(spotBad.length, 'discrepancy', 'discrepancies')}` : 'all matched expectations'}.`);
     const expectedNC = notChecked.filter((x) => EXPECTED_UNCHECKABLE.has(x.id));
     if (expectedNC.length) ex.push(`As usual, ${expectedNC.map((x) => x.short).join('; ')} could not be checked.`);
   }
@@ -613,10 +738,11 @@ function build() {
 
   // SUMMARY
   sections.push({ title: 'SUMMARY', items: [
-    { text: `Overall status: ${status}${n && status !== 'GREEN' ? ` (${plural(n, 'issue')})` : ''}` },
+    { text: `Overall status: ${status}${n && status !== 'GREEN' ? ` (${plural(n, 'issue')})` : ''} - ${{ RED: 'something needs attention now (you are emailed)', YELLOW: 'nothing urgent; items worth knowing about', GREEN: 'all clear' }[status]}` },
     { text: `Findings: ${findings.length ? Object.entries(findings.reduce((m, f) => ((m[f.severity] = (m[f.severity] || 0) + 1), m), {})).sort((a, b) => SEV_ORDER[a[0]] - SEV_ORDER[b[0]]).map(([k, c]) => `${c} ${k}`).join(', ') : 'none'}` },
-    { text: `Platform health rollup: ${overall ?? 'unknown'}` },
-    { text: `Not checkable: ${notChecked.length ? notChecked.length : 'none'}` },
+    { text: `Severity levels: CRITICAL or HIGH = broken or at risk now (makes the report RED and sends an email); MEDIUM = look at it soon; LOW = worth knowing, no action needed yet` },
+    { text: `Platform's own overall verdict: ${overall ?? 'unknown'} (pass, warn or fail across its self-checks)${overall === 'warn' && obs.p3_backup?.length && Object.values(producers).every((p) => p.status === 'pass') ? '; the "warn" is only the routine note that the dashboard test was started by its backup trigger' : ''}` },
+    { text: `Could not be checked: ${notChecked.length ? notChecked.length : 'none'}` },
     { text: `Report run: ${et(now.toISOString())}` },
   ] });
 
@@ -629,48 +755,49 @@ function build() {
     const ncl = notChecked.find((x) => x.id === `layer.${l}`);
     const st = ncl ? 'NOT CHECKED' : lf.length ? lf[0].severity : 'OK';
     let detail;
-    if (l === 'gateway') detail = health ? `gateway self-check and this report's direct checks, ${et(health.generated_at)}` : 'gateway unavailable';
+    if (l === 'gateway') detail = health ? `Checked by the gateway's own self-check (P4) and this report's spot checks, ${et(health.generated_at)}` : 'gateway unavailable';
     else {
       const p = producers[layerInfo[l][0]];
-      detail = p ? `${PRODUCER_NAMES[layerInfo[l][0]]}, last run ${et(p.finished_at || p.started_at)}; ${countsText(p.counts)}${l !== 'sources' && l !== 'dashboard' ? ' (shared across ingestion, database and security)' : ''}` : 'no run reported';
+      detail = p ? `Checked by the ${PRODUCER_NAMES[layerInfo[l][0]].replace(/^D/, 'd')}, last run ${et(p.finished_at || p.started_at)}: ${countsText(p.counts)}${l !== 'sources' && l !== 'dashboard' ? ' (one run covers ingestion, database and security)' : ''}` : 'no run reported';
     }
-    const sub = [detail + (lf.length ? `; ${plural(lf.length, 'finding')} below` : '')];
+    const sub = [`Covers: ${LAYER_WHAT[l]}`, detail + (lf.length ? `; ${plural(lf.length, 'finding')} below` : '')];
     if (l === 'dashboard' && obs.p3_backup?.length && !lf.some((f) => f.check_id === 'p3_backup.dispatch'))
-      sub.push(`Started by the 12:35 UTC backup dispatch (GitHub ran its 12:17 schedule late, which is normal); not a problem`);
+      sub.push(`The dashboard test was started by its backup trigger because GitHub ran its own schedule late, which is normal; not a problem`);
     return { text: `${LAYER_NAMES[l]}: ${st}`, sub };
   });
   sections.push({ title: 'LAYER STATUS', items: layerItems });
 
   // FINDINGS
   sections.push({ title: 'FINDINGS', items: findings.length ? findings.map((f) => ({
-    text: `[${f.severity}] ${LAYER_NAMES[f.layer] || f.layer}: ${f.title}`,
-    sub: [`Check: ${f.check_id}`, `Observed: ${f.observed}`, `Expected: ${f.expected}`, `Next step: ${f.next}`],
+    text: `[${f.severity}] ${LAYER_NAMES[f.layer] || f.layer} - ${f.title}`,
+    sub: [`What was found: ${f.observed}`, `What was expected: ${f.expected}`, whyPlain(f.check_id) && `Why it matters: ${whyPlain(f.check_id)}`,
+      `What to do: ${TODO_PLAIN[f.severity]}`, `Technical next step: ${plainify(f.next)}`, `Technical ID: ${f.check_id}`].filter(Boolean),
   })) : [{ text: 'None.' }] });
 
   // INDEPENDENT CHECKS
   const s = obs.spot, ic = [];
-  if (obs.tools) ic.push({ text: `Tool inventory: ${obs.tools.length} tools listed; ${obs.missing.length ? `missing ${obs.missing.join(', ')}` : 'all 12 expected read-only tools present'}${obs.unexpected.length ? `; unexpected ${obs.unexpected.join(', ')}` : ', nothing unexpected'}` });
-  if (s.soil_b2) ic.push({ text: s.soil_b2.non_null ? `Soil moisture, B2, 1-8 Jul 2024: ${s.soil_b2.min}-${s.soil_b2.max}% (expected 0-100%)`
-    : `Soil moisture, B2, 1-8 Jul 2024: no values (soil is recorded estate-wide)${s.soil_estate ? `; estate-wide ${s.soil_estate.min}-${s.soil_estate.max}% across ${s.soil_estate.non_null} days, within 0-100%` : ''}` });
-  if (s.gdd_2024) ic.push({ text: `2024 growing degree days (calibrated, final): ${s.gdd_2024.value.toLocaleString('en-US')} on ${s.gdd_2024.day} (expected 3,000-4,400, about 4,058)` });
-  for (const k of Object.keys(s).filter((k) => k.startsWith('anomalies_'))) ic.push({ text: `Anomaly alerts as of ${k.slice(10)}: ${s[k].total} (expected ${s[k].want}) - ${s[k].rules.join(', ')}` });
-  if (s.vessels) ic.push({ text: `Vessels: ${s.vessels.total} total (expected 241), ${s.vessels.active} active, ${s.vessels.capacity_suspect} with placeholder capacity (baseline ${s.vessels.base_suspect})` });
-  const labNames = { get_berry_maturity: 'berry maturity', get_smoke_markers: 'smoke marker', get_wine_lab_results: 'wine lab' };
+  if (obs.tools) ic.push({ text: `Gateway tools (what Claude can look up): ${obs.tools.length} offered; ${obs.missing.length ? `missing ${obs.missing.join(', ')}` : 'all 12 expected read-only tools present'}${obs.unexpected.length ? `; unexpected ${obs.unexpected.join(', ')}` : ', and none that could change data'}` });
+  if (s.soil_b2) ic.push({ text: s.soil_b2.non_null ? `Soil moisture, Block 2, 1-8 Jul 2024: ${s.soil_b2.min}-${s.soil_b2.max}% (expected 0-100%)`
+    : `Soil moisture, 1-8 Jul 2024: no Block 2 values (soil is recorded for the whole estate)${s.soil_estate ? `; estate-wide ${s.soil_estate.min}-${s.soil_estate.max}% across ${s.soil_estate.non_null} days, within the possible 0-100%` : ''}` });
+  if (s.gdd_2024) ic.push({ text: `2024 growing degree days (the season's total heat, calibrated, final): ${s.gdd_2024.value.toLocaleString('en-US')} on ${s.gdd_2024.day} (expected 3,000-4,400, about 4,058)` });
+  for (const k of Object.keys(s).filter((k) => k.startsWith('anomalies_'))) ic.push({ text: `Vineyard alerts on a known test day (${k.slice(10)}): ${s[k].total} (expected ${s[k].want}) - ${s[k].rules.map((r) => r.replace(/_/g, ' ')).join(', ')}` });
+  if (s.vessels) ic.push({ text: `Tanks and vessels (from InnoVint): ${s.vessels.total} total (expected 241), ${s.vessels.active} in use, ${s.vessels.capacity_suspect} still showing the 500,000-gallon placeholder capacity (was ${s.vessels.base_suspect})` });
+  const labNames = { get_berry_maturity: 'berry maturity', get_smoke_markers: 'smoke marker', get_wine_lab_results: 'wine lab result' };
   if (Object.keys(obs.lab).length) {
-    ic.push({ text: `Lab data: ${Object.entries(labNames).filter(([k]) => obs.lab[k]).map(([k, v]) => `${obs.lab[k].rows} ${v} rows`).join(', ')}`, sub: [
-      Object.values(obs.lab).some((x) => x.issues) ? 'Some problems found (see Findings)' : 'No out-of-range values, future dates, duplicates, empty fields or schema changes',
+    ic.push({ text: `ETS Labs data: ${Object.entries(labNames).filter(([k]) => obs.lab[k]).map(([k, v]) => `${obs.lab[k].rows} ${v} samples`).join(', ')}`, sub: [
+      Object.values(obs.lab).some((x) => x.issues) ? 'Some problems found (see Findings)' : 'No out-of-range values, future dates, duplicates, empty fields or changed data fields',
       obs.lab.smoke_current != null ? (obs.lab.smoke_current ? `${obs.lab.smoke_current} smoke-marker value(s) above zero in the ${currentVintage} vintage` : `No smoke markers detected in the ${currentVintage} vintage`) : null,
     ].filter(Boolean) });
   }
-  if (Object.keys(obs.ops).length) ic.push({ text: `Lot analyses and labour summary: ${Object.entries(obs.ops).map(([k, ok]) => `${k.replace('get_', '').replace('_', ' ')} ${ok ? 'returned data' : 'FAILED'}`).join('; ')}` });
-  if (obs.key) ic.push({ text: `Gateway key ${obs.key.prefix}: valid until ${String(obs.key.expires_at).slice(0, 10)} (information only)` });
-  sections.push({ title: 'INDEPENDENT CHECKS', paras: ['Direct checks made by this report through the gateway, alongside the platform\'s own health checks.'], items: ic.length ? ic : [{ text: 'None could run.' }] });
+  if (Object.keys(obs.ops).length) ic.push({ text: `InnoVint lot analyses and labour summary: ${Object.entries(obs.ops).map(([k, ok]) => `${k.replace('get_', '').replace('_', ' ')} ${ok ? 'returned data' : 'FAILED'}`).join('; ')}` });
+  if (obs.key) ic.push({ text: `Gateway access key ${obs.key.prefix}: valid until ${String(obs.key.expires_at).slice(0, 10)} (information only)` });
+  sections.push({ title: 'INDEPENDENT CHECKS', paras: ['Spot checks this report makes itself through the gateway (the read-only connection Claude uses), as a second opinion alongside the platform\'s own self-checks.'], items: ic.length ? ic : [{ text: 'None could run.' }] });
 
   // NOT CHECKED
-  sections.push({ title: 'NOT CHECKED', items: notChecked.length ? notChecked.map((x) => ({ text: `${x.short}${EXPECTED_UNCHECKABLE.has(x.id) ? ' - expected' : ''}`, sub: [x.reason] })) : [{ text: 'Nothing.' }] });
+  sections.push({ title: 'NOT CHECKED', items: notChecked.length ? notChecked.map((x) => ({ text: `${x.short}${EXPECTED_UNCHECKABLE.has(x.id) ? ' - expected, not a problem' : ''}`, sub: [x.reason] })) : [{ text: 'Nothing.' }] });
 
   // CHANGES
-  sections.push({ title: 'CHANGES SINCE LAST RUN', paras: ["Compared with each health producer's previous run, from the platform's own run history."], items: changes.length ? changes.map((c) => ({ text: c })) : [{ text: 'No history available to compare.' }] });
+  sections.push({ title: 'CHANGES SINCE LAST RUN', paras: ["Each of the platform's self-checks compared with its own previous run."], items: changes.length ? changes.map((c) => ({ text: c })) : [{ text: 'No history available to compare.' }] });
 
   const baselines = {
     v: 2, at: now.toISOString(), status, overall, tools: obs.tools || [],
@@ -692,6 +819,7 @@ function renderText({ subject, sections, baselinesLine }) {
     }
     L.push('');
   }
+  L.push('TECHNICAL DATA (used to compare future runs; safe to ignore)');
   L.push(baselinesLine);
   return L.join('\n');
 }
@@ -714,7 +842,8 @@ function renderHtml({ subject, status, sections, baselinesLine }) {
       h.push('</ul>');
     }
   }
-  h.push(`<p style="margin-top:20px;font-family:Menlo,Consolas,monospace;font-size:10px;color:#8c959f;word-break:break-all">${e(baselinesLine)}</p></div>`);
+  h.push(`<p style="margin-top:20px;font-size:11px;color:#8c959f">Technical data (used to compare future runs; safe to ignore)</p>`);
+  h.push(`<p style="margin-top:4px;font-family:Menlo,Consolas,monospace;font-size:10px;color:#8c959f;word-break:break-all">${e(baselinesLine)}</p></div>`);
   return h.join('\n');
 }
 

@@ -178,7 +178,11 @@ test('page context: built only from app state, attached visibly, clearable', asy
   type(t.cwView, 'Is it dry?');
   t.cwView.send.onclick();
   await tick();
-  assert.equal(calls[0].opts.body.messages.at(-1).content, '[Viewing: Vineyard Data · block B2 · vintage 2026]\nIs it dry?');
+  // The question goes as typed; the context travels as a structured object
+  // the server re-validates (dashboard-context.ts), never as text in the turn.
+  assert.equal(calls[0].opts.body.messages.at(-1).content, 'Is it dry?');
+  assert.equal(JSON.stringify(calls[0].opts.body.context),
+    JSON.stringify({ tab: 'vineyard', blocks: ['B2'], vintages: [2026], panel: null, range: null, scrollDays: 0, surface: 'widget', lastViewed: false }));
   assert.match(t.cwView.log.innerHTML, /class="msg-ctx">Vineyard Data · block B2 · vintage 2026</);
 
   t.ctxMode = 'none';
@@ -242,13 +246,14 @@ test('Retry re-sends the same question and context in place of the failure', asy
   } });
   const t = h.ctx.__t;
   t.chatSyncViews();
-  await t.ask('retry me', { ctx: { label: 'Vineyard Data · all blocks', panelId: null } });
+  await t.ask('retry me', { ctx: { label: 'Vineyard Data · all blocks', panelId: null, wire: { tab: 'vineyard' } } });
   const failed = t.msgs.at(-1);
   assert.equal(failed.state, 'error');
   clickOn(t, t.views[0], 'retry', failed);
   await tick();
   assert.equal(h.calls.length, 2);
-  assert.equal(h.calls[1].opts.body.messages.at(-1).content, '[Viewing: Vineyard Data · all blocks]\nretry me');
+  assert.equal(h.calls[1].opts.body.messages.at(-1).content, 'retry me');
+  assert.equal(h.calls[1].opts.body.context.tab, 'vineyard', 'same context on retry');
   assert.equal(t.msgs.filter((m) => m.who === 'u').length, 1, 'the failed attempt is replaced, not duplicated');
 });
 
@@ -381,4 +386,35 @@ test('AI attribution: replies, header, launcher and the note under the input', a
   assert.match(HTML, /<div class="chat-note">AI-generated answers from Mars Estate&rsquo;s live data &middot; check anything important against the dashboard<\/div>/, 'same wording on the Chat tab');
   assert.match($('#cw-launch').getAttribute('aria-label'), /AI assistant/);
   assert.match(HTML, /class="cw-label" id="cw-label" aria-hidden="true"><b>Ask Mars Telemetry AI<\/b>/);
+});
+
+test("history keeps the server's copy of the question turn (with the validated context)", async () => {
+  const { t, last } = setup();
+  t.cwOpenWin();
+  t.ask('Is it dry?', { surface: 'widget', ctx: t.cwContextForSend() });
+  await tick();
+  const turn = { role: 'user', content: [{ type: 'text', text: 'Is it dry?' }, { type: 'text', text: '<dashboard_context>server text</dashboard_context>' }] };
+  last().push({ type: 'done', appended: [{ role: 'assistant', content: 'Yes.' }], user_turn: turn }); last().end();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(JSON.stringify(t.history[0]), JSON.stringify(turn));
+  // A malformed user_turn is ignored: our own copy is kept.
+  t.ask('again', { surface: 'widget' }); await tick();
+  last().push({ type: 'done', appended: [{ role: 'assistant', content: 'ok' }], user_turn: { role: 'assistant', content: 'x' } }); last().end();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(t.history[2].content, 'again');
+});
+
+test('the Chat tab sends the last-viewed data tab, labelled as such', async () => {
+  const { t, state, calls } = setup({ role: 'customer' });
+  state.lastDataTab = 'vineyard';
+  state.tab = 'chat'; t.chatSyncViews();
+  t.views[0].input.value = 'How is the season going?'; t.views[0].input.listeners.input.forEach((f) => f());
+  t.views[0].send.onclick();
+  await tick();
+  const body = calls[0].opts.body;
+  assert.equal(body.context.lastViewed, true);
+  assert.equal(body.context.surface, 'tab');
+  assert.equal(body.context.tab, 'vineyard');
+  assert.equal(body.context.panel, null);
+  assert.match(t.msgs.find((m) => m.who === 'u').ctx, /^Last viewed: Vineyard Data/);
 });

@@ -9031,3 +9031,249 @@ recorded in-app chat use: the function logs token counts only.
 3. Deploy the frontend.
 4. Apply `20261012120000_chat_events.sql`, run `check_policy_drift.py`, and
    only then set `CHAT_EVENTS_ENABLED = true` in a follow-up commit.
+
+## Dashboard guide for the chat (2026-10-12)
+
+**Problem.** Asked from the Vineyard tab "what's this solar insolation chart
+that i'm looking at saying? what does it mean?", the chat said it had no
+solar tool and that the chart came "from a source outside what I have
+access to". The model was told nothing about the dashboard:
+- no panel list and no provenance;
+- the Chat tab sent no context;
+- the `get_series` description called model output and simulated rows "real
+  IoT sensor readings".
+
+The deployed `chat` function was byte-identical to main (downloaded and
+diffed), so this was not caused by the launcher branch. Stacked on the
+floating chat launcher PR.
+
+### Where each series really comes from (verified 2026-10-12)
+
+Read-only database check: 11 SELECTs in two READ ONLY transactions, both
+rolled back.
+
+- **Air temperature, humidity, precipitation:** Open-Meteo ECMWF IFS model,
+  estate-wide, current to the hour.
+- **Soil moisture and soil temperature:** Open-Meteo ERA5-Land modelled
+  surface soil (0–7 cm), **estate-wide**, published about 5–6 days late.
+  The only per-block soil rows are `soil_probe` seed data ending
+  2026-07-28 (the demo clock).
+- **GDD, DTR, VPD:** derived from the ECMWF temperature and humidity.
+  **ET0 is Hargreaves from air temperature only, with a fixed radiation
+  term.** The live `daily_derived` view uses no wind, humidity or solar,
+  which corrects this file's earlier "ET0 depends on wind and solar" notes
+  (the "Real humidity data (pending)" section). `metric_derivation`
+  (et0 ← air_temp) was right.
+- **Wind speed, wind direction, UV:** only `weather_station` seed rows
+  exist, for every vintage, i.e. simulated. ECMWF model solar is stored for
+  2022–2025 only; 2026 solar is seed. The Solar and Wind panels draw
+  browser-generated values and read none of these rows.
+- **Cellar:** simulated building sensors. **Irrigation:** farm records for
+  2023/2024 (2025 annual totals only); simulated flow-meter values otherwise.
+
+**Soil "stops after 6 Oct": not an outage.** `ingest-climate-2026` ran
+successfully every day (cron and `system_health.ingestion_runs`, 1,482 rows
+per run). ERA5-Land simply trails the ECMWF variables by about 5–6 days, as
+already documented.
+
+**Why per-block soil (B2) returned nothing:** `series_bucketed` prefers real
+rows. A real estate-level row exists for the vintage, so B2's seed probe
+rows are excluded, and no real B2 rows exist. Every bucket is empty, and the
+model then guessed block ids "B1–B6".
+
+### Labels changed (dashboard and chat now say the same thing)
+
+| Where | Before | After |
+|---|---|---|
+| Soil & water section note | `Vineyard sensors` | real: `Open-Meteo models (ERA5-Land soil, ECMWF IFS weather) · estate-wide, not on-site sensors`; otherwise `Simulated soil probes · weather from the Open-Meteo ECMWF IFS model` |
+| Soil moisture/temp label (real vintages) | `Open-Meteo · ERA5-Land reanalysis, surface 0-7cm` | `Open-Meteo · ERA5-Land model (reanalysis), surface 0–7 cm · estate-wide, not per block` |
+| Cellar section note | `Cellar HVAC sensors` | `Simulated building sensors · no real cellar feed yet` |
+| Cellar at a glance note | `Live building sensors / updates instantly` | `Simulated building sensors / no real cellar feed yet` |
+| Irrigation volume label (no farm records) | `Regional weather data (Howell Mountain) · on-site sensors pending` (kind `weather`) | `Simulated flow-meter reading · no farm irrigation records for this vintage` (new kind `simulated`) |
+| ET0 label | `Derived metric · from temperature, humidity, wind, and solar radiation` | real: `Estimated · Hargreaves formula from Open-Meteo · ECMWF IFS model air temperature only (no wind, humidity or solar input)`; otherwise `Estimated · Hargreaves formula from simulated air temperature only` |
+| Solar subtitle | `… · measured against clear-sky expectation` | `… · compared with a clear-sky curve` |
+| Solar chart legend | `Measured` | `Simulated` |
+
+What the Solar and Wind panels plot is unchanged. **ET0 deviates from the
+brief.** The brief said ET0 "must say wind is simulated", but ET0 takes no
+wind input at all, so the label says that instead. The brief's premise came
+from my earlier, wrong reading.
+
+### The guide
+
+- **Hand-written text.** `web/index.html` holds `PANEL_GUIDE`, one short
+  `what` per `PANELS` id plus `domain` / `tool` / `noTool`, and
+  `DASHBOARD_EXTRAS` for the map, both "at a glance" tiles and both
+  Insights panels. The `what` text is the only hand-written guide text.
+  REVIEW: owner to check the wording.
+- **Generated file.** `scripts/build-dashboard-guide.mjs` evaluates
+  `SECTIONS`, `PANELS`, `PANEL_GUIDE`, `DASHBOARD_EXTRAS`, `DATA_SOURCES`,
+  `getDataSourceLabel()` and the vintage sets in a sandbox, and writes
+  `supabase/functions/_shared/dashboard-guide.generated.ts`. For each panel
+  it records:
+  - id, tab, section, title, unit and `minRole`;
+  - the subtitle text for every vintage, both real and not real;
+  - the panel's info text, with threshold numbers as `{{rule_key.field}}`
+    tokens;
+  - `HARVEST_BAND`.
+- **No second copies.** Thresholds are filled on the server from
+  `anomaly_thresholds`, the table the dashboard reads, read as the caller.
+  The port of `interpolateThreshold` is checked against the dashboard's own
+  function on the same rows. Calibrated-GDD vintages in the
+  `get_derived_series` description come from the GDD labels. Nothing is
+  hard-coded twice.
+- **Keeping it in sync.** Run `node scripts/build-dashboard-guide.mjs` after
+  changing a panel, label, info text or `HARVEST_BAND`.
+  `tests/dashboard-guide.test.mjs` fails if:
+  - the generated file is stale;
+  - a panel has no guide entry, or an entry has no panel;
+  - any provenance differs from what the panel's subtitle shows for that
+    vintage, real or not.
+  The file embeds the current vintage, so the stale check also forces a
+  regeneration when the vintage rolls over.
+
+### How the model gets it (`chat/dashboard-guide.ts`, `chat/dashboard-context.ts`)
+
+- **System prompt.** `DASHBOARD_RULES` plus a compact map: every panel the
+  caller's role can see, with the current vintage's provenance and
+  "no data tool" where that applies. The role is the JWT-derived
+  `current_role_name()`. Unknown reality never claims "real"; both labels
+  are given instead.
+- **`get_dashboard_guide` tool** (chat-only, not added to the MCP tool list).
+  Returns full entries for a panel id or a tab: meaning, help text with live
+  thresholds, provenance by vintage, data tool. An operator-only id asked
+  for by a customer gets the same reply as an unknown id.
+- **Context.** The browser sends a structured `context`: tab, blocks,
+  vintages, panel, range, scroll, surface, `lastViewed`. The server:
+  - keeps only allowlisted values;
+  - narrows blocks to `accessible_blocks()`, naming none if that call fails;
+  - drops a panel the role can't see or that isn't on that tab;
+  - writes the `<dashboard_context>` text itself, including the selected
+    panel's full entry;
+  - attaches it to the question as a second text block;
+  - returns the turn as `done.user_turn`, which the browser stores in
+    history.
+  The old client-written `[Viewing: …]` prefix is gone. The Chat tab sends
+  the last-viewed data tab and filters, labelled "Last viewed" on the
+  bubble and in the context text.
+- **Rules.** Explain from the guide first. State provenance in the guide's
+  words. Say when no tool returns a panel's data, and never imply an
+  outside source. Label related measures as inference. Never describe
+  panels missing from the map. Compare values with bands without computing
+  gaps. No per-block versions of estate-wide series. `ANSWER_RULES` are
+  unchanged and still apply.
+
+### Shared tool descriptions (MCP change: diff the deployed `mcp` after deploy)
+
+- **`get_series`:**
+  - says the data is not on-site sensors and what each metric really is;
+  - lists the real metric keys (`precipitation`, not the old non-existent
+    `precip`);
+  - gives block ids B1–B3 and says to omit block for estate-wide data;
+  - every result now ends with a source note per vintage, in the dashboard's
+    words: SIMULATED where `domain_reality()` says so, a warning that solar
+    rows are not what the Solar panel plots, and an estate-wide note when a
+    block filter can't match real data.
+- **`get_derived_series`:** model output, calibrated GDD only for the
+  vintages the dashboard labels calibrated, ET0 Hargreaves from temperature
+  only.
+- **`get_anomalies`:** the wind rule runs on simulated wind.
+
+### Verification
+
+- Node **196/196**, Deno **96/96**, boundary check PASS. The launcher
+  browser check passed 74 of 74 with 0 real requests. Guide tests (11):
+  - staleness, coverage and provenance parity;
+  - honest labels;
+  - the solar regression;
+  - threshold parity;
+  - customer never gets operator entries (map, tool, tab listing, context);
+  - context validation;
+  - `get_series` source notes;
+  - tool descriptions;
+  - answer rules present.
+- **Before/after real questions: 6, the approved cap.** All asked as the
+  synthetic operator or HEALTH-CUST-B2, through a harness that refuses a
+  seventh. "Before" was the deployed function; "after" was this branch's
+  handler run locally.
+  - Solar, operator. Before: "I don't have a solar insolation metric … isn't
+    something I pulled". After: called `get_dashboard_guide(solar)`, said the
+    panel is simulated, explained how to read it, noted the stored ECMWF
+    solar isn't what it plots, and offered DTR/ET0 as proxies.
+  - GDD, operator. Before: called 2026 GDD "calibrated" (wrong). After: said
+    uncalibrated for 2026 and gave the 3550–4050 band. But it also computed
+    "roughly 700–1,200 GDD short", against the answer rules. A rule against
+    computing gaps to bands was added afterwards; it is not re-verified by a
+    real question.
+  - Solar, B2: simulated, no sensor at the estate. It offered "GDD for B2",
+    though GDD is estate-wide; the per-block rule was added afterwards,
+    also not re-verified.
+  - Lot lab history, operator: InnoVint, measured lab values, how to read a
+    Brix stall.
+- **Cost of the batch:** about $0.14 for the four local answers (Sonnet 5:
+  43,915 cache-write, 47,741 cache-read and 1,838 output tokens), plus the
+  two deployed answers at a similar size. Roughly $0.20–0.25 in total.
+
+### Found, for the owner to decide (not changed)
+
+- **Should Solar plot the real ECMWF solar rows** (2022–2025)? 2026 has none.
+- **Harvest/fruit reality is a static set** (`REAL_FRUIT_VINTAGES`), while
+  `domain_reality()` computes `harvest_receipts` live. If 2026 InnoVint
+  receipts now exist, the "Simulated weigh-tag record" label for 2026 is
+  wrong. Not checked: it was outside the approved queries.
+- **Irrigation 2026:** the volume chart is labelled simulated flow-meter;
+  "Irrigation by block" says farm records are being collected. Both are
+  true, but they read differently side by side.
+- **Soil moisture help text** says "active root zone", while the real data
+  is the 0–7 cm surface layer.
+- **The demo clock:** "Estate at a glance" says "Live · 02:20 PM", and
+  Solar's "Latest … 28 Jul 14:20" come from `MOCK_NOW`, not real time.
+  Solar's simulated curve also dips below zero on the axis.
+- **The wind anomaly rule** evaluates simulated wind, so a wind alert is not
+  a real condition.
+
+### After approval
+
+1. Deploy `chat` and `mcp` (both import `chat/tools.ts` and the generated
+   guide), download them, and diff against the branch.
+2. Deploy the frontend.
+3. Re-run `mcp-parity.mjs`: the `get_series` output now ends with a source
+   note.
+
+### Follow-ups closed before release (2026-10-12)
+
+1. **Soil moisture help text** now reads "the 0-7 cm surface layer (the
+   modelled layer, not the deeper root zone)", replacing "active root zone".
+2. **Demo clock labelled, clock unchanged.** `NOW` is `MOCK_NOW`.
+   - "Estate at a glance" now reads "Demo clock · <time>" instead of
+     "Live · <time>".
+   - A simulated panel's latest chip (`PANEL_LATEST` `.sim`, i.e. Solar)
+     ends with "(demo clock)".
+3. **Alerts from simulated data are marked, not removed.**
+   - Insights and Anomalies tags a hit "Demonstration · simulated data"
+     when `domain_reality()` says its metric is simulated for that vintage
+     (wind_high today; never on an unknown answer).
+   - Every winery hit is tagged, since every winery rule runs on simulated
+     data.
+   - `get_anomalies` adds `data: "DEMONSTRATION: evaluated on simulated data,
+     not a real condition"` to the same rows, plus a note telling the model
+     to say so.
+4. **2026 fruit receipts are real.** A read-only check found 4 InnoVint
+   receipts for 2026 in `harvest_receipts_current`, received 29 Sep-2 Oct:
+   B3 1.129 t and 5.759 t, B2 2.852 t, and one Cabernet Franc lot with no
+   block, 0.941 t. `domain_reality()` already reported 2026
+   `harvest_receipts` real.
+   - `REAL_FRUIT_VINTAGES` gains 2026, so the Fruit panel, the Harvest
+     section note and the guide now say "InnoVint grower receipts" and read
+     the real rows. The block-less lot is not counted, as in every vintage.
+   - Harvest is in progress, so the totals will grow as receipts sync.
+   - 2025 has no receipts and stays simulated.
+5. **Model turns no longer run together.** The chat function inserts a
+   paragraph break before the first text of a later model turn when the
+   reply so far did not end in whitespace, on both the Claude and Kimi
+   paths. Before this, the text ran together ("data.I can't").
+
+Guide regenerated. Node **199/199**, Deno **96/96**, boundary check PASS,
+`deno check` clean for chat and mcp, and `deno lint` on
+chat/mcp/_shared shows only the 2 pre-existing `tools.ts` findings. The
+mocked launcher browser check passed 74 of 74 with 0 real requests.

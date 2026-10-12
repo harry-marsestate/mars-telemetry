@@ -45,7 +45,7 @@ create index chat_events_flags on public.chat_events (created_at desc) where eve
 
 alter table public.chat_events enable row level security;
 
-revoke all on public.chat_events from anon, authenticated;
+revoke all on public.chat_events from public, anon, authenticated; -- PUBLIC explicitly, though tables get no PUBLIC grant by default
 grant insert (surface, event, turn_index, panel_id, question, answer) on public.chat_events to authenticated;
 grant select on public.chat_events to authenticated;
 

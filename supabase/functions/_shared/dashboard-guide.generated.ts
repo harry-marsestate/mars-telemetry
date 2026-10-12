@@ -184,8 +184,8 @@ export const DASHBOARD_GUIDE: {
           "notReal": "Simulated weigh-tag record"
         },
         "2026": {
-          "real": "Simulated weigh-tag record",
-          "notReal": "Simulated weigh-tag record"
+          "real": "InnoVint grower receipts",
+          "notReal": "InnoVint grower receipts"
         }
       }
     }
@@ -599,7 +599,7 @@ export const DASHBOARD_GUIDE: {
       "tool": "get_series metric=soil_moisture (real data is estate-wide: omit block)",
       "noTool": null,
       "what": "Soil water content, % by volume. Where real, it is the ERA5-Land model's surface layer (0-7 cm) for the whole estate, not a probe in each block, so there are no real per-block values; per-block lines appear only for simulated vintages. The shaded band is the deficit-irrigation target. ERA5-Land is published about five days late, so the newest real value trails other climate data.",
-      "info": "Percent of soil volume held as water in the active root zone. The shaded band is the deficit-irrigation target, deliberately kept below field capacity to concentrate flavor and manage canopy vigor — not a sign of stress unless it drops well under the band.",
+      "info": "Percent of soil volume held as water in the 0-7 cm surface layer (the modelled layer, not the deeper root zone). The shaded band is the deficit-irrigation target, deliberately kept below field capacity to concentrate flavor and manage canopy vigor — not a sign of stress unless it drops well under the band.",
       "provenance": {
         "2022": {
           "real": "Open-Meteo · ERA5-Land model (reanalysis), surface 0–7 cm · estate-wide, not per block",
@@ -1086,8 +1086,8 @@ export const DASHBOARD_GUIDE: {
           "notReal": "Simulated weigh-tag record"
         },
         "2026": {
-          "real": "Simulated weigh-tag record",
-          "notReal": "Simulated weigh-tag record"
+          "real": "InnoVint grower receipts · weigh-tag intake records",
+          "notReal": "InnoVint grower receipts · weigh-tag intake records"
         }
       }
     }

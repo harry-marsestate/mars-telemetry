@@ -9239,3 +9239,41 @@ from my earlier, wrong reading.
 2. Deploy the frontend.
 3. Re-run `mcp-parity.mjs`: the `get_series` output now ends with a source
    note.
+
+### Follow-ups closed before release (2026-10-12)
+
+1. **Soil moisture help text** now reads "the 0-7 cm surface layer (the
+   modelled layer, not the deeper root zone)", replacing "active root zone".
+2. **Demo clock labelled, clock unchanged.** `NOW` is `MOCK_NOW`.
+   - "Estate at a glance" now reads "Demo clock · <time>" instead of
+     "Live · <time>".
+   - A simulated panel's latest chip (`PANEL_LATEST` `.sim`, i.e. Solar)
+     ends with "(demo clock)".
+3. **Alerts from simulated data are marked, not removed.**
+   - Insights and Anomalies tags a hit "Demonstration · simulated data"
+     when `domain_reality()` says its metric is simulated for that vintage
+     (wind_high today; never on an unknown answer).
+   - Every winery hit is tagged, since every winery rule runs on simulated
+     data.
+   - `get_anomalies` adds `data: "DEMONSTRATION: evaluated on simulated data,
+     not a real condition"` to the same rows, plus a note telling the model
+     to say so.
+4. **2026 fruit receipts are real.** A read-only check found 4 InnoVint
+   receipts for 2026 in `harvest_receipts_current`, received 29 Sep-2 Oct:
+   B3 1.129 t and 5.759 t, B2 2.852 t, and one Cabernet Franc lot with no
+   block, 0.941 t. `domain_reality()` already reported 2026
+   `harvest_receipts` real.
+   - `REAL_FRUIT_VINTAGES` gains 2026, so the Fruit panel, the Harvest
+     section note and the guide now say "InnoVint grower receipts" and read
+     the real rows. The block-less lot is not counted, as in every vintage.
+   - Harvest is in progress, so the totals will grow as receipts sync.
+   - 2025 has no receipts and stays simulated.
+5. **Model turns no longer run together.** The chat function inserts a
+   paragraph break before the first text of a later model turn when the
+   reply so far did not end in whitespace, on both the Claude and Kimi
+   paths. Before this, the text ran together ("data.I can't").
+
+Guide regenerated. Node **199/199**, Deno **96/96**, boundary check PASS,
+`deno check` clean for chat and mcp, and `deno lint` on
+chat/mcp/_shared shows only the 2 pre-existing `tools.ts` findings. The
+mocked launcher browser check passed 74 of 74 with 0 real requests.

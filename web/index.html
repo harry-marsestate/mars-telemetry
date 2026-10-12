@@ -387,6 +387,7 @@ button{font-family:inherit; color:inherit; background:none; border:none; cursor:
 
 /* anomalies */
 .anom{display:flex; flex-direction:column; gap:9px; width:100%}
+.anom-demo{color:var(--warn); letter-spacing:.04em}
 .anom-i{display:flex; gap:12px; padding:11px 13px; border-radius:3px; background:var(--ink-3); border-left:2px solid var(--sev,var(--muted-2))}
 .anom-ic{font-family:var(--mono); font-size:14px; color:var(--sev); line-height:1.15; flex:none; width:14px; text-align:center}
 .anom-b{min-width:0; flex:1}
@@ -2629,7 +2630,13 @@ const IRRIGATION_REAL_VINTAGES = new Set([2023,2024]);
 //
 // Per-vintage BLOCK coverage is uneven and deliberately not smoothed over:
 //   2022 -> B1 only        2023 -> B1,B2,B3        2024 -> B2,B3 only
-const REAL_FRUIT_VINTAGES = new Set([2022,2023,2024]);
+//   2026 -> B2,B3 so far (added 2026-10-12 after a read-only check found 4
+//           real InnoVint receipts in harvest_receipts_current, received
+//           29 Sep-2 Oct, and domain_reality() already reporting
+//           harvest_receipts real for 2026; one Cabernet Franc lot has no
+//           block and, as in every vintage, is not counted. Harvest is
+//           still in progress, so the totals grow as receipts sync.)
+const REAL_FRUIT_VINTAGES = new Set([2022,2023,2024,2026]);
 
 // (No fruit-specific acreage constant. The earlier local-vs-InnoVint
 // discrepancy that justified one -- local 7.3ac vs InnoVint 8.25ac -- is
@@ -2873,7 +2880,7 @@ const PANELS = [
 /* ══ VINEYARD · SOIL & WATER ══ */
 {id:'soilmoist', tab:'vineyard', sect:'soil', span:'s8', minRole:'all', title:'Soil moisture', unit:'% VWC',
  sub:(c)=>getDataSourceLabel('soil_moisture',c.primary), range:'30D', perBlock:'soilMoist',
- info:"Percent of soil volume held as water in the active root zone. The shaded band is the deficit-irrigation target, deliberately kept below field capacity to concentrate flavor and manage canopy vigor — not a sign of stress unless it drops well under the band.",
+ info:"Percent of soil volume held as water in the 0-7 cm surface layer (the modelled layer, not the deeper root zone). The shaded band is the deficit-irrigation target, deliberately kept below field capacity to concentrate flavor and manage canopy vigor — not a sign of stress unless it drops well under the band.",
  render: async (b,c) => {
    const th = await getThresholds();
    const row = interpolateThreshold(th.byKey.get('soil_below_refill'), th.byKey);
@@ -4074,6 +4081,11 @@ async function renderAnomalies(box, ctx, tab){
         return !dom || isDomainReal(dom, v);
       });
     }
+    // Hits from simulated data (wind_high today) stay, marked as
+    // demonstration -- only where domain_reality() actually says simulated,
+    // never on an unknown answer.
+    const simulated = dom => !!dom && !!domainRealCache && !isDomainReal(dom, v);
+    rpcHits.forEach(h => { h.demo = simulated(RULE_METRIC_DOMAIN[h.metricKey]); });
     const irrigationGaps = gapsResult.status==='fulfilled' ? gapsResult.value : new Map();
     const gdd = gddResult.status==='fulfilled' ? gddResult.value : null;
     if(gapsResult.status==='rejected') console.error('irrigation gap fetch failed:', gapsResult.reason);
@@ -4092,7 +4104,7 @@ async function renderAnomalies(box, ctx, tab){
       .filter(r => isOperator || !OPERATOR_ONLY_RULE_DOMAINS.has(r.domain))
       .map(r=>{
         let out=null; try{out=r.test(c);}catch(e){}
-        return {sev:r.sev, out};}).filter(x=>x.out);
+        return {sev:r.sev, out, demo:simulated(r.domain)};}).filter(x=>x.out);
     hits=[...rpcHits, ...clientHits];
   } else if(tab==='winery'){
     const v=ctx.primary;
@@ -4137,7 +4149,9 @@ async function renderAnomalies(box, ctx, tab){
       const clientHits=RULES.filter(r=>r.tab===tab).map(r=>{
         let out=null; try{out=r.test(c);}catch(e){}
         return {sev:r.sev, out};}).filter(x=>x.out);
-      hits=[...rpcHits, ...clientHits];
+      // Every winery rule runs on simulated data (see the real-only note
+      // above), so every winery hit is a demonstration.
+      hits=[...rpcHits, ...clientHits].map(h=>({...h, demo:true}));
     }
   } else {
     const c={...ctx, end:endOf(ctx.primary,ctx.align)};
@@ -4165,7 +4179,7 @@ async function renderAnomalies(box, ctx, tab){
       wrap.innerHTML+=`<div class="anom-i" style="--sev:${col}">
         <div class="anom-ic">${h.sev==='alert'?'!':h.sev==='warn'?'~':'·'}</div>
         <div class="anom-b"><div class="anom-t">${h.out.t}</div>
-        <div class="anom-d">${h.out.d}</div><div class="anom-m">${h.out.m}</div></div></div>`;});
+        <div class="anom-d">${h.demo?'<span class="anom-demo">Demonstration · simulated data</span> · ':''}${h.out.d}</div><div class="anom-m">${h.out.m}</div></div></div>`;});
   }
 
   // Patterns: a second, separate section below Now -- urgency (Now) and
@@ -4936,8 +4950,10 @@ function paintPanelLatest(p, hd, c, l){
   if(l === undefined){ node.textContent = ''; return; }
   try{ const d = window.__panelData[p.id]; if(d) d.latest = l ? {t:l.t.toISOString(), v:l.v, interval:l.interval||null} : null; }catch(_){}
   const vin = L.vintage ? L.vintage(c) : c.primary;
+  // A simulated panel's latest point is stamped by the demo clock, not real
+  // time (PANEL_LATEST .sim entries), and says so.
   node.textContent = l
-    ? `${latestLead(l)}${c.compare?' ('+vin+')':''} · ${fmt(l.v, L.dec)} ${L.unit} · ${latestWhen(l)}`
+    ? `${latestLead(l)}${c.compare?' ('+vin+')':''} · ${fmt(l.v, L.dec)} ${L.unit} · ${latestWhen(l)}${L.sim?' (demo clock)':''}`
     : 'Latest · no reading';
 }
 
@@ -4949,7 +4965,9 @@ function paintPanelLatest(p, hd, c, l){
 function vineyardOverviewNote(c){
   return `${c.compare?'Comparing '+c.vintages.join(', ')+'<br>aligned to '+dstr(NOW)
     : (c.primary===CURRENT && !seasonStarted(CURRENT) ? `Vintage ${CURRENT} · off-season<br>season begins April 1`
-      : c.primary===CURRENT?'Live · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
+      // NOW is the simulated demo clock (MOCK_NOW), not the real time:
+      // labelled so it never reads as a live timestamp.
+      : c.primary===CURRENT?'Demo clock · '+NOW.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
        :'Vintage '+c.primary+' archive · static')}<br>${c.blocks.length} of 3 blocks in view`;
 }
 

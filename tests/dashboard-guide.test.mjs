@@ -173,3 +173,40 @@ test('the answer rules stay in force beside the dashboard rules', () => {
   assert.match(src, /dashboardMap\(role, domainReality\)/, 'map built from the JWT-derived role');
   assert.match(src, /validateContext\(rawContext, role, accessible\)/);
 });
+
+// ── Phase 0 follow-ups (2026-10-12) ──────────────────────────────────────
+import { runTool } from '../supabase/functions/chat/tools.ts';
+const HTML = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+
+test('get_anomalies marks results from simulated data as DEMONSTRATION, and only those', async () => {
+  const rows = [{ metric_key: 'wind_speed', title: 'High wind' }, { metric_key: 'humidity', title: 'Humid' }, { metric_key: 'mystery', title: 'X' }];
+  const db = { rpc: async () => ({ data: rows, error: null }) };
+  const r = await runTool(db, 'get_anomalies', { vintage: 2026 }, 'all', reality);
+  const out = JSON.parse(r.content.split('\n\n')[0]);
+  assert.equal(out.length, 3, 'no rule removed');
+  assert.match(out[0].data, /^DEMONSTRATION: evaluated on simulated data/);
+  assert.equal(out[1].data, undefined, 'real humidity left alone');
+  assert.equal(out[2].data, undefined, 'unknown domain never marked');
+  assert.match(r.content, /1 result is from simulated data and marked DEMONSTRATION/);
+  // Unknown reality (domain_reality failed): nothing is marked.
+  const r2 = await runTool(db, 'get_anomalies', { vintage: 2026 }, 'all', new Map());
+  assert.doesNotMatch(r2.content, /DEMONSTRATION/);
+});
+
+test('dashboard: demo-clock times and simulated alerts are labelled; soil help says surface layer; 2026 fruit is real', () => {
+  assert.match(HTML, /'Demo clock · '\+NOW\.toLocaleTimeString/);
+  assert.doesNotMatch(HTML, /'Live · '\+NOW/);
+  assert.match(HTML, /\$\{L\.sim\?' \(demo clock\)':''\}/);
+  assert.match(HTML, /h\.demo\?'<span class="anom-demo">Demonstration · simulated data<\/span> · ':''/);
+  assert.match(HTML, /hits=\[\.\.\.rpcHits, \.\.\.clientHits\]\.map\(h=>\(\{\.\.\.h, demo:true\}\)\)/, 'every winery hit is simulated');
+  assert.match(G.panels.find((p) => p.id === 'soilmoist').info, /0-7 cm surface layer/);
+  assert.doesNotMatch(G.panels.find((p) => p.id === 'soilmoist').info, /active root zone/);
+  assert.match(provenance(G.panels.find((p) => p.id === 'fruit'), 2026, reality), /^InnoVint grower receipts/);
+  assert.match(provenance(G.panels.find((p) => p.id === 'fruit'), 2025, reality), /^Simulated weigh-tag/);
+});
+
+test('chat: text from a later model turn is separated from the earlier one', () => {
+  const src = readFileSync(new URL('../supabase/functions/chat/index.ts', import.meta.url), 'utf8');
+  assert.match(src, /if \(firstOfTurn && i > 0 && lastChar && !\/\\s\/\.test\(lastChar\) && !\/\^\\s\/\.test\(delta\)\) send\(\{ type: "text", text: "\\n\\n" \}\);/);
+  assert.match(src, /if \(prev && !\/\\s\$\/\.test\(prev\) && !\/\^\\s\/\.test\(b\.text\)\) events\.push\(\{ type: "text", text: "\\n\\n" \}\);/);
+});

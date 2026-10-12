@@ -568,7 +568,18 @@ async function getAnomalies(supabase: any, input: Record<string, unknown>, dataM
       filteredNote = `\n\n(${before - rows.length} rule${before - rows.length === 1 ? "" : "s"} omitted: this account is real-only and that data is simulated for ${p_vintage}.)`;
     }
   }
-  return { content: JSON.stringify(rows) + filteredNote, isError: false };
+  // A rule evaluated on simulated data (wind_high today) is kept but marked,
+  // matching the dashboard's "Demonstration · simulated data" tag: only when
+  // domain_reality() says simulated, never on an unknown answer.
+  let demo = 0;
+  rows = rows.map((row) => {
+    const domain = RULE_METRIC_DOMAIN[row.metric_key];
+    if (!domain || !domainReality.has(domain) || isDomainReal(domainReality, domain, p_vintage)) return row;
+    demo++;
+    return { ...row, data: "DEMONSTRATION: evaluated on simulated data, not a real condition" };
+  });
+  const demoNote = demo ? `\n\n(${demo} result${demo === 1 ? " is" : "s are"} from simulated data and marked DEMONSTRATION: say so, and never present ${demo === 1 ? "it" : "them"} as a real condition.)` : "";
+  return { content: JSON.stringify(rows) + filteredNote + demoNote, isError: false };
 }
 
 // lot_canonical_map (2026-09-20): InnoVint carries genuine duplicate lot

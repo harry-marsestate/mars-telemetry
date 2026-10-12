@@ -82,6 +82,10 @@ async function attemptKimi(
       const stopReason = turn.stopReason;
       for (const b of content) {
         if (b.type === "text" && b.text) {
+          // Text from a later model turn continues the same reply: keep a
+          // paragraph break between them ("data.I can't" otherwise).
+          const prev = events.findLast((e) => e.type === "text")?.text as string | undefined;
+          if (prev && !/\s$/.test(prev) && !/^\s/.test(b.text)) events.push({ type: "text", text: "\n\n" });
           sawText = true;
           events.push({ type: "text", text: b.text });
         }
@@ -249,6 +253,7 @@ export default {
           const send = (event: Record<string, unknown>) =>
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
           let sawText = false;
+          let lastChar = ""; // last character streamed, across model turns
           let usedFallback = false;
 
           try {
@@ -361,8 +366,17 @@ export default {
               // this is near-theoretical -- but if one ever does, showing what
               // the model actually said beats the old behaviour of silently
               // discarding it.
+              // The first text of a later model turn (after a tool round) gets a
+              // paragraph break if the reply so far didn't end in whitespace;
+              // otherwise the two turns ran together ("data.I can't").
+              let firstOfTurn = true;
               modelStream.on("text", (delta: string) => {
-                if (delta) { sawText = true; send({ type: "text", text: delta }); }
+                if (!delta) return;
+                if (firstOfTurn && i > 0 && lastChar && !/\s/.test(lastChar) && !/^\s/.test(delta)) send({ type: "text", text: "\n\n" });
+                firstOfTurn = false;
+                sawText = true;
+                lastChar = delta.slice(-1);
+                send({ type: "text", text: delta });
               });
 
               const response = await modelStream.finalMessage();

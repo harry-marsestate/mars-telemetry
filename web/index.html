@@ -5221,6 +5221,29 @@ let chatRole = null; // set in initChat -- gates the per-message model attributi
 const MODEL_LABELS = { claude: 'Sonnet 5', kimi: 'Kimi K3' };
 
 const LOG=$('#chatlog');
+
+// A conversation belongs to exactly one signed-in user and is never carried
+// to another. chatHistory replays raw tool results (operator-only rows
+// included) on every request, so a turn that crossed accounts would hand one
+// user's data to the next user's model context. resetChat() wipes every piece
+// of chat state and bumps chatGen; ask() and initChat() capture chatGen when
+// they start and drop their result if it has moved on, so a request still
+// streaming when its user signs out can never write into whoever signs in
+// next. The abort only saves the wasted stream -- the generation check is
+// what makes the write-back impossible.
+let chatGen = 0;
+let chatAbort = null; // AbortController for the request in flight, if any
+function resetChat(){
+  chatGen++;
+  if(chatAbort){ chatAbort.abort(); chatAbort = null; }
+  chatHistory = [];
+  chatRole = null;
+  chatModelProvider = 'claude';
+  LOG.innerHTML = '';
+  $('#chipPanel').innerHTML = ''; // operator chips can name a real lot
+  $('#chatin').value = ''; $('#chatin').style.height = 'auto';
+}
+
 function addMsg(who, html){
   const m=el('div','msg '+(who==='u'?'u':'a'));
   m.innerHTML=`<div class="msg-av">${who==='u'?'Y':'M'}</div>
@@ -5412,6 +5435,8 @@ async function ask(q){
   // a synthesised partial turn would be missing its pairs and 400 the next
   // request.
   const pending=[...chatHistory,{role:'user', content:q}];
+  const gen=chatGen, ac=new AbortController(); // see resetChat()
+  chatAbort=ac;
 
   let buf='', status='', done=null, failed=null, frame=null;
 
@@ -5430,7 +5455,8 @@ async function ask(q){
   };
   const schedule=()=>{ if(frame===null) frame=requestAnimationFrame(paint); };
 
-  const {data, error} = await sb.functions.invoke('chat', {body:{messages:pending, modelProvider:chatModelProvider}});
+  const {data, error} = await sb.functions.invoke('chat', {body:{messages:pending, modelProvider:chatModelProvider}, signal:ac.signal});
+  if(gen!==chatGen) return; // signed out (or another user signed in) while waiting
   if(error){
     let message=error.message;
     if(error.context && typeof error.context.json==='function'){
@@ -5454,6 +5480,7 @@ async function ask(q){
   try{
     for(;;){
       const {done:streamDone, value} = await reader.read();
+      if(gen!==chatGen){ reader.cancel().catch(()=>{}); return; }
       if(streamDone) break;
       sse += dec.decode(value,{stream:true});
       let cut;
@@ -5474,6 +5501,8 @@ async function ask(q){
   }
 
   if(frame!==null){ cancelAnimationFrame(frame); frame=null; }
+  if(chatAbort===ac) chatAbort=null;
+  if(gen!==chatGen) return; // the read that threw may have been resetChat()'s abort
   const stick=atLogBottom();
   if(done && !failed){
     // The ONLY success path, and the only place chatHistory is written.
@@ -5555,9 +5584,9 @@ const CUSTOMER_SUGGESTIONS = [
 // background token refresh for the same user doesn't wipe an in-progress
 // conversation.
 async function initChat(session, role){
-  chatHistory = [];
+  resetChat();
+  const gen = chatGen; // the awaits below must not paint a greeting for a user who has since gone
   chatRole = role; // gates the per-message model attribution tag in ask()
-  LOG.innerHTML = '';
 
   // Per-conversation, not persisted -- resets to Claude on every new chat
   // (initChat runs on first sign-in and on a real user change, see the note
@@ -5576,11 +5605,13 @@ async function initChat(session, role){
   // fields are set for anyone reaching this point, same as
   // updateHeaderForSession() -- no fallback chain needed.
   const { data: profile } = await sb.from('user_profiles').select('first_name, last_name').eq('id', session.user.id).single();
+  if(gen !== chatGen) return;
   const greetName = escapeHtml(role==='operator' ? profile.first_name : `${profile.first_name} ${profile.last_name}`);
 
   let groups;
   if(role==='operator'){
     const { data: recentBrix } = await sb.from('lot_analyses').select('lot_name').eq('analysis_type','brix').order('recorded_at',{ascending:false}).limit(1);
+    if(gen !== chatGen) return;
     groups = operatorSuggestions(recentBrix?.[0]?.lot_name);
   } else {
     groups = CUSTOMER_SUGGESTIONS;
@@ -5756,6 +5787,27 @@ $$('.logo-img').forEach(img=>img.src=LOGO_SRC);
 /* §10 ── SESSION GATE (Phase 6.4/6.5) ─────────────────── */
 let dashboardBooted=false;
 
+// What one signed-in user's session left rendered in the page, cleared on
+// sign-out and on any user change (docs/SECURITY.md, "Chat history is never
+// carried across users"). resetTabViews() only drops the render CACHE: a tab
+// the new user has not opened yet kept the previous user's panels -- cellar,
+// lots, vessels, fruit for an operator -- in its hidden DOM, readable in
+// DevTools on a shared computer, until first opened. The same goes for the
+// User Management lists (pending users' emails, accounts, API keys,
+// including a one-time key still on screen). Each host is rebuilt from
+// scratch the next time it is shown (renderTab, the queue loaders).
+function resetUserDom(){
+  ['#body-vineyard','#body-winery','#f-vineyard','#f-winery',
+   '#queue-list','#accounts-list','#keys-once','#keys-create','#keys-table']
+    .forEach(s=>{ const e=$(s); if(e) e.innerHTML=''; });
+  if(clearOneTimeKey) clearOneTimeKey();
+  hideTip();
+  // Re-render the tab on screen for whoever signs in next, even when the
+  // user changes without a sign-out in between.
+  dashboardBooted=false;
+  unsubscribeOverviewRealtime();
+}
+
 // Central place to update if the customer/operator labels change again --
 // role itself stays 'operator'/'customer' everywhere in the database and
 // RLS; this only maps how it's displayed.
@@ -5832,11 +5884,14 @@ function showFinishProfileOnly(prefill){
 let sessionMetaFingerprint = null; // what the last gate pass read, see sessionMetaVersion
 async function runSessionGate(){
   const { data: { session } } = await sb.auth.getSession();
-  if(!session){ chatUserId=null; THRESHOLDS=null; thresholdsPromise=null; invalidateDataCache(); showAuthOnly(); return; }
+  if(!session){ resetChat(); resetUserDom(); chatUserId=null; THRESHOLDS=null; thresholdsPromise=null; invalidateDataCache(); showAuthOnly(); return; }
   _userRolePromise=null; /* always re-check fresh, not a stale cached role from a prior session */
   // Another account's cached readings must never be shown to this one
   // (RLS differs per user): drop every cache on a user change.
-  if(session.user.id !== chatUserId){ invalidateDataCache(); resetTabViews(); _latestPatternsCache = null; _accessibleBlocksPromise = null; }
+  // The chat goes too, at once -- not only when the next approved user's
+  // initChat() runs further down, which a pending or unnamed account never
+  // reaches.
+  if(session.user.id !== chatUserId){ resetChat(); resetUserDom(); chatUserId=null; invalidateDataCache(); resetTabViews(); _latestPatternsCache = null; _accessibleBlocksPromise = null; }
 
   // Gated for EVERY role/status/provider, checked every login, ahead of
   // even the pending-approval screen -- a not-yet-approved signup with no

@@ -8686,3 +8686,77 @@ Deploy `chat` and `mcp` (both import `chat/tools.ts`), then download each and
 diff against main. Re-run `mcp-parity.mjs` (it now also exercises
 `ets_lot_bridge` and `vessels` reads) and the sweep through the gateway,
 expecting 0 / 0 / 1.
+
+## Chat history is never carried across users (2026-10-12)
+
+**Defect.** The in-app chat keeps its conversation only in browser memory
+(`chatHistory` in `web/index.html` §8); the `chat` function is stateless and
+replays whatever history the browser sends. On sign-out `runSessionGate` only
+set `chatUserId = null`. The history, the rendered log, the draft and the
+operator suggestion chips (one names a real lot) stayed in the page until the
+next approved user's `initChat()` ran. Worse, an answer still streaming at
+sign-out kept running, and its `done` handler then wrote
+`chatHistory = pending.concat(appended)`. If another account had signed in by
+then, that account's history held the previous user's turns, including raw
+tool results (operator-only rows for an operator), and its next question sent
+them to the model. RLS was never bypassed (every tool call runs on the caller's
+own JWT), but rows already fetched for one user could reach another user's
+answers on a shared computer.
+
+**Fix.**
+- `resetChat()` clears every piece of chat state: history, role, model choice,
+  log, suggestion chips and draft. It aborts the request in flight and bumps a
+  generation counter, `chatGen`.
+- `ask()` and `initChat()` record `chatGen` when they start and re-check it
+  after every await. A result from an older generation is dropped, so a stale
+  `done` can never be committed and a stale greeting is never painted. The
+  generation check is what guarantees this; the abort only saves the stream.
+- `runSessionGate` calls `resetChat()` as soon as there is no session and as
+  soon as the session's user differs from the chat's owner. That runs before
+  the pending, finish-profile and approval branches, so a pending or unnamed
+  account never inherits a page that still holds someone else's chat. A token
+  refresh for the same user is unchanged and keeps the conversation.
+- Still nothing is persisted: no localStorage, sessionStorage or server-side
+  history. A reload starts a fresh chat.
+
+**Tests.** `tests/chat-cross-user.test.mjs` loads the chat section of
+`index.html` into a Node `vm` with a fake DOM (`tests/helpers/chat-harness.mjs`)
+and drives a scripted SSE stream. Cases: an answer mid-stream at sign-out, a
+request not yet returned at sign-out, a greeting still loading, and the reset
+contents; plus a static check on `runSessionGate`. Against main 5 of 6 fail;
+with the fix 6 of 6 pass. Full suite: Node 147/147 (was 141), Deno 96/96,
+boundary check PASS.
+
+**Rendered dashboard DOM (added to this fix, 2026-10-12).** Same class of
+defect, outside the chat: `resetTabViews()` drops the render cache on a user
+change, not the DOM. After an operator opened Winery and signed out, the
+next user's page still held the operator's cellar, lot, vessel and fruit
+panels in the hidden Winery tab until first opened. Confirmed on main with
+the synthetic operator then HEALTH-CUST-B2 (`#body-winery` panels:
+`anom-w, cellart, cellarh, ferm, tanks, fruit`).
+
+`resetUserDom()` now runs beside `resetChat()` on sign-out and on any user
+change. It clears:
+- both data tab bodies and filter bars;
+- the User Management lists (pending users' emails, accounts, API keys);
+- a one-time API key still on screen (`clearOneTimeKey`);
+- the tooltip.
+
+It also sets `dashboardBooted = false` and unsubscribes overview Realtime, so
+the visible tab is re-rendered for the new user even when the user changes
+without a sign-out in between. After the fix, the same sequence leaves
+`#body-winery` empty.
+
+`tests/user-dom-reset.test.mjs` runs `resetUserDom()` itself against a fake
+DOM and checks `runSessionGate` calls it on both paths, before any role
+branch. Node 149/149. `p3-frontend.mjs --dry-run --users operator,customer_b2`
+is unchanged: 13 pass, and the 4 gateway checks need `P3_MCP_KEY`.
+
+**Residual, not fixed:** a tab render already in flight when the user
+changes can still finish into the cleared host. It would paint rows fetched
+under the previous user's token, and only if the switch lands mid-render.
+Closing it needs a generation check like `chatGen` across `renderTab`'s
+awaits; this is noted rather than done here because it touches every panel
+render path.
+
+**Deploy.** Frontend only (`web/index.html`); no Edge Function or migration.

@@ -150,11 +150,14 @@ const plainify = (t) => String(t ?? '').replace(/(?<![(\w.-])P([1-4])\b(?![)\w-]
   ({ 1: 'database self-check (P1)', 2: 'data-source check (P2)', 3: 'dashboard test (P3)', 4: 'gateway self-check (P4)' })[n]);
 const STATE_PLAIN = { fail: 'failed', warn: 'warning', error: 'could not run' };
 // A recorded observed/expected value as "key: value; ..." rather than raw JSON.
+// Upstream errors sometimes carry a whole HTML error page; keep just its text.
+const stripHtml = (t) => String(t).replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<\/?[a-z][^>]*>?/gi, ' ')
+  .replace(/(\b[\w ]{3,60}\b)(\s+\1)+/g, '$1').replace(/\s+/g, ' ').trim();
 function plainValue(v) {
   if (v == null || v === '') return '(none recorded)';
-  if (typeof v !== 'object') return plainify(v);
+  if (typeof v !== 'object') return plainify(stripHtml(v));
   const one = (x) => x == null ? 'none' : typeof x === 'boolean' ? (x ? 'yes' : 'no') : Array.isArray(x) ? (x.length ? x.map(one).join(', ') : 'none')
-    : typeof x === 'object' ? (Object.keys(x).length ? JSON.stringify(x) : 'none') : String(x);
+    : typeof x === 'object' ? (Object.keys(x).length ? JSON.stringify(x) : 'none') : stripHtml(x);
   if (Array.isArray(v)) return one(v);
   const e = Object.entries(v);
   return e.length ? plainify(e.map(([k, x]) => `${k.replace(/_/g, ' ')}: ${one(x)}`).join('; ')) : '(none recorded)';
@@ -468,7 +471,7 @@ async function main() {
   const p3ok = producers.p3_frontend && !stale.has('p3_frontend');
   const passes = (id, prod) => (prod === 'p1' ? p1ok : p3ok) && !findings.some((f) => f.check_id === id && f.severity !== 'LOW');
   const disagree = (id, prod, observed, expected) => {
-    if (passes(id, prod)) add('HIGH', 'gateway', id, `Health check ${id} disagrees with direct observation`, observed, expected,
+    if (passes(id, prod)) add('HIGH', 'gateway', id, `The platform's own check passed, but this report's spot check disagrees: ${checkPlain(id)}`, observed, expected,
       `${nextStep(id)} Also check whether the health check itself is still testing what it should.`);
   };
 
@@ -531,12 +534,18 @@ async function main() {
     const truncated = v.data?.truncated === true || (total != null && rows.length < total);
     const suspect = truncated ? null : rows.filter((r) => Number(r.capacity_gal) >= 500000).length;
     const active = rows.filter((r) => r.archived === false).length;
-    const baseSuspect = baselines['database.vessels.counts']?.capacity_suspect ?? null;
-    obs.spot.vessels = { total, capacity_suspect: suspect, base_suspect: baseSuspect, active: truncated ? null : active };
-    if (total !== 241) {
-      add('MEDIUM', 'database', 'spot.vessels_total', `Vessel count changed to ${total}`, `total_count ${total}`, '241', nextStep('database.vessels.counts'));
-      disagree('database.vessels.counts', 'p1', `get_vessels total_count ${total}`, '241');
-      disagree('gateway.tools.vessels_vs_rest', 'p3', `get_vessels total_count ${total}`, '241');
+    const vb = baselines['database.vessels.counts'] || {};
+    const baseSuspect = vb.capacity_suspect ?? null;
+    obs.spot.vessels = { total, capacity_suspect: suspect, base_suspect: baseSuspect, active: truncated ? null : active, base_total: vb.total ?? null, base_active: vb.active ?? null };
+    // Same rule as the platform's own vessel check: new tanks are normal
+    // operations, so the total only informs; a problem is no tanks in use,
+    // or the number in use moving more than 25% from the baseline.
+    if (!truncated && active === 0) {
+      add('HIGH', 'database', 'spot.vessels_active', 'No tanks or vessels are marked as in use', '0 in use', 'at least 1', nextStep('database.vessels.counts'));
+      disagree('database.vessels.counts', 'p1', '0 vessels in use', 'at least 1');
+    } else if (!truncated && vb.active && Math.abs(active - vb.active) / vb.active > 0.25) {
+      add('MEDIUM', 'database', 'spot.vessels_active', `Tanks in use moved more than 25% from the baseline (${vb.active} to ${active})`, `${active} in use`, `within 25% of ${vb.active}`, nextStep('database.vessels.counts'));
+      disagree('database.vessels.counts', 'p1', `${active} vessels in use`, `within 25% of ${vb.active}`);
     }
     if (suspect == null) nc('spot.vessels_capacity_suspect', 'get_vessels rows were capped, so the placeholder-capacity count is unreliable', 'placeholder-capacity vessel count (results capped)');
     else if (baseSuspect == null) nc('spot.vessels_capacity_suspect', 'no database.vessels.counts baseline available', 'placeholder-capacity vessel count (no baseline)');
@@ -781,7 +790,7 @@ function build() {
     : `Soil moisture, 1-8 Jul 2024: no Block 2 values (soil is recorded for the whole estate)${s.soil_estate ? `; estate-wide ${s.soil_estate.min}-${s.soil_estate.max}% across ${s.soil_estate.non_null} days, within the possible 0-100%` : ''}` });
   if (s.gdd_2024) ic.push({ text: `2024 growing degree days (the season's total heat, calibrated, final): ${s.gdd_2024.value.toLocaleString('en-US')} on ${s.gdd_2024.day} (expected 3,000-4,400, about 4,058)` });
   for (const k of Object.keys(s).filter((k) => k.startsWith('anomalies_'))) ic.push({ text: `Vineyard alerts on a known test day (${k.slice(10)}): ${s[k].total} (expected ${s[k].want}) - ${s[k].rules.map((r) => r.replace(/_/g, ' ')).join(', ')}` });
-  if (s.vessels) ic.push({ text: `Tanks and vessels (from InnoVint): ${s.vessels.total} total (expected 241), ${s.vessels.active} in use, ${s.vessels.capacity_suspect} still showing the 500,000-gallon placeholder capacity (was ${s.vessels.base_suspect})` });
+  if (s.vessels) ic.push({ text: `Tanks and vessels (from InnoVint): ${s.vessels.total} total${s.vessels.base_total != null && s.vessels.base_total !== s.vessels.total ? ` (${s.vessels.base_total} when the baseline was set; new tanks are normal)` : ''}, ${s.vessels.active} in use${s.vessels.base_active != null ? ` (baseline ${s.vessels.base_active}; a move of more than 25% is flagged)` : ''}, ${s.vessels.capacity_suspect} still showing the 500,000-gallon placeholder capacity (baseline ${s.vessels.base_suspect})` });
   const labNames = { get_berry_maturity: 'berry maturity', get_smoke_markers: 'smoke marker', get_wine_lab_results: 'wine lab result' };
   if (Object.keys(obs.lab).length) {
     ic.push({ text: `ETS Labs data: ${Object.entries(labNames).filter(([k]) => obs.lab[k]).map(([k, v]) => `${obs.lab[k].rows} ${v} samples`).join(', ')}`, sub: [
